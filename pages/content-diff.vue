@@ -33,7 +33,7 @@
               :key="op.value"
               :color="operation === op.value ? 'primary' : 'gray'"
               :variant="operation === op.value ? 'solid' : 'outline'"
-              @click="operation = op.value"
+              @click="operation = op.value; execute()"
             >
               {{ op.label }}
             </UButton>
