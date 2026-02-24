@@ -20,7 +20,6 @@
     "vue": "^3.4.0"
   },
   "devDependencies": {
-    "@nuxt/devtools": "^1.4.0",
     "typescript": "^5.5.0",
     "wrangler": "^3.60.0"
   },
