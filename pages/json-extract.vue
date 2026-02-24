@@ -182,7 +182,7 @@ const showHelp = ref(false)
 const resultCount = ref(-1)
 
 const options = reactive({
-  unique: false,
+  unique: true,
   sort: false,
   reverse: false,
   compact: true
