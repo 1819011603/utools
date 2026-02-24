@@ -3,14 +3,14 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=18.0.0 <22.0.0"
+    "node": ">=18.0.0"
   },
   "scripts": {
     "build": "nuxt build",
     "dev": "nuxt dev",
     "generate": "nuxt generate",
     "preview": "nuxt preview",
-    "postinstall": "nuxt prepare",
+    "postinstall": "npx nuxi prepare || true",
     "deploy": "npm run generate && wrangler pages deploy .output/public"
   },
   "dependencies": {

@@ -1,12 +1,12 @@
 export default defineNuxtConfig({
-  devtools: { enabled: true },
+  devtools: { enabled: false },
   
   modules: ['@nuxt/ui'],
   
   ssr: false,
   
   nitro: {
-    preset: 'cloudflare-pages'
+    preset: 'cloudflare-pages-static'
   },
   
   app: {
