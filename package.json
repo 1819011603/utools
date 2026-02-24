@@ -1,0 +1,27 @@
+{
+  "name": "utools",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "nuxt build",
+    "dev": "nuxt dev",
+    "generate": "nuxt generate",
+    "preview": "nuxt preview",
+    "postinstall": "nuxt prepare",
+    "deploy": "npm run generate && wrangler pages deploy .output/public"
+  },
+  "dependencies": {
+    "@nuxt/ui": "^2.18.0",
+    "@vueuse/core": "^10.11.0",
+    "nuxt": "^3.13.0",
+    "vue": "^3.4.0"
+  },
+  "devDependencies": {
+    "@nuxt/devtools": "^1.4.0",
+    "typescript": "^5.5.0",
+    "wrangler": "^3.60.0"
+  },
+  "overrides": {
+    "tailwindcss": "3.4.17"
+  }
+}
