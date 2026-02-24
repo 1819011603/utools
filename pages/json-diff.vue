@@ -199,7 +199,7 @@ interface ArrayPathInfo {
   countA: number
   countB: number
   suggestedKeys: string[]
-  matchKey: string | null
+  matchKey: string | undefined
 }
 
 const inputA = ref('')
@@ -230,7 +230,7 @@ const commonIdFields = ['id', 'key', 'code', 'name', 'uuid', 'ID', 'Id', 'number
 
 const getKeyOptions = (ap: ArrayPathInfo) => {
   return [
-    { label: '(按索引对比)', value: null },
+    { label: '(按索引对比)', value: undefined },
     ...ap.suggestedKeys.map(k => ({ label: k, value: k }))
   ]
 }
@@ -262,7 +262,7 @@ const analyzeArrayPaths = (objA: any, objB: any, path = '', results: ArrayPathIn
           countA: objA.length,
           countB: objB.length,
           suggestedKeys,
-          matchKey: suggestedKeys.length > 0 ? suggestedKeys[0] : null
+          matchKey: suggestedKeys.length > 0 ? suggestedKeys[0] : undefined
         })
       }
 
@@ -316,7 +316,7 @@ const analyze = () => {
 
 const debouncedAnalyze = useDebounceFn(analyze, 500)
 
-const getMatchKeyForPath = (path: string): string | null => {
+const getMatchKeyForPath = (path: string): string | undefined => {
   for (const ap of arrayPaths.value) {
     if (path === ap.path || path.startsWith(ap.path + '[') || path.startsWith(ap.path + '.')) {
       if (path === ap.path || path.replace(/\[\d+\]/g, '[]').startsWith(ap.path.replace(/\[\d+\]/g, '[]'))) {
@@ -329,7 +329,7 @@ const getMatchKeyForPath = (path: string): string | null => {
       return ap.matchKey
     }
   }
-  return null
+  return undefined
 }
 
 const deepCompare = (a: any, b: any, path: string): DiffItem[] => {
