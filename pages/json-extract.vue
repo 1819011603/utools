@@ -76,7 +76,7 @@
 
             <div class="flex gap-2 items-center">
               <span class="text-sm text-gray-600 dark:text-gray-400">输出格式:</span>
-              <URadioGroup v-model="outputFormat" :options="formatOptions" @change="autoExtract" />
+              <URadioGroup v-model="outputFormat" :options="formatOptions" @change="() => { autoExtract(); saveSettings() }" />
             </div>
 
             <div class="flex gap-2">
@@ -181,14 +181,41 @@ const error = ref('')
 const showHelp = ref(false)
 const resultCount = ref(-1)
 
+const STORAGE_KEY = 'json-extract-settings'
+
+const loadSettings = () => {
+  if (typeof window === 'undefined') return null
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY)
+    return saved ? JSON.parse(saved) : null
+  } catch {
+    return null
+  }
+}
+
+const saveSettings = () => {
+  if (typeof window === 'undefined') return
+  try {
+    const settings = {
+      options: { ...options },
+      outputFormat: outputFormat.value
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings))
+  } catch (e) {
+    console.error('保存设置失败:', e)
+  }
+}
+
+const savedSettings = loadSettings()
+
 const options = reactive({
-  unique: true,
-  sort: false,
-  reverse: false,
-  compact: true
+  unique: savedSettings?.options?.unique ?? true,
+  sort: savedSettings?.options?.sort ?? false,
+  reverse: savedSettings?.options?.reverse ?? false,
+  compact: savedSettings?.options?.compact ?? true
 })
 
-const outputFormat = ref('lines')
+const outputFormat = ref(savedSettings?.outputFormat ?? 'lines')
 const formatOptions = [
   { label: '每行一个', value: 'lines' },
   { label: 'JSON 数组', value: 'json' },
@@ -462,6 +489,7 @@ const autoExtract = () => {
   if (input.value.trim() && fieldPath.value.trim()) {
     extract()
   }
+  saveSettings()
 }
 
 const loadExample = () => {

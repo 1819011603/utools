@@ -186,15 +186,45 @@
 </template>
 
 <script setup lang="ts">
+const STORAGE_KEY = 'content-diff-settings'
+
+const loadSettings = () => {
+  if (typeof window === 'undefined') return null
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY)
+    return saved ? JSON.parse(saved) : null
+  } catch {
+    return null
+  }
+}
+
+const saveSettings = () => {
+  if (typeof window === 'undefined') return
+  try {
+    const settings = {
+      operation: operation.value,
+      separatorType: separatorType.value,
+      customSeparator: customSeparator.value
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings))
+  } catch (e) {
+    console.error('保存设置失败:', e)
+  }
+}
+
+const savedSettings = loadSettings()
+
 const inputA = ref('')
 const inputB = ref('')
 const output = ref('')
-const operation = ref('a-b')
-const separatorType = ref('newline')
-const customSeparator = ref('')
+const operation = ref(savedSettings?.operation ?? 'a-b')
+const separatorType = ref(savedSettings?.separatorType ?? 'newline')
+const customSeparator = ref(savedSettings?.customSeparator ?? '')
 const countA = ref(-1)
 const countB = ref(-1)
 const resultCount = ref(-1)
+
+watch([operation, separatorType, customSeparator], saveSettings)
 
 const separatorOptions = [
   { label: '换行', value: 'newline' },

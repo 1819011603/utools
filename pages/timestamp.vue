@@ -86,8 +86,34 @@
 <script setup lang="ts">
 import { useDebounceFn } from '@vueuse/core'
 
+const STORAGE_KEY = 'timestamp-settings'
+
+const loadSettings = () => {
+  if (typeof window === 'undefined') return null
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY)
+    return saved ? JSON.parse(saved) : null
+  } catch {
+    return null
+  }
+}
+
+const saveSettings = () => {
+  if (typeof window === 'undefined') return
+  try {
+    const settings = {
+      timezone: timezone.value
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings))
+  } catch (e) {
+    console.error('保存设置失败:', e)
+  }
+}
+
+const savedSettings = loadSettings()
+
 const input = ref('')
-const timezone = ref('local')
+const timezone = ref(savedSettings?.timezone ?? 'local')
 const error = ref('')
 const result = ref<{
   seconds: string
@@ -100,6 +126,8 @@ const result = ref<{
   utc: string
   timestamp: number
 } | null>(null)
+
+watch(timezone, saveSettings)
 
 const relativeTime = ref('')
 let relativeTimer: ReturnType<typeof setInterval> | null = null

@@ -91,12 +91,41 @@
 <script setup lang="ts">
 import { useDebounceFn } from '@vueuse/core'
 
+const STORAGE_KEY = 'json-format-settings'
+
+const loadSettings = () => {
+  if (typeof window === 'undefined') return null
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY)
+    return saved ? JSON.parse(saved) : null
+  } catch {
+    return null
+  }
+}
+
+const saveSettings = () => {
+  if (typeof window === 'undefined') return
+  try {
+    const settings = {
+      indentSize: indentSize.value,
+      showTree: showTree.value
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings))
+  } catch (e) {
+    console.error('保存设置失败:', e)
+  }
+}
+
+const savedSettings = loadSettings()
+
 const input = ref('')
 const parsed = ref<any>(null)
 const error = ref('')
-const indentSize = ref('2')
-const showTree = ref(true)
+const indentSize = ref(savedSettings?.indentSize ?? '2')
+const showTree = ref(savedSettings?.showTree ?? true)
 const expandedPaths = ref<Set<string>>(new Set())
+
+watch([indentSize, showTree], saveSettings)
 
 const indentOptions = [
   { label: '2', value: '2' },

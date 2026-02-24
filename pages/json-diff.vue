@@ -202,14 +202,43 @@ interface ArrayPathInfo {
   matchKey: string | undefined
 }
 
+const STORAGE_KEY = 'json-diff-settings'
+
+const loadSettings = () => {
+  if (typeof window === 'undefined') return null
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY)
+    return saved ? JSON.parse(saved) : null
+  } catch {
+    return null
+  }
+}
+
+const saveSettings = () => {
+  if (typeof window === 'undefined') return
+  try {
+    const settings = {
+      sortOrder: sortOrder.value,
+      activeFilters: activeFilters.value
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings))
+  } catch (e) {
+    console.error('保存设置失败:', e)
+  }
+}
+
+const savedSettings = loadSettings()
+
 const inputA = ref('')
 const inputB = ref('')
 const error = ref('')
 const diffResult = ref<DiffItem[]>([])
 const compared = ref(false)
 const arrayPaths = ref<ArrayPathInfo[]>([])
-const sortOrder = ref('changed-removed-added')
-const activeFilters = ref<string[]>(['changed', 'removed', 'added'])
+const sortOrder = ref(savedSettings?.sortOrder ?? 'changed-removed-added')
+const activeFilters = ref<string[]>(savedSettings?.activeFilters ?? ['changed', 'removed', 'added'])
+
+watch([sortOrder, activeFilters], saveSettings)
 
 const sortOptions = [
   { label: '修改 → 删除 → 新增', value: 'changed-removed-added' },
