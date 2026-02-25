@@ -12,9 +12,8 @@ function getStorageKey(page: string): string {
   return `utools-history-${page}`
 }
 
-function getByteSize(item: unknown): number {
+function getByteSizeFromString(str: string): number {
   try {
-    const str = JSON.stringify(item)
     return new Blob([str]).size
   } catch {
     return 0
@@ -42,10 +41,26 @@ export function useHistory<T>(page: string) {
   }
 
   const addToHistory = (data: T): boolean => {
-    const size = getByteSize(data)
+    let dataStr = ''
+    try {
+      dataStr = JSON.stringify(data)
+    } catch {
+      return false
+    }
+
+    const size = getByteSizeFromString(dataStr)
     if (size > MAX_ITEM_SIZE) return false
 
     const items = loadHistory()
+    const isDuplicate = items.some(item => {
+      try {
+        return JSON.stringify(item.data) === dataStr
+      } catch {
+        return false
+      }
+    })
+    if (isDuplicate) return false
+
     const newItem: HistoryItem<T> = { data, timestamp: Date.now(), size }
     let totalSize = items.reduce((sum, i) => sum + i.size, 0) + size
     let newItems = [newItem, ...items]

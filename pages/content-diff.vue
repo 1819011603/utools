@@ -53,11 +53,19 @@
             <UIcon name="i-heroicons-trash" class="w-4 h-4 mr-1" />
             清空
           </UButton>
-          <UDropdown :items="historyMenuItems" :popper="{ placement: 'bottom-start' }">
+          <UDropdown :items="historyMenuItems" :popper="{ placement: 'bottom-start' }" :ui="{ width: 'w-[640px]', container: 'w-[640px]' }">
             <UButton variant="outline" size="sm" :disabled="historyList.length === 0">
               <UIcon name="i-heroicons-clock" class="w-4 h-4 mr-1" />
               历史 ({{ historyList.length }})
             </UButton>
+            <template #item="{ item }">
+              <div class="w-[640px]">
+                <UTooltip v-if="item.preview" :text="item.preview" :popper="{ placement: 'right' }">
+                  <span class="block truncate max-w-[640px]">{{ item.label }}</span>
+                </UTooltip>
+                <span v-else class="block truncate max-w-[640px]">{{ item.label }}</span>
+              </div>
+            </template>
           </UDropdown>
         </div>
       </div>
@@ -214,9 +222,19 @@ const formatTime = (timestamp: number) => {
 }
 
 const getPreview = (data: ContentDiffHistory) => {
-  const textA = data.inputA.trim().slice(0, 20)
-  const textB = data.inputB.trim().slice(0, 20)
-  return `A: ${textA}... B: ${textB}...`
+  const textA = data.inputA.trim().replace(/\s+/g, ' ')
+  const textB = data.inputB.trim().replace(/\s+/g, ' ')
+  const shortA = textA.length > 20 ? textA.slice(0, 20) + '...' : textA
+  const shortB = textB.length > 20 ? textB.slice(0, 20) + '...' : textB
+  return `A: ${shortA} B: ${shortB}`
+}
+
+const getPreviewFull = (data: ContentDiffHistory) => {
+  const textA = data.inputA.trim().replace(/\s+/g, ' ')
+  const textB = data.inputB.trim().replace(/\s+/g, ' ')
+  const fullA = textA.length > 200 ? textA.slice(0, 200) + '...' : textA
+  const fullB = textB.length > 200 ? textB.slice(0, 200) + '...' : textB
+  return `A: ${fullA} B: ${fullB}`
 }
 
 const historyMenuItems = computed(() => {
@@ -225,6 +243,7 @@ const historyMenuItems = computed(() => {
   return [
     historyList.value.map((item, index) => ({
       label: `${formatTime(item.timestamp)} - ${getPreview(item.data)}`,
+      preview: getPreviewFull(item.data),
       click: () => applyHistory(index)
     })),
     [{ label: '清空历史', icon: 'i-heroicons-trash', click: () => { clearHistory(); refreshHistory() } }]

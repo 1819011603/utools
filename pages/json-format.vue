@@ -18,6 +18,10 @@
         <UIcon name="i-heroicons-arrows-pointing-in" class="w-4 h-4 mr-1" />
         压缩
       </UButton>
+      <UButton @click="jumpToJsonExtract" variant="outline" :disabled="!input.trim()">
+        <UIcon name="i-heroicons-funnel" class="w-4 h-4 mr-1" />
+        去JSON提取
+      </UButton>
       <UButton @click="copyAll" variant="outline" :disabled="!input.trim()">
         <UIcon name="i-heroicons-clipboard-document" class="w-4 h-4 mr-1" />
         复制
@@ -27,11 +31,19 @@
         清空
       </UButton>
 
-      <UDropdown :items="historyMenuItems" :popper="{ placement: 'bottom-start' }">
+      <UDropdown :items="historyMenuItems" :popper="{ placement: 'bottom-start' }" :ui="{ width: 'w-[640px]', container: 'w-[640px]' }">
         <UButton variant="outline" size="sm" :disabled="historyList.length === 0">
           <UIcon name="i-heroicons-clock" class="w-4 h-4 mr-1" />
           历史 ({{ historyList.length }})
         </UButton>
+        <template #item="{ item }">
+          <div class="w-[640px]">
+            <UTooltip v-if="item.preview" :text="item.preview" :popper="{ placement: 'right' }">
+              <span class="block truncate max-w-[640px]">{{ item.label }}</span>
+            </UTooltip>
+            <span v-else class="block truncate max-w-[640px]">{{ item.label }}</span>
+          </div>
+        </template>
       </UDropdown>
 
       <div class="flex items-center ml-auto space-x-4">
@@ -157,6 +169,7 @@ interface JsonFormatHistory {
 }
 
 const STORAGE_KEY = 'json-format-settings'
+const JSON_EXTRACT_IMPORT_KEY = 'json-extract-import'
 const { addToHistory, getHistory, clearHistory } = useHistory<JsonFormatHistory>('json-format')
 
 const onPaste = (e: ClipboardEvent) => {
@@ -196,18 +209,29 @@ const autoSmartParse = () => {
       })
       
       // 只处理 messages 提取的结果
+      candidates.sort((a, b) => b.json.length - a.json.length)
+      if (candidates.length > 20) candidates.splice(20)
       if (candidates.length === 0) {
         error.value = 'messages 字段中未找到有效的 JSON'
-      } else if (candidates.length === 1) {
-        applyJson(candidates[0].json)
-        useToast().add({ title: '已从 messages 中提取 JSON', color: 'green', timeout: 2000 })
       } else {
         candidateJsons.value = candidates
       }
       return
     }
     
-    // 没有 messages 字段，直接格式化当前 JSON
+    // 没有 messages 字段，尝试解析嵌套转义 JSON（如 rawContent）
+    const nestedCandidates: CandidateJson[] = []
+    // 原始 JSON 也作为候选
+    addCandidate(nestedCandidates, text, '原始')
+    extractNestedEscapedJson(JSON.stringify(obj), nestedCandidates)
+    if (nestedCandidates.length > 0) {
+      nestedCandidates.sort((a, b) => b.json.length - a.json.length)
+      if (nestedCandidates.length > 20) nestedCandidates.splice(20)
+      candidateJsons.value = nestedCandidates
+      return
+    }
+
+    // 没有嵌套 JSON，直接格式化当前 JSON
     let result = obj
     if (unwrapOuterBrackets.value) {
       result = tryUnwrap(result)
@@ -223,18 +247,18 @@ const autoSmartParse = () => {
     const extracted = extractAllJsonFromText(text)
     extracted.forEach(jsonStr => {
       addCandidate(candidates, jsonStr)
+      extractNestedEscapedJson(jsonStr, candidates)
     })
   }
+
+  candidates.sort((a, b) => b.json.length - a.json.length)
+  if (candidates.length > 20) candidates.splice(20)
 
   if (candidates.length === 0) {
     // 没有找到任何 JSON，尝试普通解析
     parseJson()
-  } else if (candidates.length === 1) {
-    // 只有一个候选，直接应用
-    applyJson(candidates[0].json)
-    useToast().add({ title: '已智能提取 JSON', color: 'green', timeout: 2000 })
   } else {
-    // 多个候选，显示列表让用户选择
+    // 有候选时始终显示列表让用户选择
     candidateJsons.value = candidates
   }
 }
@@ -290,22 +314,30 @@ const extractNestedEscapedJson = (jsonStr: string, candidates: CandidateJson[]) 
     // 遍历对象的所有字符串值，查找转义的 JSON 或直接嵌入的 JSON
     const processValue = (value: any, path: string) => {
       if (typeof value === 'string') {
-        // 检查字符串是否本身就是有效 JSON
-        if ((value.startsWith('{') && value.endsWith('}')) || (value.startsWith('[') && value.endsWith(']'))) {
+        const trimmed = value.trim()
+
+        // 1) 直接就是 JSON
+        if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
           try {
-            JSON.parse(value)
-            addCandidate(candidates, value, path || '嵌套')
-            // 递归处理
-            extractNestedEscapedJson(value, candidates)
-            return
+            JSON.parse(trimmed)
+            addCandidate(candidates, trimmed, path || '嵌套')
+            extractNestedEscapedJson(trimmed, candidates)
           } catch {}
         }
-        
-        // 检查是否是转义的 JSON 字符串
-        const unescaped = tryUnescape(value)
+
+        // 2) 字符串里包含 JSON 片段（不一定在开头）
+        const embedded = extractAllJsonFromText(trimmed)
+        if (embedded.length > 0) {
+          embedded.forEach(jsonStr => {
+            addCandidate(candidates, jsonStr, path || '嵌套')
+            extractNestedEscapedJson(jsonStr, candidates)
+          })
+        }
+
+        // 3) 转义后的 JSON
+        const unescaped = tryUnescape(trimmed)
         if (unescaped) {
           addCandidate(candidates, unescaped, path || '嵌套')
-          // 递归处理
           extractNestedEscapedJson(unescaped, candidates)
         }
       } else if (Array.isArray(value)) {
@@ -380,6 +412,18 @@ const smartParse = () => {
   autoSmartParse()
 }
 
+const jumpToJsonExtract = () => {
+  if (!input.value.trim()) return
+  if (typeof window === 'undefined') return
+
+  try {
+    localStorage.setItem(JSON_EXTRACT_IMPORT_KEY, input.value)
+    navigateTo({ path: '/json-extract', query: { from: 'json-format' } })
+  } catch (e) {
+    useToast().add({ title: '跳转失败，请重试', color: 'red', timeout: 2000 })
+  }
+}
+
 const tryUnwrap = (obj: any): any => {
   // 如果是数组且只有一个元素，去掉外层数组
   if (Array.isArray(obj) && obj.length === 1) {
@@ -451,8 +495,13 @@ const formatTime = (timestamp: number) => {
 }
 
 const getPreview = (data: JsonFormatHistory) => {
-  const text = data.input.trim()
+  const text = data.input.trim().replace(/\s+/g, ' ')
   return text.length > 50 ? text.slice(0, 50) + '...' : text
+}
+
+const getPreviewFull = (data: JsonFormatHistory) => {
+  const text = data.input.trim().replace(/\s+/g, ' ')
+  return text.length > 200 ? text.slice(0, 200) + '...' : text
 }
 
 const historyMenuItems = computed(() => {
@@ -461,6 +510,7 @@ const historyMenuItems = computed(() => {
   return [
     historyList.value.map((item, index) => ({
       label: `${formatTime(item.timestamp)} - ${getPreview(item.data)}`,
+      preview: getPreviewFull(item.data),
       click: () => applyHistory(index)
     })),
     [{ label: '清空历史', icon: 'i-heroicons-trash', click: () => { clearHistory(); refreshHistory() } }]

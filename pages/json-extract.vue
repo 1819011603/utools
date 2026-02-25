@@ -88,11 +88,19 @@
                 <UIcon name="i-heroicons-trash" class="w-4 h-4 mr-1" />
                 清空
               </UButton>
-              <UDropdown :items="historyMenuItems" :popper="{ placement: 'bottom-start' }">
+              <UDropdown :items="historyMenuItems" :popper="{ placement: 'bottom-start' }" :ui="{ width: 'w-[640px]', container: 'w-[640px]' }">
                 <UButton variant="outline" size="sm" :disabled="historyList.length === 0">
                   <UIcon name="i-heroicons-clock" class="w-4 h-4 mr-1" />
                   历史 ({{ historyList.length }})
                 </UButton>
+                <template #item="{ item }">
+                  <div class="w-[640px]">
+                    <UTooltip v-if="item.preview" :text="item.preview" :popper="{ placement: 'right' }">
+                      <span class="block truncate max-w-[640px]">{{ item.label }}</span>
+                    </UTooltip>
+                    <span v-else class="block truncate max-w-[640px]">{{ item.label }}</span>
+                  </div>
+                </template>
               </UDropdown>
             </div>
           </div>
@@ -187,6 +195,8 @@ interface JsonExtractHistory {
 }
 
 const { addToHistory, getHistory, clearHistory } = useHistory<JsonExtractHistory>('json-extract')
+const JSON_EXTRACT_IMPORT_KEY = 'json-extract-import'
+const route = useRoute()
 
 const historyList = ref<HistoryItem<JsonExtractHistory>[]>([])
 
@@ -200,8 +210,15 @@ const formatTime = (timestamp: number) => {
 }
 
 const getPreview = (data: JsonExtractHistory) => {
-  const text = data.input.trim().slice(0, 30)
-  return `${data.fieldPath} - ${text}...`
+  const text = data.input.trim().replace(/\s+/g, ' ')
+  const shortText = text.length > 30 ? text.slice(0, 30) + '...' : text
+  return `${data.fieldPath} - ${shortText}`
+}
+
+const getPreviewFull = (data: JsonExtractHistory) => {
+  const text = data.input.trim().replace(/\s+/g, ' ')
+  const fullText = text.length > 200 ? text.slice(0, 200) + '...' : text
+  return `${data.fieldPath} - ${fullText}`
 }
 
 const historyMenuItems = computed(() => {
@@ -210,6 +227,7 @@ const historyMenuItems = computed(() => {
   return [
     historyList.value.map((item, index) => ({
       label: `${formatTime(item.timestamp)} - ${getPreview(item.data)}`,
+      preview: getPreviewFull(item.data),
       click: () => applyHistory(index)
     })),
     [{ label: '清空历史', icon: 'i-heroicons-trash', click: () => { clearHistory(); refreshHistory() } }]
@@ -237,6 +255,15 @@ const saveToHistory = () => {
 
 onMounted(() => {
   refreshHistory()
+  if (typeof window === 'undefined') return
+  if (route.query.from === 'json-format') {
+    const imported = localStorage.getItem(JSON_EXTRACT_IMPORT_KEY)
+    if (imported) {
+      input.value = imported
+      debouncedExtract()
+      localStorage.removeItem(JSON_EXTRACT_IMPORT_KEY)
+    }
+  }
 })
 
 const input = ref('')
