@@ -35,6 +35,8 @@
       </UDropdown>
 
       <div class="flex items-center ml-auto space-x-4">
+        <UCheckbox v-model="smartParseEnabled" label="智能解析" />
+        <UCheckbox v-model="unwrapOuterBrackets" label="去外围括号" />
         <UCheckbox v-model="showTree" label="树形预览" />
         <div class="flex items-center space-x-2">
           <span class="text-sm text-gray-600 dark:text-gray-400">缩进:</span>
@@ -63,7 +65,40 @@
           placeholder="粘贴或输入 JSON 数据..."
           class="font-mono text-sm w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary-500"
           @input="debouncedParse"
+          @paste="onPaste"
         />
+      </div>
+
+      <!-- 候选 JSON 列表 -->
+      <div v-if="candidateJsons.length > 1" class="mt-4">
+        <div class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+          检测到 {{ candidateJsons.length }} 个 JSON，请选择：
+        </div>
+        <div class="space-y-2 max-h-64 overflow-auto">
+          <div
+            v-for="(candidate, index) in candidateJsons"
+            :key="index"
+            class="flex items-center justify-between p-2 border rounded-lg dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800"
+          >
+            <div class="flex-1 min-w-0 mr-2">
+              <div class="flex items-center gap-2">
+                <UBadge :color="candidate.type === 'array' ? 'blue' : 'green'" size="xs">
+                  {{ candidate.type === 'array' ? '数组' : '对象' }} {{ candidate.count }}
+                </UBadge>
+                <span v-if="candidate.source" class="text-xs text-gray-500">{{ candidate.source }}</span>
+              </div>
+              <div class="text-xs text-gray-500 truncate mt-1">{{ candidate.preview }}</div>
+            </div>
+            <div class="flex gap-1">
+              <UButton size="xs" variant="ghost" @click="copyCandidateJson(candidate)" title="复制">
+                <UIcon name="i-heroicons-clipboard-document" class="w-4 h-4" />
+              </UButton>
+              <UButton size="xs" color="primary" @click="selectCandidateJson(candidate)">
+                选择
+              </UButton>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div v-if="showTree && parsed">
@@ -109,6 +144,7 @@
         </UCard>
       </div>
     </div>
+
   </div>
 </template>
 
@@ -122,6 +158,286 @@ interface JsonFormatHistory {
 
 const STORAGE_KEY = 'json-format-settings'
 const { addToHistory, getHistory, clearHistory } = useHistory<JsonFormatHistory>('json-format')
+
+const onPaste = (e: ClipboardEvent) => {
+  if (!smartParseEnabled.value) return
+  
+  // 延迟执行，等 v-model 更新
+  setTimeout(() => {
+    autoSmartParse()
+  }, 50)
+}
+
+const autoSmartParse = () => {
+  error.value = ''
+  candidateJsons.value = []
+  if (!input.value.trim()) return
+
+  let text = input.value.trim()
+  const candidates: CandidateJson[] = []
+
+  // 尝试去掉转义符后解析
+  const unescaped = tryUnescape(text)
+  if (unescaped && unescaped !== text) {
+    addCandidate(candidates, unescaped, '去转义')
+  }
+
+  // 尝试直接解析整个文本
+  try {
+    const obj = JSON.parse(text)
+    // 如果有 messages 字段，只处理 messages 中的内容，不需要原始 JSON
+    if (obj && typeof obj === 'object' && 'messages' in obj && typeof obj.messages === 'string') {
+      const messagesContent = obj.messages
+      const extracted = extractAllJsonFromText(messagesContent)
+      extracted.forEach(jsonStr => {
+        addCandidate(candidates, jsonStr, 'messages')
+        // 尝试递归解析嵌套的转义 JSON
+        extractNestedEscapedJson(jsonStr, candidates)
+      })
+      
+      // 只处理 messages 提取的结果
+      if (candidates.length === 0) {
+        error.value = 'messages 字段中未找到有效的 JSON'
+      } else if (candidates.length === 1) {
+        applyJson(candidates[0].json)
+        useToast().add({ title: '已从 messages 中提取 JSON', color: 'green', timeout: 2000 })
+      } else {
+        candidateJsons.value = candidates
+      }
+      return
+    }
+    
+    // 没有 messages 字段，直接格式化当前 JSON
+    let result = obj
+    if (unwrapOuterBrackets.value) {
+      result = tryUnwrap(result)
+    }
+    input.value = JSON.stringify(result, null, Number(indentSize.value))
+    parsed.value = result
+    expandedPaths.value = new Set(collectPaths(result))
+    currentExpandLevel.value = maxDepth.value
+    saveToHistory()
+    return
+  } catch {
+    // 不是有效 JSON，尝试从文本中提取所有 JSON
+    const extracted = extractAllJsonFromText(text)
+    extracted.forEach(jsonStr => {
+      addCandidate(candidates, jsonStr)
+    })
+  }
+
+  if (candidates.length === 0) {
+    // 没有找到任何 JSON，尝试普通解析
+    parseJson()
+  } else if (candidates.length === 1) {
+    // 只有一个候选，直接应用
+    applyJson(candidates[0].json)
+    useToast().add({ title: '已智能提取 JSON', color: 'green', timeout: 2000 })
+  } else {
+    // 多个候选，显示列表让用户选择
+    candidateJsons.value = candidates
+  }
+}
+
+const tryUnescape = (text: string): string | null => {
+  // 检测是否包含转义的 JSON（如 {\"key\":\"value\"} 或 {\\\"key\\\":\\\"value\\\"}）
+  if (!text.includes('\\"') && !text.includes('\\\\')) {
+    return null
+  }
+  
+  try {
+    // 方法1: 尝试作为 JSON 字符串解析（处理 \" 转义）
+    // 如果文本是 {"key":"value"}，包裹后变成 "{\"key\":\"value\"}"
+    const wrapped = `"${text}"`
+    try {
+      const parsed = JSON.parse(wrapped)
+      if (typeof parsed === 'string') {
+        // 验证解析结果是否为有效 JSON
+        JSON.parse(parsed)
+        return parsed
+      }
+    } catch {}
+    
+    // 方法2: 直接替换转义符（处理 \\" 这种格式）
+    let unescaped = text
+    // 先处理双重转义 \\" -> \"，然后 \" -> "
+    while (unescaped.includes('\\\\"') || unescaped.includes('\\"')) {
+      const prev = unescaped
+      unescaped = unescaped
+        .replace(/\\\\"/g, '\\"')
+        .replace(/\\"/g, '"')
+      if (prev === unescaped) break
+    }
+    // 处理反斜杠
+    unescaped = unescaped.replace(/\\\\/g, '\\')
+    
+    // 验证去转义后是否为有效 JSON
+    if (unescaped !== text) {
+      JSON.parse(unescaped)
+      return unescaped
+    }
+    
+    return null
+  } catch {
+    return null
+  }
+}
+
+const extractNestedEscapedJson = (jsonStr: string, candidates: CandidateJson[]) => {
+  try {
+    const obj = JSON.parse(jsonStr)
+    
+    // 遍历对象的所有字符串值，查找转义的 JSON 或直接嵌入的 JSON
+    const processValue = (value: any, path: string) => {
+      if (typeof value === 'string') {
+        // 检查字符串是否本身就是有效 JSON
+        if ((value.startsWith('{') && value.endsWith('}')) || (value.startsWith('[') && value.endsWith(']'))) {
+          try {
+            JSON.parse(value)
+            addCandidate(candidates, value, path || '嵌套')
+            // 递归处理
+            extractNestedEscapedJson(value, candidates)
+            return
+          } catch {}
+        }
+        
+        // 检查是否是转义的 JSON 字符串
+        const unescaped = tryUnescape(value)
+        if (unescaped) {
+          addCandidate(candidates, unescaped, path || '嵌套')
+          // 递归处理
+          extractNestedEscapedJson(unescaped, candidates)
+        }
+      } else if (Array.isArray(value)) {
+        value.forEach((item, index) => {
+          processValue(item, `${path}[${index}]`)
+        })
+      } else if (typeof value === 'object' && value !== null) {
+        Object.entries(value).forEach(([key, val]) => {
+          processValue(val, path ? `${path}.${key}` : key)
+        })
+      }
+    }
+    
+    processValue(obj, '')
+  } catch {}
+}
+
+const addCandidate = (candidates: CandidateJson[], jsonStr: string, source?: string) => {
+  try {
+    let data = JSON.parse(jsonStr)
+    if (unwrapOuterBrackets.value) {
+      data = tryUnwrap(data)
+      jsonStr = JSON.stringify(data)
+    }
+    const formatted = JSON.stringify(data, null, Number(indentSize.value))
+    const isArray = Array.isArray(data)
+    const count = isArray ? `${data.length} 项` : `${Object.keys(data).length} 个键`
+    const preview = formatted.slice(0, 80) + (formatted.length > 80 ? '...' : '')
+    
+    // 避免重复
+    if (!candidates.some(c => c.json === jsonStr)) {
+      candidates.push({
+        json: jsonStr,
+        formatted,
+        type: isArray ? 'array' : 'object',
+        count,
+        source,
+        preview
+      })
+    }
+  } catch {}
+}
+
+const applyJson = (jsonStr: string) => {
+  try {
+    let data = JSON.parse(jsonStr)
+    if (unwrapOuterBrackets.value) {
+      data = tryUnwrap(data)
+    }
+    input.value = JSON.stringify(data, null, Number(indentSize.value))
+    parsed.value = data
+    expandedPaths.value = new Set(collectPaths(data))
+    currentExpandLevel.value = maxDepth.value
+    candidateJsons.value = []
+    saveToHistory()
+  } catch (e: any) {
+    error.value = e.message
+  }
+}
+
+const selectCandidateJson = (candidate: CandidateJson) => {
+  applyJson(candidate.json)
+  useToast().add({ title: '已应用所选 JSON', color: 'green', timeout: 1500 })
+}
+
+const copyCandidateJson = (candidate: CandidateJson) => {
+  navigator.clipboard.writeText(candidate.formatted)
+  useToast().add({ title: '已复制', color: 'green', timeout: 1500 })
+}
+
+const smartParse = () => {
+  autoSmartParse()
+}
+
+const tryUnwrap = (obj: any): any => {
+  // 如果是数组且只有一个元素，去掉外层数组
+  if (Array.isArray(obj) && obj.length === 1) {
+    return obj[0]
+  }
+  // 如果是对象且只有一个键，且值是对象，去掉外层
+  if (typeof obj === 'object' && obj !== null && !Array.isArray(obj)) {
+    const keys = Object.keys(obj)
+    if (keys.length === 1 && typeof obj[keys[0]] === 'object' && obj[keys[0]] !== null) {
+      return obj[keys[0]]
+    }
+  }
+  return obj
+}
+
+const extractAllJsonFromText = (text: string): string[] => {
+  const results: string[] = []
+  
+  // 查找所有 JSON 对象 {} 或数组 []
+  let i = 0
+  while (i < text.length) {
+    if (text[i] === '{' || text[i] === '[') {
+      const startChar = text[i]
+      const endChar = startChar === '{' ? '}' : ']'
+      let depth = 1
+      let j = i + 1
+      let inString = false
+      let escaped = false
+
+      while (j < text.length && depth > 0) {
+        const char = text[j]
+        if (escaped) {
+          escaped = false
+        } else if (char === '\\') {
+          escaped = true
+        } else if (char === '"') {
+          inString = !inString
+        } else if (!inString) {
+          if (char === startChar) depth++
+          else if (char === endChar) depth--
+        }
+        j++
+      }
+
+      if (depth === 0) {
+        const jsonStr = text.slice(i, j)
+        try {
+          JSON.parse(jsonStr)
+          results.push(jsonStr)
+          i = j
+          continue
+        } catch {}
+      }
+    }
+    i++
+  }
+  return results
+}
 
 const historyList = ref<HistoryItem<JsonFormatHistory>[]>([])
 
@@ -188,7 +504,9 @@ const saveSettings = () => {
   try {
     const settings = {
       indentSize: indentSize.value,
-      showTree: showTree.value
+      showTree: showTree.value,
+      smartParseEnabled: smartParseEnabled.value,
+      unwrapOuterBrackets: unwrapOuterBrackets.value
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings))
   } catch (e) {
@@ -203,11 +521,29 @@ const parsed = ref<any>(null)
 const error = ref('')
 const indentSize = ref(savedSettings?.indentSize ?? '2')
 const showTree = ref(savedSettings?.showTree ?? true)
+const smartParseEnabled = ref(savedSettings?.smartParseEnabled ?? true)
+const unwrapOuterBrackets = ref(savedSettings?.unwrapOuterBrackets ?? false)
+
+watch(unwrapOuterBrackets, (newVal) => {
+  if (newVal) {
+    smartParseEnabled.value = true
+  }
+})
 const expandedPaths = ref<Set<string>>(new Set())
 const textareaRef = ref<any>(null)
 const currentExpandLevel = ref(0)
 
-watch([indentSize, showTree], saveSettings)
+interface CandidateJson {
+  json: string
+  formatted: string
+  type: 'array' | 'object'
+  count: string
+  source?: string
+  preview: string
+}
+const candidateJsons = ref<CandidateJson[]>([])
+
+watch([indentSize, showTree, smartParseEnabled, unwrapOuterBrackets], saveSettings)
 
 const indentOptions = [
   { label: '2', value: '2' },
@@ -452,9 +788,21 @@ const debouncedParse = useDebounceFn(parseJson, 300)
 const formatJson = () => {
   error.value = ''
   if (!input.value.trim()) return
-  
+
+  // 如果开启智能解析，先进行智能解析
+  if (smartParseEnabled.value) {
+    smartParse()
+    return
+  }
+
   try {
-    const obj = JSON.parse(input.value)
+    let obj = JSON.parse(input.value)
+    
+    // 如果开启去外围括号
+    if (unwrapOuterBrackets.value) {
+      obj = tryUnwrap(obj)
+    }
+    
     const indent = parseInt(indentSize.value)
     input.value = JSON.stringify(obj, null, indent)
     parsed.value = obj
