@@ -53,6 +53,12 @@
             <UIcon name="i-heroicons-trash" class="w-4 h-4 mr-1" />
             清空
           </UButton>
+          <UDropdown :items="historyMenuItems" :popper="{ placement: 'bottom-start' }">
+            <UButton variant="outline" size="sm" :disabled="historyList.length === 0">
+              <UIcon name="i-heroicons-clock" class="w-4 h-4 mr-1" />
+              历史 ({{ historyList.length }})
+            </UButton>
+          </UDropdown>
         </div>
       </div>
     </UCard>
@@ -186,7 +192,64 @@
 </template>
 
 <script setup lang="ts">
+import type { HistoryItem } from '~/composables/useHistory'
+
+interface ContentDiffHistory {
+  inputA: string
+  inputB: string
+}
+
 const STORAGE_KEY = 'content-diff-settings'
+const { addToHistory, getHistory, clearHistory } = useHistory<ContentDiffHistory>('content-diff')
+
+const historyList = ref<HistoryItem<ContentDiffHistory>[]>([])
+
+const refreshHistory = () => {
+  historyList.value = getHistory()
+}
+
+const formatTime = (timestamp: number) => {
+  const d = new Date(timestamp)
+  return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`
+}
+
+const getPreview = (data: ContentDiffHistory) => {
+  const textA = data.inputA.trim().slice(0, 20)
+  const textB = data.inputB.trim().slice(0, 20)
+  return `A: ${textA}... B: ${textB}...`
+}
+
+const historyMenuItems = computed(() => {
+  if (historyList.value.length === 0) return []
+  
+  return [
+    historyList.value.map((item, index) => ({
+      label: `${formatTime(item.timestamp)} - ${getPreview(item.data)}`,
+      click: () => applyHistory(index)
+    })),
+    [{ label: '清空历史', icon: 'i-heroicons-trash', click: () => { clearHistory(); refreshHistory() } }]
+  ]
+})
+
+const applyHistory = (index: number) => {
+  const item = historyList.value[index]
+  if (item) {
+    inputA.value = item.data.inputA
+    inputB.value = item.data.inputB
+    updateCounts()
+    useToast().add({ title: '已恢复', color: 'green', timeout: 1500 })
+  }
+}
+
+const saveToHistory = () => {
+  if (!inputA.value.trim() || !inputB.value.trim()) return
+  addToHistory({ inputA: inputA.value, inputB: inputB.value })
+  refreshHistory()
+}
+
+onMounted(() => {
+  refreshHistory()
+})
 
 const loadSettings = () => {
   if (typeof window === 'undefined') return null
@@ -311,6 +374,7 @@ const execute = () => {
   const sep = getSeparator()
   output.value = result.join(sep === '\n' ? '\n' : sep + ' ')
   resultCount.value = result.length
+  saveToHistory()
 }
 
 const swapInputs = () => {

@@ -27,6 +27,13 @@
         清空
       </UButton>
 
+      <UDropdown :items="historyMenuItems" :popper="{ placement: 'bottom-start' }">
+        <UButton variant="outline" size="sm" :disabled="historyList.length === 0">
+          <UIcon name="i-heroicons-clock" class="w-4 h-4 mr-1" />
+          历史 ({{ historyList.length }})
+        </UButton>
+      </UDropdown>
+
       <div class="flex items-center ml-auto space-x-4">
         <UCheckbox v-model="showTree" label="树形预览" />
         <div class="flex items-center space-x-2">
@@ -49,11 +56,12 @@
             <span v-if="stats" class="text-gray-500 font-normal ml-2">({{ stats }})</span>
           </label>
         </div>
-        <UTextarea
+        <textarea
+          ref="textareaRef"
           v-model="input"
-          :rows="24"
+          rows="24"
           placeholder="粘贴或输入 JSON 数据..."
-          class="font-mono text-sm"
+          class="font-mono text-sm w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary-500"
           @input="debouncedParse"
         />
       </div>
@@ -62,12 +70,26 @@
         <div class="flex justify-between items-center mb-2">
           <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
             树形预览
+            <span v-if="currentMaxDepth > 0" class="text-gray-500 font-normal ml-2">
+              (当前展开{{ currentMaxDepth >= maxDepth ? '全部' : `到第 ${currentMaxDepth} 层` }})
+            </span>
           </label>
-          <div class="flex gap-1">
-            <UButton @click="expandAll" variant="ghost" size="xs">
+          <div class="flex gap-1 items-center">
+            <div class="flex items-center gap-1 mr-2">
+              <UButton @click="expandToLevel(currentExpandLevel - 1)" variant="ghost" size="xs" :disabled="currentExpandLevel <= 0">
+                <UIcon name="i-heroicons-minus" class="w-4 h-4" />
+              </UButton>
+              <span class="text-xs text-gray-600 dark:text-gray-400 min-w-[60px] text-center">
+                {{ currentExpandLevel === maxDepth ? '全部' : `${currentExpandLevel} 层` }}
+              </span>
+              <UButton @click="expandToLevel(currentExpandLevel + 1)" variant="ghost" size="xs" :disabled="currentExpandLevel >= maxDepth">
+                <UIcon name="i-heroicons-plus" class="w-4 h-4" />
+              </UButton>
+            </div>
+            <UButton @click="expandAll" variant="ghost" size="xs" title="全部展开">
               <UIcon name="i-heroicons-arrows-pointing-out" class="w-4 h-4" />
             </UButton>
-            <UButton @click="collapseAll" variant="ghost" size="xs">
+            <UButton @click="collapseAll" variant="ghost" size="xs" title="全部收起">
               <UIcon name="i-heroicons-arrows-pointing-in" class="w-4 h-4" />
             </UButton>
           </div>
@@ -77,9 +99,11 @@
             <JsonNode 
               :data="parsed" 
               :path="''" 
+              :depth="0"
               :expanded-paths="expandedPaths" 
               @toggle="togglePath" 
-              @copy="copyNode" 
+              @copy="copyNode"
+              @locate="locateInJson"
             />
           </div>
         </UCard>
@@ -90,8 +114,64 @@
 
 <script setup lang="ts">
 import { useDebounceFn } from '@vueuse/core'
+import type { HistoryItem } from '~/composables/useHistory'
+
+interface JsonFormatHistory {
+  input: string
+}
 
 const STORAGE_KEY = 'json-format-settings'
+const { addToHistory, getHistory, clearHistory } = useHistory<JsonFormatHistory>('json-format')
+
+const historyList = ref<HistoryItem<JsonFormatHistory>[]>([])
+
+const refreshHistory = () => {
+  historyList.value = getHistory()
+}
+
+const formatTime = (timestamp: number) => {
+  const d = new Date(timestamp)
+  return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`
+}
+
+const getPreview = (data: JsonFormatHistory) => {
+  const text = data.input.trim()
+  return text.length > 50 ? text.slice(0, 50) + '...' : text
+}
+
+const historyMenuItems = computed(() => {
+  if (historyList.value.length === 0) return []
+  
+  return [
+    historyList.value.map((item, index) => ({
+      label: `${formatTime(item.timestamp)} - ${getPreview(item.data)}`,
+      click: () => applyHistory(index)
+    })),
+    [{ label: '清空历史', icon: 'i-heroicons-trash', click: () => { clearHistory(); refreshHistory() } }]
+  ]
+})
+
+const applyHistory = (index: number) => {
+  const item = historyList.value[index]
+  if (item) {
+    input.value = item.data.input
+    parseJson()
+    useToast().add({ title: '已恢复', color: 'green', timeout: 1500 })
+  }
+}
+
+const saveToHistory = () => {
+  if (!input.value.trim()) return
+  try {
+    JSON.parse(input.value)
+    addToHistory({ input: input.value })
+    refreshHistory()
+  } catch {}
+}
+
+onMounted(() => {
+  refreshHistory()
+})
 
 const loadSettings = () => {
   if (typeof window === 'undefined') return null
@@ -124,6 +204,8 @@ const error = ref('')
 const indentSize = ref(savedSettings?.indentSize ?? '2')
 const showTree = ref(savedSettings?.showTree ?? true)
 const expandedPaths = ref<Set<string>>(new Set())
+const textareaRef = ref<any>(null)
+const currentExpandLevel = ref(0)
 
 watch([indentSize, showTree], saveSettings)
 
@@ -131,6 +213,59 @@ const indentOptions = [
   { label: '2', value: '2' },
   { label: '4', value: '4' },
 ]
+
+const getPathDepth = (path: string): number => {
+  if (!path) return 0
+  let depth = 0
+  let inBracket = false
+  
+  for (let i = 0; i < path.length; i++) {
+    if (path[i] === '.') {
+      depth++
+    } else if (path[i] === '[' && !inBracket) {
+      depth++
+      inBracket = true
+    } else if (path[i] === ']') {
+      inBracket = false
+    }
+  }
+  
+  return depth
+}
+
+const getMaxDepthInData = (obj: any, currentDepth = 0): number => {
+  if (typeof obj !== 'object' || obj === null) return currentDepth
+  
+  let maxChildDepth = currentDepth
+  
+  if (Array.isArray(obj)) {
+    obj.forEach(item => {
+      if (typeof item === 'object' && item !== null) {
+        maxChildDepth = Math.max(maxChildDepth, getMaxDepthInData(item, currentDepth + 1))
+      }
+    })
+  } else {
+    Object.values(obj).forEach(value => {
+      if (typeof value === 'object' && value !== null) {
+        maxChildDepth = Math.max(maxChildDepth, getMaxDepthInData(value, currentDepth + 1))
+      }
+    })
+  }
+  
+  return maxChildDepth
+}
+
+const maxDepth = computed(() => {
+  if (!parsed.value) return 0
+  return getMaxDepthInData(parsed.value)
+})
+
+const currentMaxDepth = computed(() => {
+  if (expandedPaths.value.size === 0) return 0
+  const expandedPathsArray = Array.from(expandedPaths.value)
+  if (expandedPathsArray.length === 0) return 0
+  return Math.max(...expandedPathsArray.map(getPathDepth), 0)
+})
 
 const stats = computed(() => {
   if (!parsed.value) return ''
@@ -140,13 +275,13 @@ const stats = computed(() => {
   return `对象, ${Object.keys(parsed.value).length} 个键`
 })
 
-const collectPaths = (obj: any, prefix = ''): string[] => {
+const collectPaths = (obj: any, prefix = '', depth = 0): string[] => {
   const paths: string[] = []
   if (Array.isArray(obj)) {
     paths.push(prefix)
     obj.forEach((item, index) => {
       if (typeof item === 'object' && item !== null) {
-        paths.push(...collectPaths(item, `${prefix}[${index}]`))
+        paths.push(...collectPaths(item, `${prefix}[${index}]`, depth + 1))
       }
     })
   } else if (typeof obj === 'object' && obj !== null) {
@@ -154,11 +289,143 @@ const collectPaths = (obj: any, prefix = ''): string[] => {
     Object.entries(obj).forEach(([key, value]) => {
       const newPath = prefix ? `${prefix}.${key}` : key
       if (typeof value === 'object' && value !== null) {
-        paths.push(...collectPaths(value, newPath))
+        paths.push(...collectPaths(value, newPath, depth + 1))
       }
     })
   }
   return paths
+}
+
+const expandToLevel = (level: number) => {
+  if (!parsed.value) return
+  
+  if (level <= 0) {
+    expandedPaths.value = new Set()
+    currentExpandLevel.value = 0
+    return
+  }
+  
+  if (level > maxDepth.value) {
+    level = maxDepth.value
+  }
+  
+  const allPaths = collectPaths(parsed.value)
+  const newExpanded = new Set<string>()
+  
+  allPaths.forEach(path => {
+    const depth = getPathDepth(path)
+    if (depth <= level) {
+      newExpanded.add(path)
+    }
+  })
+  
+  expandedPaths.value = newExpanded
+  currentExpandLevel.value = level
+}
+
+const buildPathMap = (obj: any, indentSize: number): { json: string; pathMap: Map<string, { start: number; end: number; line: number }> } => {
+  const pathMap = new Map<string, { start: number; end: number; line: number }>()
+  let result = ''
+  
+  const getLine = (pos: number) => (result.slice(0, pos).match(/\n/g) || []).length + 1
+  
+  const process = (value: any, path: string, indentLevel: number): void => {
+    const prefix = ' '.repeat(indentLevel * indentSize)
+    
+    if (value === null) {
+      result += 'null'
+      return
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      result += JSON.stringify(value)
+      return
+    }
+    if (typeof value === 'string') {
+      result += JSON.stringify(value)
+      return
+    }
+    
+    if (Array.isArray(value)) {
+      result += '[\n'
+      value.forEach((item, i) => {
+        const childPath = path ? `${path}[${i}]` : `[${i}]`
+        result += prefix + '  '
+        const start = result.length
+        process(item, childPath, indentLevel + 1)
+        const end = result.length
+        pathMap.set(childPath, { start, end, line: getLine(start) })
+        result += i < value.length - 1 ? ',\n' : '\n'
+      })
+      result += prefix + ']'
+      return
+    }
+    
+    if (typeof value === 'object') {
+      result += '{\n'
+      const entries = Object.entries(value)
+      entries.forEach(([key, val], i) => {
+        const childPath = path ? `${path}.${key}` : key
+        const keyLine = prefix + '  ' + JSON.stringify(key) + ': '
+        const start = result.length
+        result += keyLine
+        process(val, childPath, indentLevel + 1)
+        const lineEnd = result.indexOf('\n', start)
+        const endPos = lineEnd >= 0 ? lineEnd : result.length
+        pathMap.set(childPath, { start, end: endPos, line: getLine(start) })
+        result += i < entries.length - 1 ? ',\n' : '\n'
+      })
+      result += prefix + '}'
+    }
+  }
+  
+  process(obj, '', 0)
+  return { json: result, pathMap }
+}
+
+const locateInJson = (path: string) => {
+  const textarea = textareaRef.value as HTMLTextAreaElement | null
+  if (!textarea) return
+  
+  try {
+    const obj = JSON.parse(input.value)
+    const indent = parseInt(indentSize.value)
+    const { json: formattedJson, pathMap } = buildPathMap(obj, indent)
+    
+    input.value = formattedJson
+    
+    const position = pathMap.get(path)
+    
+    if (position) {
+      nextTick(() => {
+        textarea.focus()
+        textarea.setSelectionRange(position.start, position.end)
+        
+        const lineHeight = parseInt(getComputedStyle(textarea).lineHeight) || 20
+        textarea.scrollTop = Math.max(0, (position.line - 4) * lineHeight)
+        
+        useToast().add({ 
+          title: '已定位', 
+          description: `第 ${position.line} 行`,
+          color: 'blue',
+          timeout: 1500
+        })
+      })
+    } else {
+      useToast().add({ 
+        title: '定位失败', 
+        description: '未找到对应路径',
+        color: 'orange',
+        timeout: 1500
+      })
+    }
+  } catch (e) {
+    console.error('定位失败:', e)
+    useToast().add({ 
+      title: '定位失败', 
+      color: 'red',
+      timeout: 1500
+    })
+  }
 }
 
 const parseJson = () => {
@@ -172,6 +439,7 @@ const parseJson = () => {
     parsed.value = JSON.parse(input.value)
     if (expandedPaths.value.size === 0) {
       expandedPaths.value = new Set(collectPaths(parsed.value))
+      currentExpandLevel.value = maxDepth.value
     }
   } catch (e: any) {
     error.value = e.message
@@ -191,6 +459,8 @@ const formatJson = () => {
     input.value = JSON.stringify(obj, null, indent)
     parsed.value = obj
     expandedPaths.value = new Set(collectPaths(obj))
+    currentExpandLevel.value = maxDepth.value
+    saveToHistory()
   } catch (e: any) {
     error.value = e.message
   }
@@ -204,6 +474,7 @@ const compressJson = () => {
     const obj = JSON.parse(input.value)
     input.value = JSON.stringify(obj)
     parsed.value = obj
+    saveToHistory()
   } catch (e: any) {
     error.value = e.message
   }
@@ -212,11 +483,13 @@ const compressJson = () => {
 const expandAll = () => {
   if (parsed.value) {
     expandedPaths.value = new Set(collectPaths(parsed.value))
+    currentExpandLevel.value = maxDepth.value
   }
 }
 
 const collapseAll = () => {
   expandedPaths.value = new Set()
+  currentExpandLevel.value = 0
 }
 
 const togglePath = (path: string) => {
@@ -256,9 +529,10 @@ const JsonNode = defineComponent({
     path: { type: String, required: true },
     keyName: { type: String, default: '' },
     expandedPaths: { type: Set, required: true },
-    isLast: { type: Boolean, default: true }
+    isLast: { type: Boolean, default: true },
+    depth: { type: Number, default: 0 }
   },
-  emits: ['toggle', 'copy'],
+  emits: ['toggle', 'copy', 'locate'],
   setup(props, { emit }) {
     const isHovered = ref(false)
 
@@ -297,6 +571,7 @@ const JsonNode = defineComponent({
 
     const toggle = () => emit('toggle', props.path)
     const copy = () => emit('copy', props.data)
+    const locate = () => emit('locate', props.path)
 
     return () => {
       const children: VNode[] = []
@@ -314,9 +589,17 @@ const JsonNode = defineComponent({
         const copyBtn = h(resolveComponent('UButton'), {
           variant: 'ghost',
           size: 'xs',
-          class: 'ml-2 opacity-0 group-hover:opacity-100 transition-opacity',
+          class: 'ml-1 opacity-0 group-hover:opacity-100 transition-opacity',
           onClick: (e: Event) => { e.stopPropagation(); copy() }
         }, () => h(resolveComponent('UIcon'), { name: 'i-heroicons-clipboard-document', class: 'w-3 h-3' }))
+
+        const locateBtn = h(resolveComponent('UButton'), {
+          variant: 'ghost',
+          size: 'xs',
+          class: 'ml-1 opacity-0 group-hover:opacity-100 transition-opacity',
+          title: '定位到编辑器',
+          onClick: (e: Event) => { e.stopPropagation(); locate() }
+        }, () => h(resolveComponent('UIcon'), { name: 'i-heroicons-cursor-arrow-rays', class: 'w-3 h-3' }))
 
         if (isExpanded.value) {
           const bracket = isArray.value ? '[' : '{'
@@ -329,6 +612,7 @@ const JsonNode = defineComponent({
             toggleIcon,
             keySpan,
             h('span', { class: 'text-gray-600' }, bracket),
+            locateBtn,
             copyBtn
           ])
 
@@ -347,8 +631,10 @@ const JsonNode = defineComponent({
                 keyName: isArray.value ? '' : String(key),
                 expandedPaths: props.expandedPaths,
                 isLast: index === entries.length - 1,
+                depth: props.depth + 1,
                 onToggle: (p: string) => emit('toggle', p),
-                onCopy: (d: any) => emit('copy', d)
+                onCopy: (d: any) => emit('copy', d),
+                onLocate: (p: string) => emit('locate', p)
               })
             ])
           })
@@ -363,6 +649,7 @@ const JsonNode = defineComponent({
             toggleIcon,
             keySpan,
             h('span', { class: 'text-gray-400 italic' }, preview.value),
+            locateBtn,
             copyBtn,
             h('span', { class: 'text-gray-600' }, props.isLast ? '' : ',')
           ])
@@ -379,7 +666,14 @@ const JsonNode = defineComponent({
           h(resolveComponent('UButton'), {
             variant: 'ghost',
             size: 'xs',
-            class: 'ml-2 opacity-0 group-hover:opacity-100 transition-opacity',
+            class: 'ml-1 opacity-0 group-hover:opacity-100 transition-opacity',
+            title: '定位到编辑器',
+            onClick: (e: Event) => { e.stopPropagation(); locate() }
+          }, () => h(resolveComponent('UIcon'), { name: 'i-heroicons-cursor-arrow-rays', class: 'w-3 h-3' })),
+          h(resolveComponent('UButton'), {
+            variant: 'ghost',
+            size: 'xs',
+            class: 'ml-1 opacity-0 group-hover:opacity-100 transition-opacity',
             onClick: copy
           }, () => h(resolveComponent('UIcon'), { name: 'i-heroicons-clipboard-document', class: 'w-3 h-3' }))
         ])

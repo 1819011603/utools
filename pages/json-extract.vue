@@ -88,6 +88,12 @@
                 <UIcon name="i-heroicons-trash" class="w-4 h-4 mr-1" />
                 清空
               </UButton>
+              <UDropdown :items="historyMenuItems" :popper="{ placement: 'bottom-start' }">
+                <UButton variant="outline" size="sm" :disabled="historyList.length === 0">
+                  <UIcon name="i-heroicons-clock" class="w-4 h-4 mr-1" />
+                  历史 ({{ historyList.length }})
+                </UButton>
+              </UDropdown>
             </div>
           </div>
         </UCard>
@@ -173,6 +179,65 @@
 
 <script setup lang="ts">
 import { useDebounceFn } from '@vueuse/core'
+import type { HistoryItem } from '~/composables/useHistory'
+
+interface JsonExtractHistory {
+  input: string
+  fieldPath: string
+}
+
+const { addToHistory, getHistory, clearHistory } = useHistory<JsonExtractHistory>('json-extract')
+
+const historyList = ref<HistoryItem<JsonExtractHistory>[]>([])
+
+const refreshHistory = () => {
+  historyList.value = getHistory()
+}
+
+const formatTime = (timestamp: number) => {
+  const d = new Date(timestamp)
+  return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`
+}
+
+const getPreview = (data: JsonExtractHistory) => {
+  const text = data.input.trim().slice(0, 30)
+  return `${data.fieldPath} - ${text}...`
+}
+
+const historyMenuItems = computed(() => {
+  if (historyList.value.length === 0) return []
+  
+  return [
+    historyList.value.map((item, index) => ({
+      label: `${formatTime(item.timestamp)} - ${getPreview(item.data)}`,
+      click: () => applyHistory(index)
+    })),
+    [{ label: '清空历史', icon: 'i-heroicons-trash', click: () => { clearHistory(); refreshHistory() } }]
+  ]
+})
+
+const applyHistory = (index: number) => {
+  const item = historyList.value[index]
+  if (item) {
+    input.value = item.data.input
+    fieldPath.value = item.data.fieldPath
+    extract()
+    useToast().add({ title: '已恢复', color: 'green', timeout: 1500 })
+  }
+}
+
+const saveToHistory = () => {
+  if (!input.value.trim() || !fieldPath.value.trim()) return
+  try {
+    JSON.parse(input.value)
+    addToHistory({ input: input.value, fieldPath: fieldPath.value })
+    refreshHistory()
+  } catch {}
+}
+
+onMounted(() => {
+  refreshHistory()
+})
 
 const input = ref('')
 const fieldPath = ref('')
@@ -461,6 +526,7 @@ const extract = () => {
     }
 
     suggestedPaths.value = analyzePaths(obj)
+    saveToHistory()
   } catch (e: any) {
     error.value = `解析错误: ${e.message}`
   }

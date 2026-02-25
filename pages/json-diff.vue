@@ -54,6 +54,12 @@
               <UIcon name="i-heroicons-trash" class="w-4 h-4 mr-1" />
               清空
             </UButton>
+            <UDropdown :items="historyMenuItems" :popper="{ placement: 'bottom-start' }">
+              <UButton variant="outline" size="sm" :disabled="historyList.length === 0">
+                <UIcon name="i-heroicons-clock" class="w-4 h-4 mr-1" />
+                历史 ({{ historyList.length }})
+              </UButton>
+            </UDropdown>
           </div>
         </div>
       </template>
@@ -186,6 +192,7 @@
 
 <script setup lang="ts">
 import { useDebounceFn } from '@vueuse/core'
+import type { HistoryItem } from '~/composables/useHistory'
 
 interface DiffItem {
   path: string
@@ -202,7 +209,66 @@ interface ArrayPathInfo {
   matchKey: string | undefined
 }
 
+interface JsonDiffHistory {
+  inputA: string
+  inputB: string
+}
+
 const STORAGE_KEY = 'json-diff-settings'
+const { addToHistory, getHistory, clearHistory } = useHistory<JsonDiffHistory>('json-diff')
+
+const historyList = ref<HistoryItem<JsonDiffHistory>[]>([])
+
+const refreshHistory = () => {
+  historyList.value = getHistory()
+}
+
+const formatTime = (timestamp: number) => {
+  const d = new Date(timestamp)
+  return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`
+}
+
+const getPreview = (data: JsonDiffHistory) => {
+  const textA = data.inputA.trim().slice(0, 20)
+  const textB = data.inputB.trim().slice(0, 20)
+  return `A: ${textA}... B: ${textB}...`
+}
+
+const historyMenuItems = computed(() => {
+  if (historyList.value.length === 0) return []
+  
+  return [
+    historyList.value.map((item, index) => ({
+      label: `${formatTime(item.timestamp)} - ${getPreview(item.data)}`,
+      click: () => applyHistory(index)
+    })),
+    [{ label: '清空历史', icon: 'i-heroicons-trash', click: () => { clearHistory(); refreshHistory() } }]
+  ]
+})
+
+const applyHistory = (index: number) => {
+  const item = historyList.value[index]
+  if (item) {
+    inputA.value = item.data.inputA
+    inputB.value = item.data.inputB
+    analyze()
+    useToast().add({ title: '已恢复', color: 'green', timeout: 1500 })
+  }
+}
+
+const saveToHistory = () => {
+  if (!inputA.value.trim() || !inputB.value.trim()) return
+  try {
+    JSON.parse(inputA.value)
+    JSON.parse(inputB.value)
+    addToHistory({ inputA: inputA.value, inputB: inputB.value })
+    refreshHistory()
+  } catch {}
+}
+
+onMounted(() => {
+  refreshHistory()
+})
 
 const loadSettings = () => {
   if (typeof window === 'undefined') return null
@@ -456,6 +522,7 @@ const compareJson = () => {
     const objB = JSON.parse(inputB.value)
     diffResult.value = deepCompare(objA, objB, '')
     compared.value = true
+    saveToHistory()
   } catch (e: any) {
     error.value = `JSON 解析错误: ${e.message}`
   }
