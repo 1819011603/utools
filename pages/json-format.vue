@@ -637,6 +637,10 @@ const candidateJsons = ref<CandidateJson[]>([])
 const expandedCandidateIndexes = ref<Set<number>>(new Set())
 
 watch([indentSize, showTree, smartParseEnabled, unwrapOuterBrackets], saveSettings)
+watch(unwrapOuterBrackets, () => {
+  if (!input.value.trim()) return
+  formatJson()
+})
 
 const indentOptions = [
   { label: '2', value: '2' },
