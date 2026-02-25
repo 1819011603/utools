@@ -156,18 +156,26 @@
             <UButton @click="collapseAll" variant="ghost" size="xs" title="全部收起">
               <UIcon name="i-heroicons-arrows-pointing-in" class="w-4 h-4" />
             </UButton>
+            <UButton @click="undoDelete" variant="ghost" size="xs" :disabled="deletedStack.length === 0">
+              撤销删除
+            </UButton>
+            <UButton @click="restoreAllDeleted" variant="ghost" size="xs" :disabled="deletedPaths.size === 0">
+              恢复全部
+            </UButton>
           </div>
         </div>
-        <UCard class="h-[576px] overflow-auto">
+        <UCard class="h-[720px] overflow-auto">
           <div class="font-mono text-sm json-tree">
             <JsonNode 
               :data="parsed" 
               :path="''" 
               :depth="0"
               :expanded-paths="expandedPaths" 
+              :deleted-paths="deletedPaths"
               @toggle="togglePath" 
               @copy="copyNode"
               @locate="locateInJson"
+              @delete="deletePath"
             />
           </div>
         </UCard>
@@ -256,6 +264,8 @@ const autoSmartParse = () => {
     input.value = JSON.stringify(result, null, Number(indentSize.value))
     parsed.value = result
     expandedPaths.value = new Set(collectPaths(result))
+    deletedPaths.value = new Set()
+    deletedStack.value = []
     currentExpandLevel.value = maxDepth.value
     saveToHistory()
     return
@@ -417,6 +427,8 @@ const applyJson = (jsonStr: string) => {
     input.value = JSON.stringify(data, null, Number(indentSize.value))
     parsed.value = data
     expandedPaths.value = new Set(collectPaths(data))
+    deletedPaths.value = new Set()
+    deletedStack.value = []
     currentExpandLevel.value = maxDepth.value
     candidateJsons.value = []
     saveToHistory()
@@ -607,6 +619,8 @@ watch(unwrapOuterBrackets, (newVal) => {
   }
 })
 const expandedPaths = ref<Set<string>>(new Set())
+const deletedPaths = ref<Set<string>>(new Set())
+const deletedStack = ref<string[]>([])
 const textareaRef = ref<any>(null)
 const currentExpandLevel = ref(0)
 
@@ -852,6 +866,8 @@ const parseJson = () => {
     parsed.value = JSON.parse(input.value)
     if (expandedPaths.value.size === 0) {
       expandedPaths.value = new Set(collectPaths(parsed.value))
+      deletedPaths.value = new Set()
+      deletedStack.value = []
       currentExpandLevel.value = maxDepth.value
     }
   } catch (e: any) {
@@ -884,6 +900,8 @@ const formatJson = () => {
     input.value = JSON.stringify(obj, null, indent)
     parsed.value = obj
     expandedPaths.value = new Set(collectPaths(obj))
+    deletedPaths.value = new Set()
+    deletedStack.value = []
     currentExpandLevel.value = maxDepth.value
     saveToHistory()
   } catch (e: any) {
@@ -908,6 +926,8 @@ const compressJson = () => {
 const expandAll = () => {
   if (parsed.value) {
     expandedPaths.value = new Set(collectPaths(parsed.value))
+    deletedPaths.value = new Set()
+    deletedStack.value = []
     currentExpandLevel.value = maxDepth.value
   }
 }
@@ -926,15 +946,69 @@ const togglePath = (path: string) => {
   expandedPaths.value = new Set(expandedPaths.value)
 }
 
-const copyNode = async (data: any) => {
+const deletePath = (path: string) => {
+  if (!path) return
+  const next = new Set(deletedPaths.value)
+  next.add(path)
+  deletedPaths.value = next
+  deletedStack.value = [...deletedStack.value, path]
+}
+
+const undoDelete = () => {
+  const stack = [...deletedStack.value]
+  const last = stack.pop()
+  if (!last) return
+  const next = new Set(deletedPaths.value)
+  next.delete(last)
+  deletedPaths.value = next
+  deletedStack.value = stack
+}
+
+const restoreAllDeleted = () => {
+  deletedPaths.value = new Set()
+  deletedStack.value = []
+}
+
+const filterByDeletedPaths = (value: any, path: string): any => {
+  if (deletedPaths.value.has(path)) return undefined
+  if (Array.isArray(value)) {
+    const arr: any[] = []
+    value.forEach((item, index) => {
+      const childPath = path ? `${path}[${index}]` : `[${index}]`
+      const filtered = filterByDeletedPaths(item, childPath)
+      if (filtered !== undefined) arr.push(filtered)
+    })
+    return arr
+  }
+  if (typeof value === 'object' && value !== null) {
+    const obj: Record<string, any> = {}
+    Object.entries(value).forEach(([key, val]) => {
+      const childPath = path ? `${path}.${key}` : key
+      const filtered = filterByDeletedPaths(val, childPath)
+      if (filtered !== undefined) obj[key] = filtered
+    })
+    return obj
+  }
+  return value
+}
+
+const copyNode = async (payload: { data: any; path: string }) => {
   const indent = parseInt(indentSize.value)
-  const text = typeof data === 'object' ? JSON.stringify(data, null, indent) : String(data)
+  const filtered = filterByDeletedPaths(payload.data, payload.path)
+  const text = typeof filtered === 'object' ? JSON.stringify(filtered, null, indent) : String(filtered ?? '')
   await navigator.clipboard.writeText(text)
   useToast().add({ title: '已复制', color: 'green' })
 }
 
 const copyAll = async () => {
-  await navigator.clipboard.writeText(input.value)
+  if (parsed.value) {
+    const filtered = filterByDeletedPaths(parsed.value, '')
+    const indent = parseInt(indentSize.value)
+    const text = JSON.stringify(filtered, null, indent)
+    await navigator.clipboard.writeText(text)
+  } else {
+    await navigator.clipboard.writeText(input.value)
+  }
   useToast().add({ title: '已复制', color: 'green' })
 }
 
@@ -954,10 +1028,11 @@ const JsonNode = defineComponent({
     path: { type: String, required: true },
     keyName: { type: String, default: '' },
     expandedPaths: { type: Set, required: true },
+    deletedPaths: { type: Set, required: true },
     isLast: { type: Boolean, default: true },
     depth: { type: Number, default: 0 }
   },
-  emits: ['toggle', 'copy', 'locate'],
+  emits: ['toggle', 'copy', 'locate', 'delete'],
   setup(props, { emit }) {
     const isHovered = ref(false)
 
@@ -981,10 +1056,10 @@ const JsonNode = defineComponent({
     })
 
     const valueClass = computed(() => {
-      if (props.data === null) return 'text-gray-500'
-      if (typeof props.data === 'boolean') return 'text-purple-600 dark:text-purple-400'
-      if (typeof props.data === 'number') return 'text-blue-600 dark:text-blue-400'
-      if (typeof props.data === 'string') return 'text-green-600 dark:text-green-400'
+      if (props.data === null) return 'text-gray-500 dark:text-gray-400'
+      if (typeof props.data === 'boolean') return 'text-purple-700 dark:text-purple-300'
+      if (typeof props.data === 'number') return 'text-amber-700 dark:text-amber-300'
+      if (typeof props.data === 'string') return 'text-emerald-700 dark:text-emerald-300'
       return ''
     })
 
@@ -995,14 +1070,16 @@ const JsonNode = defineComponent({
     }
 
     const toggle = () => emit('toggle', props.path)
-    const copy = () => emit('copy', props.data)
+    const copy = () => emit('copy', { data: props.data, path: props.path })
     const locate = () => emit('locate', props.path)
+    const remove = () => emit('delete', props.path)
 
     return () => {
+      if (props.deletedPaths.has(props.path)) return null
       const children: VNode[] = []
 
       const keySpan = props.keyName 
-        ? h('span', { class: 'text-red-600 dark:text-red-400' }, [`"${props.keyName}"`, h('span', { class: 'text-gray-600' }, ': ')])
+        ? h('span', { class: 'text-blue-700 dark:text-blue-300 font-semibold' }, [`"${props.keyName}"`, h('span', { class: 'text-gray-600 dark:text-gray-400' }, ': ')])
         : null
 
       if (isCollapsible.value) {
@@ -1016,15 +1093,23 @@ const JsonNode = defineComponent({
           size: 'xs',
           class: 'ml-1 opacity-0 group-hover:opacity-100 transition-opacity',
           onClick: (e: Event) => { e.stopPropagation(); copy() }
-        }, () => h(resolveComponent('UIcon'), { name: 'i-heroicons-clipboard-document', class: 'w-3 h-3' }))
+        }, () => '复制')
 
         const locateBtn = h(resolveComponent('UButton'), {
           variant: 'ghost',
           size: 'xs',
           class: 'ml-1 opacity-0 group-hover:opacity-100 transition-opacity',
-          title: '定位到编辑器',
           onClick: (e: Event) => { e.stopPropagation(); locate() }
-        }, () => h(resolveComponent('UIcon'), { name: 'i-heroicons-cursor-arrow-rays', class: 'w-3 h-3' }))
+        }, () => '定位')
+
+        const deleteBtn = props.path
+          ? h(resolveComponent('UButton'), {
+            variant: 'ghost',
+            size: 'xs',
+            class: 'ml-1 opacity-0 group-hover:opacity-100 transition-opacity text-red-600 dark:text-red-400',
+            onClick: (e: Event) => { e.stopPropagation(); remove() }
+          }, () => '删除')
+          : null
 
         if (isExpanded.value) {
           const bracket = isArray.value ? '[' : '{'
@@ -1038,6 +1123,7 @@ const JsonNode = defineComponent({
             keySpan,
             h('span', { class: 'text-gray-600' }, bracket),
             locateBtn,
+            deleteBtn,
             copyBtn
           ])
 
@@ -1055,11 +1141,13 @@ const JsonNode = defineComponent({
                 path: childPath,
                 keyName: isArray.value ? '' : String(key),
                 expandedPaths: props.expandedPaths,
+                deletedPaths: props.deletedPaths,
                 isLast: index === entries.length - 1,
                 depth: props.depth + 1,
                 onToggle: (p: string) => emit('toggle', p),
                 onCopy: (d: any) => emit('copy', d),
-                onLocate: (p: string) => emit('locate', p)
+                onLocate: (p: string) => emit('locate', p),
+                onDelete: (p: string) => emit('delete', p)
               })
             ])
           })
@@ -1075,6 +1163,7 @@ const JsonNode = defineComponent({
             keySpan,
             h('span', { class: 'text-gray-400 italic' }, preview.value),
             locateBtn,
+            deleteBtn,
             copyBtn,
             h('span', { class: 'text-gray-600' }, props.isLast ? '' : ',')
           ])
@@ -1092,15 +1181,20 @@ const JsonNode = defineComponent({
             variant: 'ghost',
             size: 'xs',
             class: 'ml-1 opacity-0 group-hover:opacity-100 transition-opacity',
-            title: '定位到编辑器',
             onClick: (e: Event) => { e.stopPropagation(); locate() }
-          }, () => h(resolveComponent('UIcon'), { name: 'i-heroicons-cursor-arrow-rays', class: 'w-3 h-3' })),
+          }, () => '定位'),
+          props.path ? h(resolveComponent('UButton'), {
+            variant: 'ghost',
+            size: 'xs',
+            class: 'ml-1 opacity-0 group-hover:opacity-100 transition-opacity text-red-600 dark:text-red-400',
+            onClick: (e: Event) => { e.stopPropagation(); remove() }
+          }, () => '删除') : null,
           h(resolveComponent('UButton'), {
             variant: 'ghost',
             size: 'xs',
             class: 'ml-1 opacity-0 group-hover:opacity-100 transition-opacity',
-            onClick: copy
-          }, () => h(resolveComponent('UIcon'), { name: 'i-heroicons-clipboard-document', class: 'w-3 h-3' }))
+            onClick: (e: Event) => { e.stopPropagation(); copy() }
+          }, () => '复制')
         ])
         children.push(valueLine)
       }
