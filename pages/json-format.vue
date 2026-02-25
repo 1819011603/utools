@@ -86,28 +86,45 @@
         <div class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
           检测到 {{ candidateJsons.length }} 个 JSON，请选择：
         </div>
-        <div class="space-y-2 max-h-64 overflow-auto">
+        <div :class="candidateJsons.length > 3 ? 'space-y-2 max-h-64 overflow-auto' : 'space-y-2'">
           <div
             v-for="(candidate, index) in candidateJsons"
             :key="index"
-            class="flex items-center justify-between p-2 border rounded-lg dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800"
+            class="p-3 border rounded-lg dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800"
           >
-            <div class="flex-1 min-w-0 mr-2">
+            <div class="flex items-center justify-between gap-2">
               <div class="flex items-center gap-2">
                 <UBadge :color="candidate.type === 'array' ? 'blue' : 'green'" size="xs">
                   {{ candidate.type === 'array' ? '数组' : '对象' }} {{ candidate.count }}
                 </UBadge>
                 <span v-if="candidate.source" class="text-xs text-gray-500">{{ candidate.source }}</span>
               </div>
-              <div class="text-xs text-gray-500 truncate mt-1">{{ candidate.preview }}</div>
+              <div class="flex gap-1">
+                <UButton
+                  v-if="candidate.isLong"
+                  size="xs"
+                  variant="ghost"
+                  @click="toggleCandidatePreview(index)"
+                >
+                  {{ expandedCandidateIndexes.has(index) ? '收起' : '展开' }}
+                </UButton>
+                <UButton size="xs" variant="ghost" @click="copyCandidateJson(candidate)" title="复制">
+                  <UIcon name="i-heroicons-clipboard-document" class="w-4 h-4" />
+                </UButton>
+                <UButton size="xs" color="primary" @click="selectCandidateJson(candidate)">
+                  选择
+                </UButton>
+              </div>
             </div>
-            <div class="flex gap-1">
-              <UButton size="xs" variant="ghost" @click="copyCandidateJson(candidate)" title="复制">
-                <UIcon name="i-heroicons-clipboard-document" class="w-4 h-4" />
-              </UButton>
-              <UButton size="xs" color="primary" @click="selectCandidateJson(candidate)">
-                选择
-              </UButton>
+
+            <div
+              class="mt-2 text-xs text-gray-600 dark:text-gray-300 bg-gray-50 dark:bg-gray-900/40 rounded border border-gray-100 dark:border-gray-800 p-2 font-mono whitespace-pre-wrap break-all"
+              :class="candidate.isLong && !expandedCandidateIndexes.has(index) ? 'max-h-28 overflow-auto' : ''"
+            >
+              {{ candidate.formatted }}
+            </div>
+            <div v-if="candidate.isLong && !expandedCandidateIndexes.has(index)" class="mt-1 text-[11px] text-gray-400">
+              可滚动预览全部内容
             </div>
           </div>
         </div>
@@ -366,6 +383,8 @@ const addCandidate = (candidates: CandidateJson[], jsonStr: string, source?: str
     const isArray = Array.isArray(data)
     const count = isArray ? `${data.length} 项` : `${Object.keys(data).length} 个键`
     const preview = formatted.slice(0, 80) + (formatted.length > 80 ? '...' : '')
+    const lineCount = (formatted.match(/\n/g) || []).length + 1
+    const isLong = formatted.length > 300 || lineCount > 6
     
     // 避免重复
     if (!candidates.some(c => c.json === jsonStr)) {
@@ -375,10 +394,18 @@ const addCandidate = (candidates: CandidateJson[], jsonStr: string, source?: str
         type: isArray ? 'array' : 'object',
         count,
         source,
-        preview
+        preview,
+        isLong
       })
     }
   } catch {}
+}
+
+const toggleCandidatePreview = (index: number) => {
+  const next = new Set(expandedCandidateIndexes.value)
+  if (next.has(index)) next.delete(index)
+  else next.add(index)
+  expandedCandidateIndexes.value = next
 }
 
 const applyJson = (jsonStr: string) => {
@@ -590,8 +617,10 @@ interface CandidateJson {
   count: string
   source?: string
   preview: string
+  isLong: boolean
 }
 const candidateJsons = ref<CandidateJson[]>([])
+const expandedCandidateIndexes = ref<Set<number>>(new Set())
 
 watch([indentSize, showTree, smartParseEnabled, unwrapOuterBrackets], saveSettings)
 
