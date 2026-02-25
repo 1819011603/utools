@@ -552,38 +552,32 @@ const indentOptions = [
 
 const getPathDepth = (path: string): number => {
   if (!path) return 0
-  let depth = 0
-  let inBracket = false
-  
+  // 层数 = 路径段数。根 "" 为 0；"a" 为 1；"a.b" 为 2；"a[0]" 为 2
+  let segments = 1
   for (let i = 0; i < path.length; i++) {
-    if (path[i] === '.') {
-      depth++
-    } else if (path[i] === '[' && !inBracket) {
-      depth++
-      inBracket = true
-    } else if (path[i] === ']') {
-      inBracket = false
-    }
+    if (path[i] === '.') segments++
+    else if (path[i] === '[') segments++
   }
-  
-  return depth
+  return segments
 }
 
 const getMaxDepthInData = (obj: any, currentDepth = 0): number => {
   if (typeof obj !== 'object' || obj === null) return currentDepth
   
-  let maxChildDepth = currentDepth
+  // 当前节点的子节点在树上的层数 = currentDepth + 1
+  const childDepth = currentDepth + 1
+  let maxChildDepth = childDepth
   
   if (Array.isArray(obj)) {
     obj.forEach(item => {
       if (typeof item === 'object' && item !== null) {
-        maxChildDepth = Math.max(maxChildDepth, getMaxDepthInData(item, currentDepth + 1))
+        maxChildDepth = Math.max(maxChildDepth, getMaxDepthInData(item, childDepth))
       }
     })
   } else {
     Object.values(obj).forEach(value => {
       if (typeof value === 'object' && value !== null) {
-        maxChildDepth = Math.max(maxChildDepth, getMaxDepthInData(value, currentDepth + 1))
+        maxChildDepth = Math.max(maxChildDepth, getMaxDepthInData(value, childDepth))
       }
     })
   }
@@ -600,7 +594,8 @@ const currentMaxDepth = computed(() => {
   if (expandedPaths.value.size === 0) return 0
   const expandedPathsArray = Array.from(expandedPaths.value)
   if (expandedPathsArray.length === 0) return 0
-  return Math.max(...expandedPathsArray.map(getPathDepth), 0)
+  // 展开某节点会多露出一层子节点，所以当前可见最大层 = max(路径深度+1)
+  return Math.max(...expandedPathsArray.map(p => getPathDepth(p) + 1), 0)
 })
 
 const stats = computed(() => {
@@ -648,15 +643,18 @@ const expandToLevel = (level: number) => {
   const allPaths = collectPaths(parsed.value)
   const newExpanded = new Set<string>()
   
-  allPaths.forEach(path => {
+  // 到第 N 层 = 只展开深度 < N 的节点（根为第 0 层），第 N 层节点保持收起
+  // 例如到第 1 层：只展开根 ""，code/data/msg 等第一层可见但都收起
+  const levelNum = Number(level)
+  for (const path of allPaths) {
     const depth = getPathDepth(path)
-    if (depth <= level) {
+    if (depth < levelNum) {
       newExpanded.add(path)
     }
-  })
+  }
   
-  expandedPaths.value = newExpanded
-  currentExpandLevel.value = level
+  expandedPaths.value = new Set(newExpanded)
+  currentExpandLevel.value = levelNum
 }
 
 const buildPathMap = (obj: any, indentSize: number): { json: string; pathMap: Map<string, { start: number; end: number; line: number }> } => {
