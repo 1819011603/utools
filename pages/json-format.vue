@@ -956,6 +956,7 @@ const deletePath = (path: string) => {
   next.add(path)
   deletedPaths.value = next
   deletedStack.value = [...deletedStack.value, path]
+  useToast().add({ title: '已删除', color: 'green', timeout: 1500 })
 }
 
 const undoDelete = () => {
