@@ -6,14 +6,14 @@
     </div>
 
     <UAlert
-      icon="i-heroicons-information-circle"
-      color="blue"
+      icon="i-heroicons-exclamation-triangle"
+      color="yellow"
       variant="soft"
     >
-      <template #title>使用提示</template>
+      <template #title>GIF 文件通常比视频大</template>
       <template #description>
         <div class="text-sm">
-          GIF 文件较大，建议设置 <strong>开始/结束时间</strong> 截取需要的片段（5秒以内最佳）
+          GIF 格式压缩效率远低于视频。建议：<strong>宽度 ≤240px</strong>、<strong>时长 ≤5秒</strong>、<strong>帧率 ≤10fps</strong>
         </div>
       </template>
     </UAlert>
@@ -163,14 +163,24 @@
             <template #hint>帧率越低文件越小，10-15 fps 通常足够</template>
           </UFormGroup>
 
-          <UFormGroup label="颜色质量">
+          <UFormGroup label="颜色数量">
+            <USelectMenu 
+              v-model="maxColors" 
+              :options="colorOptions"
+              value-attribute="value"
+              option-attribute="label"
+            />
+            <template #hint>颜色越少文件越小，GIF 最多 256 色</template>
+          </UFormGroup>
+
+          <UFormGroup label="编码质量">
             <USelectMenu 
               v-model="colorQuality" 
               :options="qualityOptions"
               value-attribute="value"
               option-attribute="label"
             />
-            <template #hint>颜色越少文件越小，但画质下降</template>
+            <template #hint>影响颜色采样精度，值越小越精细但更慢</template>
           </UFormGroup>
 
           <UFormGroup label="并行线程数">
@@ -246,10 +256,11 @@ const isPlaying = ref(false)
 const startTime = ref(0)
 const endTime = ref(0)
 
-const outputWidth = ref(320)
-const fps = ref(10)
-const colorQuality = ref(10)
+const outputWidth = ref(240)
+const fps = ref(8)
+const colorQuality = ref(20)
 const workerCount = ref(4)
+const maxColors = ref(128)
 
 const isConverting = ref(false)
 const progress = ref(0)
@@ -260,9 +271,17 @@ const gifBlob = ref<Blob>()
 const gifSize = ref(0)
 
 const qualityOptions = [
-  { label: '高质量 (慢)', value: 1 },
-  { label: '中等质量 (推荐)', value: 10 },
-  { label: '较低质量 (快)', value: 20 }
+  { label: '最高质量 (文件大)', value: 1 },
+  { label: '较高质量', value: 10 },
+  { label: '中等质量 (推荐)', value: 20 },
+  { label: '较低质量 (文件小)', value: 30 }
+]
+
+const colorOptions = [
+  { label: '256 色 (最佳画质)', value: 256 },
+  { label: '128 色 (推荐)', value: 128 },
+  { label: '64 色 (较小文件)', value: 64 },
+  { label: '32 色 (最小文件)', value: 32 }
 ]
 
 const clipDuration = computed(() => Math.max(0, endTime.value - startTime.value))
@@ -271,8 +290,10 @@ const estimatedFrames = computed(() => Math.ceil(clipDuration.value * fps.value)
 
 const estimatedSize = computed(() => {
   const frames = estimatedFrames.value
-  const pixelsPerFrame = outputWidth.value * (outputWidth.value * 0.5625)
-  const bytesPerFrame = pixelsPerFrame * 0.3
+  const pixels = outputWidth.value * (outputWidth.value * 0.5625)
+  const colorFactor = maxColors.value / 256
+  const qualityFactor = (30 - colorQuality.value + 10) / 30
+  const bytesPerFrame = pixels * 0.5 * colorFactor * qualityFactor
   const totalBytes = frames * bytesPerFrame
   return formatFileSize(totalBytes)
 })
@@ -413,11 +434,12 @@ const startConvert = async () => {
       quality: colorQuality.value,
       width: outputWidth.value,
       height: outputHeight,
-      workerScript: '/gif.worker.js'
+      workerScript: '/gif.worker.js',
+      dither: maxColors.value < 128 ? 'FloydSteinberg' : false
     })
 
     for (const frame of frames) {
-      gif.addFrame(frame, { delay: frameDelay })
+      gif.addFrame(frame, { delay: frameDelay, transparent: null })
     }
 
     gif.on('progress', (p: number) => {
