@@ -6,19 +6,20 @@
     </div>
 
     <UAlert
-      icon="i-heroicons-exclamation-triangle"
-      color="yellow"
+      icon="i-heroicons-light-bulb"
+      color="blue"
       variant="soft"
     >
-      <template #title>GIF 文件通常比视频大</template>
+      <template #title>使用建议</template>
       <template #description>
         <div class="text-sm">
-          GIF 格式压缩效率远低于视频。建议：<strong>宽度 ≤240px</strong>、<strong>时长 ≤5秒</strong>、<strong>帧率 ≤10fps</strong>
+          控制 <strong>时长在 3-5 秒</strong> 可获得最佳效果。默认参数已优化清晰度，如需更小文件可降低宽度或帧率。
         </div>
       </template>
     </UAlert>
 
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <!-- 视频源 -->
       <UCard>
         <template #header>
           <div class="flex items-center justify-between">
@@ -55,6 +56,7 @@
             </div>
           </div>
 
+          <!-- 播放控制 -->
           <div class="flex items-center gap-2">
             <UButton
               variant="ghost"
@@ -83,6 +85,7 @@
             </span>
           </div>
 
+          <!-- 时间选择 -->
           <div class="grid grid-cols-2 gap-4">
             <UFormGroup label="开始时间">
               <div class="flex items-center gap-2">
@@ -112,6 +115,7 @@
             </UFormGroup>
           </div>
 
+          <!-- 时长信息 -->
           <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
             <span class="text-sm text-gray-500">选中时长</span>
             <div class="flex items-center gap-2">
@@ -134,65 +138,99 @@
               </UBadge>
             </div>
           </div>
+
+          <!-- 预览按钮 -->
+          <UButton 
+            v-if="videoLoaded && !previewUrl"
+            block 
+            variant="soft" 
+            @click="generatePreview"
+          >
+            <UIcon name="i-heroicons-eye" class="w-4 h-4 mr-2" />
+            预览首帧效果
+          </UButton>
         </div>
       </UCard>
 
+      <!-- GIF 设置 -->
       <UCard>
         <template #header>
-          <span class="font-medium">GIF 设置</span>
+          <div class="flex items-center justify-between">
+            <span class="font-medium">GIF 设置</span>
+            <UButton variant="ghost" size="xs" @click="resetSettings">
+              重置
+            </UButton>
+          </div>
         </template>
 
         <div class="space-y-4">
+          <!-- 基础设置 -->
           <UFormGroup label="输出宽度">
             <div class="flex items-center gap-3">
-              <URange v-model="outputWidth" :min="160" :max="640" :step="40" class="flex-1" />
-              <UBadge variant="soft" class="w-16 justify-center">{{ outputWidth }}px</UBadge>
+              <URange v-model="settings.width" :min="240" :max="800" :step="40" class="flex-1" />
+              <UBadge variant="soft" class="w-16 justify-center">{{ settings.width }}px</UBadge>
             </div>
             <template #hint>
-              <span :class="outputWidth > 480 ? 'text-yellow-600' : ''">
-                {{ outputWidth > 480 ? '宽度较大，文件可能很大' : '推荐宽度' }}
+              <span :class="settings.width > 600 ? 'text-yellow-600' : ''">
+                {{ settings.width > 600 ? '宽度较大，文件会较大' : '推荐 400-500px 兼顾清晰度和大小' }}
               </span>
             </template>
           </UFormGroup>
 
           <UFormGroup label="帧率 (FPS)">
             <div class="flex items-center gap-3">
-              <URange v-model="fps" :min="5" :max="20" :step="1" class="flex-1" />
-              <UBadge variant="soft" class="w-16 justify-center">{{ fps }} fps</UBadge>
+              <URange v-model="settings.fps" :min="8" :max="24" :step="1" class="flex-1" />
+              <UBadge variant="soft" class="w-16 justify-center">{{ settings.fps }} fps</UBadge>
             </div>
-            <template #hint>帧率越低文件越小，10-15 fps 通常足够</template>
+            <template #hint>推荐 10-15 fps，流畅且文件适中</template>
           </UFormGroup>
 
-          <UFormGroup label="颜色数量">
+          <UDivider label="画质设置" />
+
+          <!-- 颜色质量 -->
+          <UFormGroup label="清晰度">
             <USelectMenu 
-              v-model="maxColors" 
-              :options="colorOptions"
+              v-model="settings.quality" 
+              :options="QUALITY_OPTIONS"
               value-attribute="value"
               option-attribute="label"
             />
-            <template #hint>颜色越少文件越小，GIF 最多 256 色</template>
+            <template #hint>清晰度越高颜色越准确，但编码稍慢</template>
           </UFormGroup>
 
-          <UFormGroup label="编码质量">
+          <!-- 抖动算法 -->
+          <UFormGroup label="抖动处理">
             <USelectMenu 
-              v-model="colorQuality" 
-              :options="qualityOptions"
+              v-model="settings.dither" 
+              :options="DITHER_OPTIONS"
               value-attribute="value"
               option-attribute="label"
             />
-            <template #hint>影响颜色采样精度，值越小越精细但更慢</template>
+            <template #hint>无抖动最清晰，有抖动过渡更平滑</template>
           </UFormGroup>
 
-          <UFormGroup label="并行线程数">
+          <!-- 循环设置 -->
+          <UFormGroup label="循环播放">
+            <USelectMenu 
+              v-model="settings.repeat" 
+              :options="REPEAT_OPTIONS"
+              value-attribute="value"
+              option-attribute="label"
+            />
+          </UFormGroup>
+
+          <!-- 并行线程 -->
+          <UFormGroup label="并行线程">
             <div class="flex items-center gap-3">
-              <URange v-model="workerCount" :min="1" :max="8" :step="1" class="flex-1" />
-              <UBadge variant="soft" class="w-16 justify-center">{{ workerCount }} 线程</UBadge>
+              <URange v-model="settings.workers" :min="1" :max="8" :step="1" class="flex-1" />
+              <UBadge variant="soft" class="w-16 justify-center">{{ settings.workers }} 线程</UBadge>
             </div>
-            <template #hint>更多线程可加速处理，但会占用更多内存</template>
+            <template #hint>更多线程加速编码，但占用更多内存</template>
           </UFormGroup>
 
           <UDivider />
 
+          <!-- 预估信息 -->
           <div class="p-3 bg-gray-50 dark:bg-gray-800 rounded-lg space-y-2 text-sm">
             <div class="flex justify-between">
               <span class="text-gray-500">预估帧数</span>
@@ -200,50 +238,104 @@
             </div>
             <div class="flex justify-between">
               <span class="text-gray-500">预估大小</span>
-              <span class="font-medium">{{ estimatedSize }}</span>
+              <span class="font-medium" :class="estimatedBytes > 5 * 1024 * 1024 ? 'text-yellow-600' : ''">
+                {{ formatFileSize(estimatedBytes) }}
+              </span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-gray-500">输出尺寸</span>
+              <span class="font-medium">{{ settings.width }} × {{ outputHeight }}px</span>
             </div>
           </div>
 
+          <!-- 转换按钮 -->
           <UButton
             block
             size="lg"
-            :loading="isConverting"
+            :loading="isEncoding"
             :disabled="!videoUrl || clipDuration <= 0"
             @click="startConvert"
           >
             <UIcon name="i-heroicons-sparkles" class="w-5 h-5 mr-2" />
-            {{ isConverting ? '转换中...' : '开始转换' }}
+            {{ isEncoding ? '转换中...' : '开始转换' }}
           </UButton>
 
-          <div v-if="isConverting" class="space-y-2">
-            <UProgress :value="progress" :color="progress < 50 ? 'primary' : 'green'" />
-            <p class="text-sm text-center text-gray-500">{{ progressText }}</p>
+          <!-- 进度条 -->
+          <div v-if="isEncoding" class="space-y-2">
+            <UProgress :value="progress.progress" :color="progress.phase === 'extracting' ? 'primary' : 'green'" />
+            <p class="text-sm text-center text-gray-500">{{ progress.message }}</p>
           </div>
+        </div>
+      </UCard>
+    </div>
 
-          <div v-if="gifUrl" class="space-y-4 pt-4">
-            <UDivider label="转换结果" />
-            <div class="rounded-lg overflow-hidden bg-gray-100 dark:bg-gray-800 p-2">
-              <img :src="gifUrl" class="w-full rounded" alt="Generated GIF" />
-            </div>
-            <div class="flex items-center justify-between text-sm">
-              <span class="text-gray-500">文件大小</span>
-              <UBadge :color="gifSize > 5 * 1024 * 1024 ? 'yellow' : 'green'" variant="soft">
-                {{ formatFileSize(gifSize) }}
-              </UBadge>
-            </div>
-            <UButton block variant="soft" @click="downloadGif">
+    <!-- 预览和结果 -->
+    <div v-if="previewUrl || gifUrl" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <!-- 预览 -->
+      <UCard v-if="previewUrl">
+        <template #header>
+          <div class="flex items-center justify-between">
+            <span class="font-medium">首帧预览</span>
+            <UButton variant="ghost" size="xs" @click="previewUrl = ''">关闭</UButton>
+          </div>
+        </template>
+        <div class="rounded-lg overflow-hidden bg-gray-100 dark:bg-gray-800">
+          <img :src="previewUrl" class="w-full" alt="Preview" />
+        </div>
+        <template #footer>
+          <p class="text-sm text-gray-500 text-center">
+            预览尺寸: {{ settings.width }} × {{ outputHeight }}px
+          </p>
+        </template>
+      </UCard>
+
+      <!-- 结果 -->
+      <UCard v-if="gifUrl">
+        <template #header>
+          <div class="flex items-center justify-between">
+            <span class="font-medium">转换结果</span>
+            <UBadge :color="gifSize > 5 * 1024 * 1024 ? 'yellow' : 'green'" variant="soft">
+              {{ formatFileSize(gifSize) }}
+            </UBadge>
+          </div>
+        </template>
+        <div class="rounded-lg overflow-hidden bg-gray-100 dark:bg-gray-800">
+          <img :src="gifUrl" class="w-full" alt="Generated GIF" />
+        </div>
+        <template #footer>
+          <div class="flex gap-2">
+            <UButton class="flex-1" variant="soft" @click="downloadGif">
               <UIcon name="i-heroicons-arrow-down-tray" class="w-4 h-4 mr-2" />
               下载 GIF
             </UButton>
+            <UButton variant="ghost" @click="clearGif">
+              <UIcon name="i-heroicons-trash" class="w-4 h-4" />
+            </UButton>
           </div>
-        </div>
+        </template>
       </UCard>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import GIF from 'gif.js'
+import { 
+  useGifEncoder, 
+  DITHER_OPTIONS, 
+  QUALITY_OPTIONS, 
+  REPEAT_OPTIONS,
+  type DitherType 
+} from '~/composables/useGifEncoder'
+
+const {
+  isEncoding,
+  progress,
+  convertVideoToGif,
+  captureFrame,
+  estimateGifSize,
+  formatFileSize,
+  formatTime
+} = useGifEncoder()
 
 const videoRef = ref<HTMLVideoElement>()
 const videoUrl = ref('')
@@ -256,47 +348,32 @@ const isPlaying = ref(false)
 const startTime = ref(0)
 const endTime = ref(0)
 
-const outputWidth = ref(240)
-const fps = ref(8)
-const colorQuality = ref(20)
-const workerCount = ref(4)
-const maxColors = ref(128)
+const settings = reactive({
+  width: 480,
+  fps: 12,
+  quality: 1,
+  workers: 4,
+  dither: false as DitherType,
+  repeat: 0
+})
 
-const isConverting = ref(false)
-const progress = ref(0)
-const progressText = ref('')
-
+const previewUrl = ref('')
 const gifUrl = ref('')
 const gifBlob = ref<Blob>()
 const gifSize = ref(0)
 
-const qualityOptions = [
-  { label: '最高质量 (文件大)', value: 1 },
-  { label: '较高质量', value: 10 },
-  { label: '中等质量 (推荐)', value: 20 },
-  { label: '较低质量 (文件小)', value: 30 }
-]
-
-const colorOptions = [
-  { label: '256 色 (最佳画质)', value: 256 },
-  { label: '128 色 (推荐)', value: 128 },
-  { label: '64 色 (较小文件)', value: 64 },
-  { label: '32 色 (最小文件)', value: 32 }
-]
-
 const clipDuration = computed(() => Math.max(0, endTime.value - startTime.value))
+const estimatedFrames = computed(() => Math.ceil(clipDuration.value * settings.fps))
 
-const estimatedFrames = computed(() => Math.ceil(clipDuration.value * fps.value))
-
-const estimatedSize = computed(() => {
-  const frames = estimatedFrames.value
-  const pixels = outputWidth.value * (outputWidth.value * 0.5625)
-  const colorFactor = maxColors.value / 256
-  const qualityFactor = (30 - colorQuality.value + 10) / 30
-  const bytesPerFrame = pixels * 0.5 * colorFactor * qualityFactor
-  const totalBytes = frames * bytesPerFrame
-  return formatFileSize(totalBytes)
+const outputHeight = computed(() => {
+  if (!videoRef.value || !videoLoaded.value) return Math.round(settings.width * 0.5625)
+  const aspectRatio = videoRef.value.videoHeight / videoRef.value.videoWidth
+  return Math.round(settings.width * aspectRatio)
 })
+
+const estimatedBytes = computed(() => 
+  estimateGifSize(estimatedFrames.value, settings.width, outputHeight.value, 128, settings.quality)
+)
 
 const handleVideoFile = (files: File[]) => {
   if (files[0]) loadVideo(files[0])
@@ -306,26 +383,34 @@ const loadVideo = (file: File) => {
   videoFile.value = file
   videoUrl.value = URL.createObjectURL(file)
   gifUrl.value = ''
+  previewUrl.value = ''
   videoLoaded.value = false
 }
 
 const clearVideo = () => {
   if (videoUrl.value) URL.revokeObjectURL(videoUrl.value)
-  if (gifUrl.value) URL.revokeObjectURL(gifUrl.value)
+  clearGif()
   videoUrl.value = ''
   videoFile.value = undefined
-  gifUrl.value = ''
   currentTime.value = 0
   duration.value = 0
   startTime.value = 0
   endTime.value = 0
   videoLoaded.value = false
+  previewUrl.value = ''
+}
+
+const clearGif = () => {
+  if (gifUrl.value) URL.revokeObjectURL(gifUrl.value)
+  gifUrl.value = ''
+  gifBlob.value = undefined
+  gifSize.value = 0
 }
 
 const onVideoLoaded = () => {
   if (videoRef.value) {
     duration.value = videoRef.value.duration
-    endTime.value = duration.value
+    endTime.value = Math.min(duration.value, 5)
     videoLoaded.value = true
   }
 }
@@ -353,116 +438,48 @@ const seekTo = (time: number) => {
   }
 }
 
-const formatTime = (seconds: number): string => {
-  if (!seconds || !isFinite(seconds)) return '0:00.0'
-  const mins = Math.floor(seconds / 60)
-  const secs = Math.floor(seconds % 60)
-  const ms = Math.floor((seconds % 1) * 10)
-  return `${mins}:${secs.toString().padStart(2, '0')}.${ms}`
-}
-
-const formatFileSize = (bytes: number): string => {
-  if (bytes < 1024) return bytes + ' B'
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
-  return (bytes / 1024 / 1024).toFixed(2) + ' MB'
-}
-
-const seekVideo = (video: HTMLVideoElement, time: number): Promise<void> => {
-  return new Promise((resolve) => {
-    const onSeeked = () => {
-      video.removeEventListener('seeked', onSeeked)
-      resolve()
+const generatePreview = () => {
+  if (!videoRef.value) return
+  videoRef.value.currentTime = startTime.value
+  
+  setTimeout(() => {
+    if (videoRef.value) {
+      previewUrl.value = captureFrame(videoRef.value, settings.width, outputHeight.value)
     }
-    video.addEventListener('seeked', onSeeked)
-    video.currentTime = time
-  })
+  }, 100)
 }
 
-const extractFrameToImageData = (
-  video: HTMLVideoElement, 
-  canvas: HTMLCanvasElement, 
-  ctx: CanvasRenderingContext2D,
-  width: number,
-  height: number
-): ImageData => {
-  ctx.drawImage(video, 0, 0, width, height)
-  return ctx.getImageData(0, 0, width, height)
+const resetSettings = () => {
+  settings.width = 480
+  settings.fps = 12
+  settings.quality = 1
+  settings.workers = 4
+  settings.dither = false
+  settings.repeat = 0
 }
 
 const startConvert = async () => {
   if (!videoRef.value || clipDuration.value <= 0) return
 
-  isConverting.value = true
-  progress.value = 0
-  progressText.value = '准备中...'
-
   try {
-    const video = videoRef.value
-    const aspectRatio = video.videoHeight / video.videoWidth
-    const outputHeight = Math.round(outputWidth.value * aspectRatio)
-
-    const canvas = document.createElement('canvas')
-    canvas.width = outputWidth.value
-    canvas.height = outputHeight
-    const ctx = canvas.getContext('2d', { willReadFrequently: true })!
-
-    const frameDelay = Math.round(1000 / fps.value)
-    const totalFrames = Math.ceil(clipDuration.value * fps.value)
-
-    progressText.value = `提取帧 (0/${totalFrames})`
-
-    const frames: ImageData[] = []
-    
-    for (let i = 0; i < totalFrames; i++) {
-      const time = startTime.value + (i / fps.value)
-      if (time > endTime.value) break
-      
-      await seekVideo(video, time)
-      
-      const imageData = extractFrameToImageData(video, canvas, ctx, outputWidth.value, outputHeight)
-      frames.push(imageData)
-
-      progress.value = Math.round((i / totalFrames) * 50)
-      progressText.value = `提取帧 (${i + 1}/${totalFrames})`
-    }
-
-    progressText.value = `生成 GIF (${workerCount.value} 线程)...`
-    progress.value = 55
-
-    const gif = new GIF({
-      workers: workerCount.value,
-      quality: colorQuality.value,
-      width: outputWidth.value,
-      height: outputHeight,
-      workerScript: '/gif.worker.js',
-      dither: maxColors.value < 128 ? 'FloydSteinberg' : false
-    })
-
-    for (const frame of frames) {
-      gif.addFrame(frame, { delay: frameDelay, transparent: null })
-    }
-
-    gif.on('progress', (p: number) => {
-      progress.value = 55 + Math.round(p * 45)
-    })
-
-    const blob = await new Promise<Blob>((resolve) => {
-      gif.on('finished', (blob: Blob) => resolve(blob))
-      gif.render()
+    const blob = await convertVideoToGif(videoRef.value, {
+      startTime: startTime.value,
+      endTime: endTime.value,
+      fps: settings.fps,
+      width: settings.width,
+      height: outputHeight.value,
+      quality: settings.quality,
+      workers: settings.workers,
+      dither: settings.dither,
+      repeat: settings.repeat
     })
 
     gifBlob.value = blob
     gifSize.value = blob.size
     if (gifUrl.value) URL.revokeObjectURL(gifUrl.value)
     gifUrl.value = URL.createObjectURL(blob)
-
-    progress.value = 100
-    progressText.value = '完成!'
   } catch (error) {
     console.error('转换失败:', error)
-    progressText.value = '转换失败: ' + (error instanceof Error ? error.message : '未知错误')
-  } finally {
-    isConverting.value = false
   }
 }
 
@@ -473,4 +490,9 @@ const downloadGif = () => {
   a.download = (videoFile.value?.name.replace(/\.[^.]+$/, '') || 'video') + '.gif'
   a.click()
 }
+
+onUnmounted(() => {
+  if (videoUrl.value) URL.revokeObjectURL(videoUrl.value)
+  if (gifUrl.value) URL.revokeObjectURL(gifUrl.value)
+})
 </script>
