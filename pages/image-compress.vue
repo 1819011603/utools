@@ -100,20 +100,24 @@
           v-for="item in items" 
           :key="item.id" 
           :ui="{ body: { padding: 'p-3' } }"
-          :class="{ 'ring-2 ring-primary-500': selectedItem?.id === item.id }"
+          :class="[
+            { 'ring-2 ring-primary-500': selectedItem?.id === item.id },
+            item.status === 'completed' ? 'cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors' : ''
+          ]"
+          @click="selectItem(item)"
         >
           <div class="flex gap-3">
-            <div 
-              class="w-20 h-20 rounded-lg overflow-hidden bg-gray-100 dark:bg-gray-800 shrink-0 cursor-pointer relative group"
-              @click="selectItem(item)"
-            >
+            <div class="w-20 h-20 rounded-lg overflow-hidden bg-gray-100 dark:bg-gray-800 shrink-0 relative group">
               <img
                 v-if="item.preview"
                 :src="item.processedPreview || item.preview"
                 class="w-full h-full object-cover"
                 alt="preview"
               />
-              <div class="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+              <div 
+                v-if="item.status === 'completed'"
+                class="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
+              >
                 <UIcon name="i-heroicons-magnifying-glass-plus" class="w-6 h-6 text-white" />
               </div>
               <UBadge
@@ -156,17 +160,21 @@
               
               <div class="mt-2 flex items-center gap-2">
                 <template v-if="item.status === 'completed'">
-                  <UButton size="xs" @click="downloadItem(item, '_compressed')">下载</UButton>
-                  <UButton size="xs" variant="ghost" @click="reprocess(item)">
+                  <UButton size="xs" @click.stop="downloadItem(item, '_compressed')">下载</UButton>
+                  <UButton size="xs" variant="ghost" @click.stop="reprocess(item)">
                     <UIcon name="i-heroicons-arrow-path" class="w-3 h-3" />
                   </UButton>
+                  <span class="text-xs text-gray-400 ml-auto">点击预览对比</span>
                 </template>
                 <template v-else-if="item.status === 'processing'">
                   <UBadge color="yellow" variant="soft">压缩中...</UBadge>
                 </template>
+                <template v-else-if="item.status === 'pending'">
+                  <UBadge color="gray" variant="soft">等待中...</UBadge>
+                </template>
                 <template v-else-if="item.status === 'error'">
                   <UBadge color="red" variant="soft">失败</UBadge>
-                  <UButton size="xs" variant="ghost" @click="reprocess(item)">重试</UButton>
+                  <UButton size="xs" variant="ghost" @click.stop="reprocess(item)">重试</UButton>
                 </template>
               </div>
             </div>
@@ -176,7 +184,7 @@
               variant="ghost" 
               color="gray"
               icon="i-heroicons-x-mark"
-              @click="removeItem(item.id)"
+              @click.stop="removeItem(item.id)"
             />
           </div>
         </UCard>
