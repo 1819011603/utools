@@ -92,6 +92,23 @@ interface Category {
 
 const categories: Category[] = [
   {
+    name: 'PDF 工具',
+    icon: 'i-heroicons-document',
+    bgColor: 'bg-red-100 dark:bg-red-900/50',
+    iconColor: 'text-red-600 dark:text-red-400',
+    defaultOpen: true,
+    tools: [
+      {
+        name: 'PDF 工具箱',
+        path: '/pdf-tools',
+        icon: 'i-heroicons-document-duplicate',
+        description: 'PDF 合并、拆分、压缩、加水印、格式转换等',
+        bgColor: 'bg-red-100 dark:bg-red-900/50',
+        iconColor: 'text-red-600 dark:text-red-400'
+      }
+    ]
+  },
+  {
     name: '媒体处理',
     icon: 'i-heroicons-photo',
     bgColor: 'bg-rose-100 dark:bg-rose-900/50',
