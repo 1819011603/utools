@@ -65,9 +65,31 @@
             >
               <UIcon name="i-heroicons-bars-3" class="w-4 h-4 text-gray-400" />
               <UIcon name="i-heroicons-document" class="w-5 h-5 text-red-500" />
+              <div class="flex items-center justify-center w-6 h-6 rounded-full bg-primary-100 dark:bg-primary-900 text-primary-600 dark:text-primary-400 text-xs font-medium">
+                {{ index + 1 }}
+              </div>
               <span class="flex-1 text-sm truncate">{{ file.name }}</span>
               <UBadge color="gray" variant="soft" size="xs">{{ formatSize(file.size) }}</UBadge>
               <UButton size="xs" variant="ghost" icon="i-heroicons-x-mark" @click="removeMergeFile(index)" />
+            </div>
+          </div>
+
+          <!-- 合并预览 -->
+          <div class="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
+            <div class="flex items-start gap-2">
+              <UIcon name="i-heroicons-eye" class="w-5 h-5 text-blue-500 mt-0.5" />
+              <div class="flex-1 text-sm">
+                <div class="font-medium text-blue-700 dark:text-blue-300 mb-1">预览</div>
+                <div class="text-blue-600 dark:text-blue-400">
+                  将按顺序合并 {{ mergeFiles.length }} 个 PDF 文件为 1 个文件
+                </div>
+                <div class="text-blue-500 dark:text-blue-500 text-xs mt-1">
+                  合并顺序：{{ mergeFiles.map((f, i) => `${i + 1}. ${f.name}`).join(' → ') }}
+                </div>
+                <div class="text-blue-500 dark:text-blue-500 text-xs">
+                  预计大小：约 {{ formatSize(mergeFilesTotalSize) }}
+                </div>
+              </div>
             </div>
           </div>
 
@@ -123,14 +145,41 @@
             <URadioGroup v-model="splitOutputMode" :options="splitOutputOptions" />
           </UFormGroup>
 
-          <div v-if="splitMode === 'range' && splitRangeInput" class="text-sm text-gray-500 dark:text-gray-400 p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
-            <span class="font-medium">预览：</span>
-            <span v-if="splitOutputMode === 'merge'" class="text-green-600 dark:text-green-400">
-              将提取 {{ parsedRangesPreview }}，合并为 1 个 PDF 文件
-            </span>
-            <span v-else class="text-blue-600 dark:text-blue-400">
-              将拆分为 {{ parsedRangesCount }} 个独立 PDF 文件（{{ parsedRangesPreview }}）
-            </span>
+          <!-- 拆分预览 -->
+          <div v-if="splitMode === 'range' && splitRangeInput && parsedRangesCount > 0" class="p-3 bg-purple-50 dark:bg-purple-900/20 rounded-lg border border-purple-200 dark:border-purple-800">
+            <div class="flex items-start gap-2">
+              <UIcon name="i-heroicons-eye" class="w-5 h-5 text-purple-500 mt-0.5" />
+              <div class="flex-1 text-sm">
+                <div class="font-medium text-purple-700 dark:text-purple-300 mb-1">预览</div>
+                <div v-if="splitOutputMode === 'merge'" class="text-purple-600 dark:text-purple-400">
+                  将提取 <span class="font-medium">{{ parsedRangesPreview }}</span>，合并为 1 个 PDF 文件
+                </div>
+                <div v-else class="text-purple-600 dark:text-purple-400">
+                  将拆分为 <span class="font-medium">{{ parsedRangesCount }}</span> 个独立 PDF 文件
+                  <div class="text-purple-500 text-xs mt-1">
+                    {{ parsedRangesPreview }}，每个范围单独保存
+                  </div>
+                </div>
+                <!-- 超出范围警告 -->
+                <div v-if="hasInvalidRanges" class="mt-2 text-yellow-600 dark:text-yellow-400 text-xs flex items-center gap-1">
+                  <UIcon name="i-heroicons-exclamation-triangle" class="w-4 h-4" />
+                  {{ invalidRangesMessage }}
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <!-- 每页拆分预览 -->
+          <div v-if="splitMode === 'single'" class="p-3 bg-purple-50 dark:bg-purple-900/20 rounded-lg border border-purple-200 dark:border-purple-800">
+            <div class="flex items-start gap-2">
+              <UIcon name="i-heroicons-eye" class="w-5 h-5 text-purple-500 mt-0.5" />
+              <div class="flex-1 text-sm">
+                <div class="font-medium text-purple-700 dark:text-purple-300 mb-1">预览</div>
+                <div class="text-purple-600 dark:text-purple-400">
+                  将拆分为 <span class="font-medium">{{ splitPageCount }}</span> 个独立 PDF 文件，每页一个文件
+                </div>
+              </div>
+            </div>
           </div>
 
           <UButton 
@@ -288,6 +337,45 @@
                 option-attribute="label"
               />
             </UFormGroup>
+          </div>
+
+          <!-- 水印预览 -->
+          <div class="p-3 bg-cyan-50 dark:bg-cyan-900/20 rounded-lg border border-cyan-200 dark:border-cyan-800">
+            <div class="flex items-start gap-2">
+              <UIcon name="i-heroicons-eye" class="w-5 h-5 text-cyan-500 mt-0.5" />
+              <div class="flex-1 text-sm">
+                <div class="font-medium text-cyan-700 dark:text-cyan-300 mb-1">预览</div>
+                <div class="text-cyan-600 dark:text-cyan-400">
+                  将为 PDF 添加 <span class="font-medium">{{ watermarkPositionLabel }}</span> 水印
+                </div>
+                <div class="flex items-center gap-4 text-cyan-500 text-xs mt-2">
+                  <span>文字：<span class="font-medium">{{ watermarkOptions.text || '(未设置)' }}</span></span>
+                  <span>大小：{{ watermarkOptions.fontSize }}px</span>
+                  <span>透明度：{{ watermarkOpacityPercent }}%</span>
+                  <span>旋转：{{ watermarkOptions.rotation }}°</span>
+                </div>
+                <!-- 水印效果示意 -->
+                <div class="mt-3 p-4 bg-white dark:bg-gray-800 rounded border border-cyan-200 dark:border-cyan-700 relative overflow-hidden" style="min-height: 80px;">
+                  <div 
+                    v-if="watermarkOptions.text"
+                    class="absolute inset-0 flex items-center justify-center pointer-events-none"
+                  >
+                    <span 
+                      :style="{
+                        fontSize: `${Math.min(watermarkOptions.fontSize, 24)}px`,
+                        color: watermarkOptions.color,
+                        opacity: watermarkOptions.opacity,
+                        transform: `rotate(${watermarkOptions.rotation}deg)`,
+                        whiteSpace: 'nowrap'
+                      }"
+                    >
+                      {{ watermarkOptions.text }}
+                    </span>
+                  </div>
+                  <div class="text-xs text-gray-400 text-center">水印效果示意</div>
+                </div>
+              </div>
+            </div>
           </div>
 
           <UButton 
@@ -545,6 +633,11 @@ const downloadResult = (result: PdfProcessResult) => {
 const mergeFiles = ref<File[]>([])
 let dragIndex = -1
 
+// 合并文件总大小
+const mergeFilesTotalSize = computed(() => {
+  return mergeFiles.value.reduce((sum, f) => sum + f.size, 0)
+})
+
 const handleMergeFiles = (files: File[]) => {
   mergeFiles.value.push(...files.filter(f => f.type === 'application/pdf'))
 }
@@ -594,15 +687,63 @@ const splitOutputOptions = [
   { value: 'merge', label: '所有范围合并成一个文件' }
 ]
 
+// 解析范围用于预览（不验证 maxPage，直接解析用户输入）
+const parseRangesForDisplay = (input: string): Array<{ start: number; end: number }> => {
+  const ranges: Array<{ start: number; end: number }> = []
+  
+  const normalizedInput = input
+    .replace(/，/g, ',')
+    .replace(/；/g, ';')
+    .replace(/;/g, ',')
+  
+  const parts = normalizedInput.split(',').map(s => s.trim()).filter(Boolean)
+  
+  for (const part of parts) {
+    const normalizedPart = part.replace(/－/g, '-')
+    
+    if (normalizedPart.includes('-')) {
+      const [startStr, endStr] = normalizedPart.split('-').map(s => s.trim())
+      const start = parseInt(startStr)
+      const end = parseInt(endStr)
+      if (!isNaN(start) && !isNaN(end) && start >= 1 && start <= end) {
+        ranges.push({ start, end })
+      }
+    } else {
+      const page = parseInt(normalizedPart)
+      if (!isNaN(page) && page >= 1) {
+        ranges.push({ start: page, end: page })
+      }
+    }
+  }
+  
+  return ranges
+}
+
 // 解析后的范围预览
+const parsedRangesForPreview = computed(() => {
+  return parseRangesForDisplay(splitRangeInput.value)
+})
+
 const parsedRangesPreview = computed(() => {
-  const ranges = parseRanges(splitRangeInput.value, splitPageCount.value)
+  const ranges = parsedRangesForPreview.value
   if (ranges.length === 0) return '无有效范围'
   return ranges.map(r => r.start === r.end ? `第${r.start}页` : `第${r.start}-${r.end}页`).join(' 和 ')
 })
 
 const parsedRangesCount = computed(() => {
-  return parseRanges(splitRangeInput.value, splitPageCount.value).length
+  return parsedRangesForPreview.value.length
+})
+
+// 检查范围是否超出 PDF 页数
+const hasInvalidRanges = computed(() => {
+  if (splitPageCount.value === 0) return false
+  return parsedRangesForPreview.value.some(r => r.end > splitPageCount.value)
+})
+
+const invalidRangesMessage = computed(() => {
+  if (!hasInvalidRanges.value) return ''
+  const invalid = parsedRangesForPreview.value.filter(r => r.end > splitPageCount.value)
+  return `注意：${invalid.map(r => `${r.start}-${r.end}`).join('、')} 超出 PDF 页数（共 ${splitPageCount.value} 页），将自动调整`
 })
 
 const handleSplitFile = async (files: File[]) => {
@@ -667,20 +808,34 @@ const doSplit = async () => {
         downloadBlob(zipBlob, 'split_pdfs.zip')
       }
     } else {
-      // 按范围拆分
-      const ranges = parseRanges(splitRangeInput.value, splitPageCount.value)
-      if (ranges.length === 0) {
+      // 按范围拆分 - 先用宽松解析获取用户输入的范围
+      const inputRanges = parseRangesForDisplay(splitRangeInput.value)
+      if (inputRanges.length === 0) {
         alert('请输入有效的页面范围')
+        return
+      }
+      
+      // 自动调整超出 PDF 页数的范围
+      const maxPage = splitPageCount.value
+      const adjustedRanges = inputRanges
+        .map(r => ({
+          start: Math.max(1, Math.min(r.start, maxPage)),
+          end: Math.max(1, Math.min(r.end, maxPage))
+        }))
+        .filter(r => r.start <= r.end && r.start >= 1)
+      
+      if (adjustedRanges.length === 0) {
+        alert('所有范围都超出了 PDF 页数范围')
         return
       }
       
       if (splitOutputMode.value === 'merge') {
         // 所有范围合并成一个文件
-        const result = await splitAndMergePdf(splitFile.value, ranges)
+        const result = await splitAndMergePdf(splitFile.value, adjustedRanges)
         downloadResult(result)
       } else {
         // 每个范围单独一个文件
-        const results = await splitPdf(splitFile.value, ranges)
+        const results = await splitPdf(splitFile.value, adjustedRanges)
         
         if (results.length === 1) {
           downloadResult(results[0])
@@ -776,6 +931,11 @@ const watermarkPositionOptions = [
   { value: 'diagonal', label: '对角线' },
   { value: 'tile', label: '平铺' }
 ]
+
+const watermarkPositionLabel = computed(() => {
+  const option = watermarkPositionOptions.find(o => o.value === watermarkOptions.value.position)
+  return option?.label || '未知'
+})
 
 const handleWatermarkFile = (files: File[]) => {
   const file = files.find(f => f.type === 'application/pdf')
