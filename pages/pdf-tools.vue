@@ -137,16 +137,47 @@
             <URadioGroup v-model="splitMode" :options="splitModeOptions" />
           </UFormGroup>
 
-          <UFormGroup v-if="splitMode === 'range'" label="页面范围" hint="支持中英文逗号/分号分隔，如：1-30, 60-90">
-            <UInput v-model="splitRangeInput" placeholder="1-30, 60-90 或 1-30；60-90" />
-          </UFormGroup>
+          <div v-if="splitMode === 'range'" class="space-y-3">
+            <div class="flex items-center justify-between">
+              <span class="text-sm font-medium text-gray-700 dark:text-gray-300">页面范围</span>
+              <UButton size="xs" variant="soft" @click="addSplitRange">
+                <UIcon name="i-heroicons-plus" class="w-3 h-3 mr-1" />
+                新增范围
+              </UButton>
+            </div>
+            <div
+              v-for="(range, index) in splitRanges"
+              :key="`split-range-${index}`"
+              class="p-3 border border-gray-200 dark:border-gray-700 rounded-lg bg-gray-50 dark:bg-gray-800/60 space-y-2"
+            >
+              <div class="flex items-center justify-between text-sm">
+                <span>Range {{ index + 1 }}</span>
+                <UButton
+                  v-if="splitRanges.length > 1"
+                  size="2xs"
+                  color="red"
+                  variant="ghost"
+                  icon="i-heroicons-trash"
+                  @click="removeSplitRange(index)"
+                />
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <UFormGroup label="from page">
+                  <UInput v-model.number="range.start" type="number" :min="1" :max="splitPageCount || 1" />
+                </UFormGroup>
+                <UFormGroup label="to">
+                  <UInput v-model.number="range.end" type="number" :min="1" :max="splitPageCount || 1" />
+                </UFormGroup>
+              </div>
+            </div>
+          </div>
 
           <UFormGroup v-if="splitMode === 'range'" label="输出方式">
             <URadioGroup v-model="splitOutputMode" :options="splitOutputOptions" />
           </UFormGroup>
 
           <!-- 拆分预览 -->
-          <div v-if="splitMode === 'range' && splitRangeInput && parsedRangesCount > 0" class="p-3 bg-purple-50 dark:bg-purple-900/20 rounded-lg border border-purple-200 dark:border-purple-800">
+          <div v-if="splitMode === 'range' && parsedRangesCount > 0" class="p-3 bg-purple-50 dark:bg-purple-900/20 rounded-lg border border-purple-200 dark:border-purple-800">
             <div class="flex items-start gap-2">
               <UIcon name="i-heroicons-eye" class="w-5 h-5 text-purple-500 mt-0.5" />
               <div class="flex-1 text-sm">
@@ -194,326 +225,99 @@
       </div>
     </UCard>
 
-    <!-- PDF 压缩 -->
+    <!-- PDF 压缩（跳转 iLovePDF） -->
     <UCard v-if="activeTool === 'compress'">
       <template #header>
         <div class="flex items-center gap-2">
           <UIcon name="i-heroicons-arrow-down-on-square-stack" class="w-5 h-5 text-green-500" />
-          <span class="font-semibold">PDF 压缩</span>
+          <span class="font-semibold">PDF 压缩（在线）</span>
           <UBadge color="green" variant="soft" size="xs">减小文件大小</UBadge>
         </div>
       </template>
 
       <div class="space-y-4">
-        <FileUpload
-          accept=".pdf,application/pdf"
-          accept-text="PDF 文件"
-          icon="i-heroicons-document"
-          @files="handleCompressFiles"
+        <UAlert
+          color="blue"
+          variant="soft"
+          icon="i-heroicons-link"
+          title="使用 iLovePDF 压缩"
+          description="压缩改为使用更稳定的在线方案，不再走本地压缩。"
         />
-
-        <div v-if="compressFiles.length > 0" class="space-y-3">
-          <div 
-            v-for="(item, index) in compressFiles" 
-            :key="item.file.name + index"
-            class="flex items-center gap-3 p-3 bg-gray-50 dark:bg-gray-800 rounded-lg"
-          >
-            <UIcon name="i-heroicons-document" class="w-5 h-5 text-red-500" />
-            <div class="flex-1 min-w-0">
-              <p class="text-sm truncate">{{ item.file.name }}</p>
-              <div class="flex items-center gap-2 text-xs text-gray-500">
-                <span>原始: {{ formatSize(item.file.size) }}</span>
-                <template v-if="item.result">
-                  <UIcon name="i-heroicons-arrow-right" class="w-3 h-3" />
-                  <span :class="item.result.blob.size < item.file.size ? 'text-green-500' : 'text-gray-500'">
-                    压缩后: {{ formatSize(item.result.blob.size) }}
-                    <span v-if="item.result.blob.size < item.file.size">
-                      (-{{ Math.round((1 - item.result.blob.size / item.file.size) * 100) }}%)
-                    </span>
-                  </span>
-                </template>
-              </div>
-            </div>
-            <template v-if="item.status === 'completed'">
-              <UBadge color="green" variant="soft">完成</UBadge>
-              <UButton size="xs" @click="downloadResult(item.result!)">下载</UButton>
-            </template>
-            <template v-else-if="item.status === 'processing'">
-              <UBadge color="yellow" variant="soft">压缩中...</UBadge>
-            </template>
-            <template v-else>
-              <UBadge color="gray" variant="soft">等待中</UBadge>
-            </template>
-            <UButton size="xs" variant="ghost" icon="i-heroicons-x-mark" @click="compressFiles.splice(index, 1)" />
-          </div>
-
-          <div class="flex gap-3">
-            <UButton 
-              color="primary" 
-              :loading="processing"
-              :disabled="compressFiles.every(f => f.status === 'completed')"
-              @click="doCompress"
-            >
-              <UIcon name="i-heroicons-bolt" class="w-4 h-4 mr-1" />
-              开始压缩
-            </UButton>
-            <UButton 
-              v-if="compressFiles.some(f => f.status === 'completed')"
-              variant="outline"
-              @click="downloadAllCompressed"
-            >
-              <UIcon name="i-heroicons-archive-box-arrow-down" class="w-4 h-4 mr-1" />
-              打包下载
-            </UButton>
-          </div>
-        </div>
+        <UButton color="primary" @click="openExternal('https://www.ilovepdf.com/compress_pdf')">
+          <UIcon name="i-heroicons-arrow-top-right-on-square" class="w-4 h-4 mr-1" />
+          打开 iLovePDF 压缩
+        </UButton>
       </div>
     </UCard>
 
-    <!-- PDF 加水印 -->
+    <!-- PDF 加水印（跳转 iLovePDF） -->
     <UCard v-if="activeTool === 'watermark'">
       <template #header>
         <div class="flex items-center gap-2">
           <UIcon name="i-heroicons-paint-brush" class="w-5 h-5 text-cyan-500" />
-          <span class="font-semibold">PDF 加水印</span>
-          <UBadge color="cyan" variant="soft" size="xs">添加文字水印</UBadge>
+          <span class="font-semibold">PDF 签名/水印（在线）</span>
+          <UBadge color="cyan" variant="soft" size="xs">iLovePDF Sign</UBadge>
         </div>
       </template>
 
       <div class="space-y-4">
-        <FileUpload
-          accept=".pdf,application/pdf"
-          accept-text="PDF 文件"
-          icon="i-heroicons-document"
-          :multiple="false"
-          @files="handleWatermarkFile"
+        <UAlert
+          color="cyan"
+          variant="soft"
+          icon="i-heroicons-link"
+          title="使用 iLovePDF Sign"
+          description="加水印/签名改为在线方案，兼容性更好。"
         />
-
-        <div v-if="watermarkFile" class="space-y-4">
-          <div class="flex items-center gap-3 p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
-            <UIcon name="i-heroicons-document" class="w-5 h-5 text-red-500" />
-            <span class="flex-1 text-sm truncate">{{ watermarkFile.name }}</span>
-            <UButton size="xs" variant="ghost" icon="i-heroicons-x-mark" @click="watermarkFile = null" />
-          </div>
-
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <UFormGroup label="水印文字">
-              <UInput v-model="watermarkOptions.text" placeholder="请输入水印文字 (仅支持英文)" />
-            </UFormGroup>
-
-            <UFormGroup label="字体大小">
-              <div class="flex items-center gap-3">
-                <URange v-model="watermarkOptions.fontSize" :min="12" :max="72" class="flex-1" />
-                <UBadge variant="soft" class="w-12 justify-center">{{ watermarkOptions.fontSize }}</UBadge>
-              </div>
-            </UFormGroup>
-
-            <UFormGroup label="透明度">
-              <div class="flex items-center gap-3">
-                <URange v-model="watermarkOpacityPercent" :min="5" :max="100" class="flex-1" />
-                <UBadge variant="soft" class="w-12 justify-center">{{ watermarkOpacityPercent }}%</UBadge>
-              </div>
-            </UFormGroup>
-
-            <UFormGroup label="水印颜色">
-              <div class="flex items-center gap-2">
-                <input type="color" v-model="watermarkOptions.color" class="w-10 h-10 rounded cursor-pointer" />
-                <UInput v-model="watermarkOptions.color" class="flex-1" />
-              </div>
-            </UFormGroup>
-
-            <UFormGroup label="旋转角度">
-              <div class="flex items-center gap-3">
-                <URange v-model="watermarkOptions.rotation" :min="-90" :max="90" class="flex-1" />
-                <UBadge variant="soft" class="w-12 justify-center">{{ watermarkOptions.rotation }}°</UBadge>
-              </div>
-            </UFormGroup>
-
-            <UFormGroup label="水印位置">
-              <USelectMenu 
-                v-model="watermarkOptions.position" 
-                :options="watermarkPositionOptions"
-                value-attribute="value"
-                option-attribute="label"
-              />
-            </UFormGroup>
-          </div>
-
-          <!-- 水印预览 -->
-          <div class="p-3 bg-cyan-50 dark:bg-cyan-900/20 rounded-lg border border-cyan-200 dark:border-cyan-800">
-            <div class="flex items-start gap-2">
-              <UIcon name="i-heroicons-eye" class="w-5 h-5 text-cyan-500 mt-0.5" />
-              <div class="flex-1 text-sm">
-                <div class="font-medium text-cyan-700 dark:text-cyan-300 mb-1">预览</div>
-                <div class="text-cyan-600 dark:text-cyan-400">
-                  将为 PDF 添加 <span class="font-medium">{{ watermarkPositionLabel }}</span> 水印
-                </div>
-                <div class="flex items-center gap-4 text-cyan-500 text-xs mt-2">
-                  <span>文字：<span class="font-medium">{{ watermarkOptions.text || '(未设置)' }}</span></span>
-                  <span>大小：{{ watermarkOptions.fontSize }}px</span>
-                  <span>透明度：{{ watermarkOpacityPercent }}%</span>
-                  <span>旋转：{{ watermarkOptions.rotation }}°</span>
-                </div>
-                <!-- 水印效果示意 -->
-                <div class="mt-3 p-4 bg-white dark:bg-gray-800 rounded border border-cyan-200 dark:border-cyan-700 relative overflow-hidden" style="min-height: 80px;">
-                  <div 
-                    v-if="watermarkOptions.text"
-                    class="absolute inset-0 flex items-center justify-center pointer-events-none"
-                  >
-                    <span 
-                      :style="{
-                        fontSize: `${Math.min(watermarkOptions.fontSize, 24)}px`,
-                        color: watermarkOptions.color,
-                        opacity: watermarkOptions.opacity,
-                        transform: `rotate(${watermarkOptions.rotation}deg)`,
-                        whiteSpace: 'nowrap'
-                      }"
-                    >
-                      {{ watermarkOptions.text }}
-                    </span>
-                  </div>
-                  <div class="text-xs text-gray-400 text-center">水印效果示意</div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <UButton 
-            color="primary" 
-            :loading="processing"
-            :disabled="!watermarkOptions.text.trim()"
-            @click="doAddWatermark"
-          >
-            <UIcon name="i-heroicons-arrow-down-tray" class="w-4 h-4 mr-1" />
-            添加水印并下载
-          </UButton>
-        </div>
+        <UButton color="primary" @click="openExternal('https://www.ilovepdf.com/sign-pdf')">
+          <UIcon name="i-heroicons-arrow-top-right-on-square" class="w-4 h-4 mr-1" />
+          打开 iLovePDF Sign
+        </UButton>
       </div>
     </UCard>
 
-    <!-- Word 转 PDF -->
-    <UCard v-if="activeTool === 'word2pdf'">
+    <!-- PDF 转 Word（在线） -->
+    <UCard v-if="activeTool === 'pdf2word-online'">
       <template #header>
         <div class="flex items-center gap-2">
-          <UIcon name="i-heroicons-document-text" class="w-5 h-5 text-blue-500" />
-          <span class="font-semibold">Word 转 PDF</span>
-          <UBadge color="blue" variant="soft" size="xs">DOCX → PDF</UBadge>
+          <UIcon name="i-heroicons-arrow-top-right-on-square" class="w-5 h-5 text-red-500" />
+          <span class="font-semibold">PDF 转 Word（在线）</span>
         </div>
       </template>
-
       <div class="space-y-4">
-        <UAlert 
-          color="yellow" 
-          variant="soft" 
-          icon="i-heroicons-exclamation-triangle"
-          title="注意事项"
-          description="浏览器端转换功能有限，复杂格式可能丢失。建议简单文档使用，复杂文档请使用 Microsoft Office 或 WPS。"
+        <UAlert
+          color="red"
+          variant="soft"
+          icon="i-heroicons-information-circle"
+          title="跳转 iLovePDF"
+          description="使用 iLovePDF 的在线转换能力，支持更完整格式。"
         />
-
-        <FileUpload
-          accept=".docx,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-          accept-text="Word 文档 (.docx)"
-          icon="i-heroicons-document-text"
-          @files="handleWordFiles"
-        />
-
-        <div v-if="wordFiles.length > 0" class="space-y-3">
-          <div 
-            v-for="(item, index) in wordFiles" 
-            :key="item.file.name + index"
-            class="flex items-center gap-3 p-3 bg-gray-50 dark:bg-gray-800 rounded-lg"
-          >
-            <UIcon name="i-heroicons-document-text" class="w-5 h-5 text-blue-500" />
-            <span class="flex-1 text-sm truncate">{{ item.file.name }}</span>
-            <template v-if="item.status === 'completed'">
-              <UBadge color="green" variant="soft">完成</UBadge>
-              <UButton size="xs" @click="downloadResult(item.result!)">下载 PDF</UButton>
-            </template>
-            <template v-else-if="item.status === 'processing'">
-              <UBadge color="yellow" variant="soft">转换中...</UBadge>
-            </template>
-            <template v-else-if="item.status === 'error'">
-              <UBadge color="red" variant="soft">失败</UBadge>
-            </template>
-            <template v-else>
-              <UBadge color="gray" variant="soft">等待中</UBadge>
-            </template>
-            <UButton size="xs" variant="ghost" icon="i-heroicons-x-mark" @click="wordFiles.splice(index, 1)" />
-          </div>
-
-          <UButton 
-            color="primary" 
-            :loading="processing"
-            :disabled="wordFiles.every(f => f.status === 'completed')"
-            @click="doWordToPdf"
-          >
-            <UIcon name="i-heroicons-bolt" class="w-4 h-4 mr-1" />
-            开始转换
-          </UButton>
-        </div>
+        <UButton color="primary" @click="openExternal('https://www.ilovepdf.com/pdf_to_word')">
+          <UIcon name="i-heroicons-arrow-top-right-on-square" class="w-4 h-4 mr-1" />
+          打开 PDF 转 Word
+        </UButton>
       </div>
     </UCard>
 
-    <!-- PDF 转 Word -->
-    <UCard v-if="activeTool === 'pdf2word'">
+    <!-- Word 转 PDF（在线） -->
+    <UCard v-if="activeTool === 'word2pdf-online'">
       <template #header>
         <div class="flex items-center gap-2">
-          <UIcon name="i-heroicons-document" class="w-5 h-5 text-red-500" />
-          <span class="font-semibold">PDF 转 Word</span>
-          <UBadge color="red" variant="soft" size="xs">PDF → DOCX</UBadge>
+          <UIcon name="i-heroicons-arrow-top-right-on-square" class="w-5 h-5 text-blue-500" />
+          <span class="font-semibold">Word 转 PDF（在线）</span>
         </div>
       </template>
-
       <div class="space-y-4">
-        <UAlert 
-          color="yellow" 
-          variant="soft" 
-          icon="i-heroicons-exclamation-triangle"
-          title="注意事项"
-          description="浏览器端仅能提取 PDF 中的文本内容，图片和复杂格式将丢失。如需完美转换，建议使用 SmallPDF、iLovePDF 等在线服务。"
+        <UAlert
+          color="blue"
+          variant="soft"
+          icon="i-heroicons-information-circle"
+          title="跳转 iLovePDF"
+          description="使用 iLovePDF 在线转换，稳定性高于浏览器端本地转换。"
         />
-
-        <FileUpload
-          accept=".pdf,application/pdf"
-          accept-text="PDF 文件"
-          icon="i-heroicons-document"
-          @files="handlePdf2WordFiles"
-        />
-
-        <div v-if="pdf2wordFiles.length > 0" class="space-y-3">
-          <div 
-            v-for="(item, index) in pdf2wordFiles" 
-            :key="item.file.name + index"
-            class="flex items-center gap-3 p-3 bg-gray-50 dark:bg-gray-800 rounded-lg"
-          >
-            <UIcon name="i-heroicons-document" class="w-5 h-5 text-red-500" />
-            <span class="flex-1 text-sm truncate">{{ item.file.name }}</span>
-            <template v-if="item.status === 'completed'">
-              <UBadge color="green" variant="soft">完成</UBadge>
-              <UButton size="xs" @click="downloadWordResult(item)">下载 Word</UButton>
-            </template>
-            <template v-else-if="item.status === 'processing'">
-              <UBadge color="yellow" variant="soft">转换中...</UBadge>
-            </template>
-            <template v-else-if="item.status === 'error'">
-              <UBadge color="red" variant="soft">失败</UBadge>
-            </template>
-            <template v-else>
-              <UBadge color="gray" variant="soft">等待中</UBadge>
-            </template>
-            <UButton size="xs" variant="ghost" icon="i-heroicons-x-mark" @click="pdf2wordFiles.splice(index, 1)" />
-          </div>
-
-          <UButton 
-            color="primary" 
-            :loading="processing"
-            :disabled="pdf2wordFiles.every(f => f.status === 'completed')"
-            @click="doPdfToWord"
-          >
-            <UIcon name="i-heroicons-bolt" class="w-4 h-4 mr-1" />
-            开始转换
-          </UButton>
-        </div>
+        <UButton color="primary" @click="openExternal('https://www.ilovepdf.com/word_to_pdf')">
+          <UIcon name="i-heroicons-arrow-top-right-on-square" class="w-4 h-4 mr-1" />
+          打开 Word 转 PDF
+        </UButton>
       </div>
     </UCard>
 
@@ -584,10 +388,6 @@ const {
   splitPdf,
   splitAndMergePdf,
   splitPdfToSinglePages,
-  compressPdf, 
-  addWatermark,
-  wordToPdf,
-  pdfToWord,
   imagesToPdf,
   getPdfPageCount 
 } = usePdfProcessor()
@@ -595,10 +395,10 @@ const {
 const tools = [
   { id: 'merge', name: 'PDF 合并', icon: 'i-heroicons-document-duplicate', bgColor: 'bg-blue-100 dark:bg-blue-900/50', iconColor: 'text-blue-600 dark:text-blue-400' },
   { id: 'split', name: 'PDF 拆分', icon: 'i-heroicons-scissors', bgColor: 'bg-purple-100 dark:bg-purple-900/50', iconColor: 'text-purple-600 dark:text-purple-400' },
-  { id: 'compress', name: 'PDF 压缩', icon: 'i-heroicons-arrow-down-on-square-stack', bgColor: 'bg-green-100 dark:bg-green-900/50', iconColor: 'text-green-600 dark:text-green-400' },
-  { id: 'watermark', name: '加水印', icon: 'i-heroicons-paint-brush', bgColor: 'bg-cyan-100 dark:bg-cyan-900/50', iconColor: 'text-cyan-600 dark:text-cyan-400' },
-  { id: 'word2pdf', name: 'Word→PDF', icon: 'i-heroicons-document-text', bgColor: 'bg-blue-100 dark:bg-blue-900/50', iconColor: 'text-blue-600 dark:text-blue-400' },
-  { id: 'pdf2word', name: 'PDF→Word', icon: 'i-heroicons-document', bgColor: 'bg-red-100 dark:bg-red-900/50', iconColor: 'text-red-600 dark:text-red-400' },
+  { id: 'compress', name: 'PDF压缩(在线)', icon: 'i-heroicons-arrow-down-on-square-stack', bgColor: 'bg-green-100 dark:bg-green-900/50', iconColor: 'text-green-600 dark:text-green-400' },
+  { id: 'pdf2word-online', name: 'PDF转Word(在线)', icon: 'i-heroicons-document-text', bgColor: 'bg-red-100 dark:bg-red-900/50', iconColor: 'text-red-600 dark:text-red-400' },
+  { id: 'word2pdf-online', name: 'Word转PDF(在线)', icon: 'i-heroicons-document-plus', bgColor: 'bg-blue-100 dark:bg-blue-900/50', iconColor: 'text-blue-600 dark:text-blue-400' },
+  { id: 'watermark', name: 'PDF签名/水印(在线)', icon: 'i-heroicons-paint-brush', bgColor: 'bg-cyan-100 dark:bg-cyan-900/50', iconColor: 'text-cyan-600 dark:text-cyan-400' },
   { id: 'img2pdf', name: '图片→PDF', icon: 'i-heroicons-photo', bgColor: 'bg-orange-100 dark:bg-orange-900/50', iconColor: 'text-orange-600 dark:text-orange-400' }
 ]
 
@@ -627,6 +427,10 @@ const downloadBlob = (blob: Blob, filename: string) => {
 
 const downloadResult = (result: PdfProcessResult) => {
   downloadBlob(result.blob, result.fileName)
+}
+
+const openExternal = (url: string) => {
+  window.open(url, '_blank', 'noopener,noreferrer')
 }
 
 // ========== PDF 合并 ==========
@@ -674,8 +478,8 @@ const doMerge = async () => {
 const splitFile = ref<File | null>(null)
 const splitPageCount = ref(0)
 const splitMode = ref('single')
-const splitRangeInput = ref('')
 const splitOutputMode = ref('separate')  // 'merge' 合并成一个, 'separate' 分成多个
+const splitRanges = ref<Array<{ start: number; end: number }>>([{ start: 1, end: 9999 }])
 
 const splitModeOptions = [
   { value: 'single', label: '每页单独一个文件' },
@@ -687,41 +491,29 @@ const splitOutputOptions = [
   { value: 'merge', label: '所有范围合并成一个文件' }
 ]
 
-// 解析范围用于预览（不验证 maxPage，直接解析用户输入）
-const parseRangesForDisplay = (input: string): Array<{ start: number; end: number }> => {
-  const ranges: Array<{ start: number; end: number }> = []
-  
-  const normalizedInput = input
-    .replace(/，/g, ',')
-    .replace(/；/g, ';')
-    .replace(/;/g, ',')
-  
-  const parts = normalizedInput.split(',').map(s => s.trim()).filter(Boolean)
-  
-  for (const part of parts) {
-    const normalizedPart = part.replace(/－/g, '-')
-    
-    if (normalizedPart.includes('-')) {
-      const [startStr, endStr] = normalizedPart.split('-').map(s => s.trim())
-      const start = parseInt(startStr)
-      const end = parseInt(endStr)
-      if (!isNaN(start) && !isNaN(end) && start >= 1 && start <= end) {
-        ranges.push({ start, end })
-      }
-    } else {
-      const page = parseInt(normalizedPart)
-      if (!isNaN(page) && page >= 1) {
-        ranges.push({ start: page, end: page })
-      }
-    }
-  }
-  
-  return ranges
+const addSplitRange = () => {
+  const totalPages = splitPageCount.value || 1
+  const lastRange = splitRanges.value[splitRanges.value.length - 1]
+  const nextStart = lastRange
+    ? Math.min(totalPages, Math.max(1, Math.floor(lastRange.end) + 1))
+    : 1
+
+  splitRanges.value.push({ start: nextStart, end: totalPages })
 }
 
-// 解析后的范围预览
+const removeSplitRange = (index: number) => {
+  if (splitRanges.value.length <= 1) return
+  splitRanges.value.splice(index, 1)
+}
+
 const parsedRangesForPreview = computed(() => {
-  return parseRangesForDisplay(splitRangeInput.value)
+  const max = splitPageCount.value || Number.MAX_SAFE_INTEGER
+  return splitRanges.value
+    .map(r => ({
+      start: Number.isFinite(r.start) ? Math.max(1, Math.min(Math.floor(r.start), max)) : 1,
+      end: Number.isFinite(r.end) ? Math.max(1, Math.min(Math.floor(r.end), max)) : 1
+    }))
+    .filter(r => r.start <= r.end)
 })
 
 const parsedRangesPreview = computed(() => {
@@ -737,12 +529,12 @@ const parsedRangesCount = computed(() => {
 // 检查范围是否超出 PDF 页数
 const hasInvalidRanges = computed(() => {
   if (splitPageCount.value === 0) return false
-  return parsedRangesForPreview.value.some(r => r.end > splitPageCount.value)
+  return splitRanges.value.some(r => r.start < 1 || r.end < 1 || r.start > r.end || r.end > splitPageCount.value)
 })
 
 const invalidRangesMessage = computed(() => {
   if (!hasInvalidRanges.value) return ''
-  const invalid = parsedRangesForPreview.value.filter(r => r.end > splitPageCount.value)
+  const invalid = splitRanges.value.filter(r => r.start < 1 || r.end < 1 || r.start > r.end || r.end > splitPageCount.value)
   return `注意：${invalid.map(r => `${r.start}-${r.end}`).join('、')} 超出 PDF 页数（共 ${splitPageCount.value} 页），将自动调整`
 })
 
@@ -751,40 +543,8 @@ const handleSplitFile = async (files: File[]) => {
   if (file) {
     splitFile.value = file
     splitPageCount.value = await getPdfPageCount(file)
+    splitRanges.value = [{ start: 1, end: splitPageCount.value || 1 }]
   }
-}
-
-const parseRanges = (input: string, maxPage: number): Array<{ start: number; end: number }> => {
-  const ranges: Array<{ start: number; end: number }> = []
-  
-  // 支持中英文逗号和分号分隔: , ， ; ；
-  const normalizedInput = input
-    .replace(/，/g, ',')  // 中文逗号 → 英文逗号
-    .replace(/；/g, ';')  // 中文分号 → 英文分号
-    .replace(/;/g, ',')   // 英文分号 → 英文逗号
-  
-  const parts = normalizedInput.split(',').map(s => s.trim()).filter(Boolean)
-  
-  for (const part of parts) {
-    // 支持中英文横线: - －
-    const normalizedPart = part.replace(/－/g, '-')
-    
-    if (normalizedPart.includes('-')) {
-      const [startStr, endStr] = normalizedPart.split('-').map(s => s.trim())
-      const start = parseInt(startStr)
-      const end = parseInt(endStr)
-      if (!isNaN(start) && !isNaN(end) && start >= 1 && end <= maxPage && start <= end) {
-        ranges.push({ start, end })
-      }
-    } else {
-      const page = parseInt(normalizedPart)
-      if (!isNaN(page) && page >= 1 && page <= maxPage) {
-        ranges.push({ start: page, end: page })
-      }
-    }
-  }
-  
-  return ranges
 }
 
 const doSplit = async () => {
@@ -809,7 +569,7 @@ const doSplit = async () => {
       }
     } else {
       // 按范围拆分 - 先用宽松解析获取用户输入的范围
-      const inputRanges = parseRangesForDisplay(splitRangeInput.value)
+      const inputRanges = parsedRangesForPreview.value
       if (inputRanges.length === 0) {
         alert('请输入有效的页面范围')
         return
@@ -855,190 +615,6 @@ const doSplit = async () => {
   } finally {
     processing.value = false
   }
-}
-
-// ========== PDF 压缩 ==========
-interface CompressItem {
-  file: File
-  status: 'pending' | 'processing' | 'completed' | 'error'
-  result?: PdfProcessResult
-}
-
-const compressFiles = ref<CompressItem[]>([])
-
-const handleCompressFiles = (files: File[]) => {
-  const pdfFiles = files.filter(f => f.type === 'application/pdf')
-  compressFiles.value.push(...pdfFiles.map(file => ({
-    file,
-    status: 'pending' as const
-  })))
-}
-
-const doCompress = async () => {
-  processing.value = true
-  
-  for (const item of compressFiles.value) {
-    if (item.status !== 'pending') continue
-    item.status = 'processing'
-    
-    try {
-      const result = await compressPdf(item.file)
-      item.result = result
-      item.status = 'completed'
-    } catch (e) {
-      item.status = 'error'
-      console.error(e)
-    }
-  }
-  
-  processing.value = false
-}
-
-const downloadAllCompressed = async () => {
-  const completed = compressFiles.value.filter(f => f.status === 'completed' && f.result)
-  if (completed.length === 0) return
-  
-  if (completed.length === 1) {
-    downloadResult(completed[0].result!)
-  } else {
-    const zip = new JSZip()
-    for (const item of completed) {
-      zip.file(item.result!.fileName, item.result!.blob)
-    }
-    const zipBlob = await zip.generateAsync({ type: 'blob' })
-    downloadBlob(zipBlob, 'compressed_pdfs.zip')
-  }
-}
-
-// ========== PDF 加水印 ==========
-const watermarkFile = ref<File | null>(null)
-const watermarkOptions = ref({
-  text: 'CONFIDENTIAL',
-  fontSize: 36,
-  opacity: 0.3,
-  color: '#888888',
-  rotation: -45,
-  position: 'diagonal' as 'center' | 'diagonal' | 'tile'
-})
-
-const watermarkOpacityPercent = computed({
-  get: () => Math.round(watermarkOptions.value.opacity * 100),
-  set: (val: number) => { watermarkOptions.value.opacity = val / 100 }
-})
-
-const watermarkPositionOptions = [
-  { value: 'center', label: '居中' },
-  { value: 'diagonal', label: '对角线' },
-  { value: 'tile', label: '平铺' }
-]
-
-const watermarkPositionLabel = computed(() => {
-  const option = watermarkPositionOptions.find(o => o.value === watermarkOptions.value.position)
-  return option?.label || '未知'
-})
-
-const handleWatermarkFile = (files: File[]) => {
-  const file = files.find(f => f.type === 'application/pdf')
-  if (file) {
-    watermarkFile.value = file
-  }
-}
-
-const doAddWatermark = async () => {
-  if (!watermarkFile.value || !watermarkOptions.value.text.trim()) return
-  processing.value = true
-  
-  try {
-    const result = await addWatermark(watermarkFile.value, watermarkOptions.value)
-    downloadResult(result)
-  } catch (e) {
-    console.error(e)
-  } finally {
-    processing.value = false
-  }
-}
-
-// ========== Word 转 PDF ==========
-interface WordItem {
-  file: File
-  status: 'pending' | 'processing' | 'completed' | 'error'
-  result?: PdfProcessResult
-}
-
-const wordFiles = ref<WordItem[]>([])
-
-const handleWordFiles = (files: File[]) => {
-  const docxFiles = files.filter(f => 
-    f.name.endsWith('.docx') || 
-    f.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-  )
-  wordFiles.value.push(...docxFiles.map(file => ({
-    file,
-    status: 'pending' as const
-  })))
-}
-
-const doWordToPdf = async () => {
-  processing.value = true
-  
-  for (const item of wordFiles.value) {
-    if (item.status !== 'pending') continue
-    item.status = 'processing'
-    
-    try {
-      const result = await wordToPdf(item.file)
-      item.result = result
-      item.status = 'completed'
-    } catch (e) {
-      item.status = 'error'
-      console.error(e)
-    }
-  }
-  
-  processing.value = false
-}
-
-// ========== PDF 转 Word ==========
-interface Pdf2WordItem {
-  file: File
-  status: 'pending' | 'processing' | 'completed' | 'error'
-  resultBlob?: Blob
-}
-
-const pdf2wordFiles = ref<Pdf2WordItem[]>([])
-
-const handlePdf2WordFiles = (files: File[]) => {
-  const pdfFiles = files.filter(f => f.type === 'application/pdf')
-  pdf2wordFiles.value.push(...pdfFiles.map(file => ({
-    file,
-    status: 'pending' as const
-  })))
-}
-
-const doPdfToWord = async () => {
-  processing.value = true
-  
-  for (const item of pdf2wordFiles.value) {
-    if (item.status !== 'pending') continue
-    item.status = 'processing'
-    
-    try {
-      const blob = await pdfToWord(item.file)
-      item.resultBlob = blob
-      item.status = 'completed'
-    } catch (e) {
-      item.status = 'error'
-      console.error(e)
-    }
-  }
-  
-  processing.value = false
-}
-
-const downloadWordResult = (item: Pdf2WordItem) => {
-  if (!item.resultBlob) return
-  const filename = item.file.name.replace('.pdf', '.docx')
-  downloadBlob(item.resultBlob, filename)
 }
 
 // ========== 图片转 PDF ==========

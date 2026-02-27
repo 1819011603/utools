@@ -1,5 +1,4 @@
-import { PDFDocument, rgb, StandardFonts, degrees } from 'pdf-lib'
-import fontkit from '@pdf-lib/fontkit'
+import { PDFDocument, rgb, degrees } from 'pdf-lib'
 
 export interface PdfProcessResult {
   blob: Blob
@@ -47,7 +46,7 @@ export function usePdfProcessor() {
     }
     
     const pdfBytes = await mergedPdf.save()
-    const blob = new Blob([pdfBytes], { type: 'application/pdf' })
+    const blob = new Blob([pdfBytes as BlobPart], { type: 'application/pdf' })
     
     return {
       blob,
@@ -76,7 +75,7 @@ export function usePdfProcessor() {
       pages.forEach(page => newPdf.addPage(page))
       
       const pdfBytes = await newPdf.save()
-      const blob = new Blob([pdfBytes], { type: 'application/pdf' })
+      const blob = new Blob([pdfBytes as BlobPart], { type: 'application/pdf' })
       
       const baseName = file.name.replace('.pdf', '')
       results.push({
@@ -116,7 +115,7 @@ export function usePdfProcessor() {
     pages.forEach(page => newPdf.addPage(page))
     
     const pdfBytes = await newPdf.save()
-    const blob = new Blob([pdfBytes], { type: 'application/pdf' })
+    const blob = new Blob([pdfBytes as BlobPart], { type: 'application/pdf' })
     
     const baseName = file.name.replace('.pdf', '')
     const rangeStr = ranges.map(r => r.start === r.end ? `${r.start}` : `${r.start}-${r.end}`).join('_')
@@ -141,7 +140,7 @@ export function usePdfProcessor() {
       newPdf.addPage(page)
       
       const pdfBytes = await newPdf.save()
-      const blob = new Blob([pdfBytes], { type: 'application/pdf' })
+      const blob = new Blob([pdfBytes as BlobPart], { type: 'application/pdf' })
       
       const baseName = file.name.replace('.pdf', '')
       results.push({
@@ -154,21 +153,19 @@ export function usePdfProcessor() {
     return results
   }
 
-  // PDF 压缩 (通过移除冗余数据和压缩图片)
-  const compressPdf = async (file: File, quality: number = 0.7): Promise<PdfProcessResult> => {
+  // PDF 压缩
+  const compressPdf = async (file: File): Promise<PdfProcessResult> => {
     const arrayBuffer = await readFileAsArrayBuffer(file)
     const pdfDoc = await PDFDocument.load(arrayBuffer, {
       ignoreEncryption: true
     })
     
-    // 基本压缩：移除元数据、优化结构
-    // pdf-lib 本身会在 save 时进行一定优化
     const pdfBytes = await pdfDoc.save({
-      useObjectStreams: true, // 使用对象流压缩
+      useObjectStreams: true,
       addDefaultPage: false,
     })
     
-    const blob = new Blob([pdfBytes], { type: 'application/pdf' })
+    const blob = new Blob([pdfBytes as BlobPart], { type: 'application/pdf' })
     
     return {
       blob,
@@ -179,7 +176,6 @@ export function usePdfProcessor() {
 
   // 解析颜色字符串为 RGB
   const parseColor = (colorStr: string): { r: number; g: number; b: number } => {
-    // 支持 hex 颜色
     if (colorStr.startsWith('#')) {
       const hex = colorStr.slice(1)
       const r = parseInt(hex.slice(0, 2), 16) / 255
@@ -190,7 +186,56 @@ export function usePdfProcessor() {
     return { r: 0.5, g: 0.5, b: 0.5 }
   }
 
-  // PDF 加水印
+  // 创建水印图片（支持中文）
+  const createWatermarkImage = (
+    text: string,
+    fontSize: number,
+    color: string,
+    opacity: number,
+    rotation: number
+  ): { dataUrl: string; width: number; height: number } => {
+    const radians = (rotation * Math.PI) / 180
+    const padding = 20
+    
+    // 测量文字大小
+    const tempCanvas = document.createElement('canvas')
+    const tempCtx = tempCanvas.getContext('2d')!
+    tempCtx.font = `${fontSize}px "Microsoft YaHei", "SimHei", "Heiti SC", sans-serif`
+    const metrics = tempCtx.measureText(text)
+    const textWidth = metrics.width
+    const textHeight = fontSize
+    
+    // 计算旋转后需要的画布大小
+    const absRotation = Math.abs(radians)
+    const canvasWidth = Math.ceil(textWidth * Math.cos(absRotation) + textHeight * Math.sin(absRotation)) + padding * 2
+    const canvasHeight = Math.ceil(textWidth * Math.sin(absRotation) + textHeight * Math.cos(absRotation)) + padding * 2
+    
+    const canvas = document.createElement('canvas')
+    canvas.width = canvasWidth
+    canvas.height = canvasHeight
+    const ctx = canvas.getContext('2d')!
+    
+    // 移动到中心并旋转
+    ctx.translate(canvasWidth / 2, canvasHeight / 2)
+    ctx.rotate(radians)
+    
+    // 设置文字样式
+    ctx.font = `${fontSize}px "Microsoft YaHei", "SimHei", "Heiti SC", sans-serif`
+    ctx.fillStyle = color
+    ctx.globalAlpha = opacity
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    
+    ctx.fillText(text, 0, 0)
+    
+    return {
+      dataUrl: canvas.toDataURL('image/png'),
+      width: canvasWidth,
+      height: canvasHeight
+    }
+  }
+
+  // PDF 加水印（支持中文）
   const addWatermark = async (
     file: File, 
     options: WatermarkOptions
@@ -198,71 +243,133 @@ export function usePdfProcessor() {
     const arrayBuffer = await readFileAsArrayBuffer(file)
     const pdfDoc = await PDFDocument.load(arrayBuffer)
     
-    // 注册 fontkit 以支持自定义字体
-    pdfDoc.registerFontkit(fontkit)
+    // 根据位置创建水印图片
+    const rotation = options.position === 'diagonal' ? -45 : options.rotation
+    const watermarkImg = createWatermarkImage(
+      options.text,
+      options.fontSize,
+      options.color,
+      options.opacity,
+      rotation
+    )
     
-    // 使用标准字体（不支持中文），或者嵌入自定义字体
-    const font = await pdfDoc.embedFont(StandardFonts.Helvetica)
+    // 将 dataUrl 转换为 PNG 嵌入
+    const watermarkImageBytes = await fetch(watermarkImg.dataUrl).then(res => res.arrayBuffer())
+    const watermarkPdfImage = await pdfDoc.embedPng(watermarkImageBytes)
     
     const pages = pdfDoc.getPages()
-    const { r, g, b } = parseColor(options.color)
     
     for (const page of pages) {
       const { width, height } = page.getSize()
       
       if (options.position === 'tile') {
         // 平铺水印
-        const textWidth = font.widthOfTextAtSize(options.text, options.fontSize)
-        const spacingX = textWidth + 100
-        const spacingY = options.fontSize + 80
+        const spacingX = watermarkImg.width + 80
+        const spacingY = watermarkImg.height + 80
         
-        for (let y = 0; y < height + spacingY; y += spacingY) {
-          for (let x = -textWidth; x < width + spacingX; x += spacingX) {
-            page.drawText(options.text, {
-              x,
-              y,
-              size: options.fontSize,
-              font,
-              color: rgb(r, g, b),
-              opacity: options.opacity,
-              rotate: degrees(options.rotation)
+        for (let y = spacingY / 2; y < height; y += spacingY) {
+          for (let x = spacingX / 2; x < width; x += spacingX) {
+            page.drawImage(watermarkPdfImage, {
+              x: x - watermarkImg.width / 2,
+              y: y - watermarkImg.height / 2,
+              width: watermarkImg.width,
+              height: watermarkImg.height,
             })
           }
         }
-      } else if (options.position === 'diagonal') {
-        // 对角线水印
-        const textWidth = font.widthOfTextAtSize(options.text, options.fontSize)
-        page.drawText(options.text, {
-          x: (width - textWidth) / 2,
-          y: height / 2,
-          size: options.fontSize,
-          font,
-          color: rgb(r, g, b),
-          opacity: options.opacity,
-          rotate: degrees(-45)
-        })
       } else {
-        // 中心水印
-        const textWidth = font.widthOfTextAtSize(options.text, options.fontSize)
-        page.drawText(options.text, {
-          x: (width - textWidth) / 2,
-          y: height / 2,
-          size: options.fontSize,
-          font,
-          color: rgb(r, g, b),
-          opacity: options.opacity,
-          rotate: degrees(options.rotation)
+        // 居中或对角线水印
+        page.drawImage(watermarkPdfImage, {
+          x: (width - watermarkImg.width) / 2,
+          y: (height - watermarkImg.height) / 2,
+          width: watermarkImg.width,
+          height: watermarkImg.height,
         })
       }
     }
     
     const pdfBytes = await pdfDoc.save()
-    const blob = new Blob([pdfBytes], { type: 'application/pdf' })
+    const blob = new Blob([pdfBytes as BlobPart], { type: 'application/pdf' })
     
     return {
       blob,
       pageCount: pdfDoc.getPageCount(),
       fileName: file.name.replace('.pdf', '_watermarked.pdf')
+    }
+  }
+
+  // PDF 去水印（通过覆盖白色区域）
+  const removeWatermark = async (
+    file: File,
+    options: {
+      position: 'top' | 'bottom' | 'center' | 'corners' | 'full'
+      coverage: number // 0-100 覆盖范围百分比
+    }
+  ): Promise<PdfProcessResult> => {
+    const arrayBuffer = await readFileAsArrayBuffer(file)
+    const pdfDoc = await PDFDocument.load(arrayBuffer)
+    const pages = pdfDoc.getPages()
+    
+    for (const page of pages) {
+      const { width, height } = page.getSize()
+      const coverage = options.coverage / 100
+      
+      // 根据位置绘制白色覆盖层
+      if (options.position === 'top') {
+        const coverHeight = height * coverage * 0.3
+        page.drawRectangle({
+          x: 0,
+          y: height - coverHeight,
+          width: width,
+          height: coverHeight,
+          color: rgb(1, 1, 1),
+        })
+      } else if (options.position === 'bottom') {
+        const coverHeight = height * coverage * 0.3
+        page.drawRectangle({
+          x: 0,
+          y: 0,
+          width: width,
+          height: coverHeight,
+          color: rgb(1, 1, 1),
+        })
+      } else if (options.position === 'center') {
+        const coverWidth = width * coverage * 0.5
+        const coverHeight = height * coverage * 0.3
+        page.drawRectangle({
+          x: (width - coverWidth) / 2,
+          y: (height - coverHeight) / 2,
+          width: coverWidth,
+          height: coverHeight,
+          color: rgb(1, 1, 1),
+        })
+      } else if (options.position === 'corners') {
+        const cornerSize = Math.min(width, height) * coverage * 0.15
+        // 四个角
+        page.drawRectangle({ x: 0, y: height - cornerSize, width: cornerSize, height: cornerSize, color: rgb(1, 1, 1) })
+        page.drawRectangle({ x: width - cornerSize, y: height - cornerSize, width: cornerSize, height: cornerSize, color: rgb(1, 1, 1) })
+        page.drawRectangle({ x: 0, y: 0, width: cornerSize, height: cornerSize, color: rgb(1, 1, 1) })
+        page.drawRectangle({ x: width - cornerSize, y: 0, width: cornerSize, height: cornerSize, color: rgb(1, 1, 1) })
+      } else if (options.position === 'full') {
+        // 全页半透明白色覆盖（降低水印可见度）
+        page.drawRectangle({
+          x: 0,
+          y: 0,
+          width: width,
+          height: height,
+          color: rgb(1, 1, 1),
+          opacity: coverage * 0.5,
+        })
+      }
+    }
+    
+    const pdfBytes = await pdfDoc.save()
+    const blob = new Blob([pdfBytes as BlobPart], { type: 'application/pdf' })
+    
+    return {
+      blob,
+      pageCount: pdfDoc.getPageCount(),
+      fileName: file.name.replace('.pdf', '_no_watermark.pdf')
     }
   }
 
@@ -283,7 +390,7 @@ export function usePdfProcessor() {
     pages.forEach(page => newPdf.addPage(page))
     
     const pdfBytes = await newPdf.save()
-    const blob = new Blob([pdfBytes], { type: 'application/pdf' })
+    const blob = new Blob([pdfBytes as BlobPart], { type: 'application/pdf' })
     
     const baseName = file.name.replace('.pdf', '')
     return {
@@ -315,7 +422,7 @@ export function usePdfProcessor() {
     }
     
     const pdfBytes = await pdfDoc.save()
-    const blob = new Blob([pdfBytes], { type: 'application/pdf' })
+    const blob = new Blob([pdfBytes as BlobPart], { type: 'application/pdf' })
     
     return {
       blob,
@@ -324,81 +431,167 @@ export function usePdfProcessor() {
     }
   }
 
-  // Word 转 PDF（使用 mammoth 提取内容 + jsPDF 生成）
+  // Word 转 PDF（使用 mammoth 提取 HTML + Canvas 渲染）
   const wordToPdf = async (file: File): Promise<PdfProcessResult> => {
     const mammoth = await import('mammoth')
-    const { jsPDF } = await import('jspdf')
     
     const arrayBuffer = await readFileAsArrayBuffer(file)
-    
-    // 提取 HTML 内容
     const result = await mammoth.convertToHtml({ arrayBuffer })
     const html = result.value
     
-    // 创建临时元素来渲染 HTML
-    const tempDiv = document.createElement('div')
-    tempDiv.innerHTML = html
-    tempDiv.style.cssText = 'position: absolute; left: -9999px; width: 595px; font-family: sans-serif; font-size: 12px; line-height: 1.6;'
-    document.body.appendChild(tempDiv)
+    // 创建临时元素渲染 HTML
+    const container = document.createElement('div')
+    container.innerHTML = html
+    container.style.cssText = `
+      position: fixed;
+      left: -9999px;
+      top: 0;
+      width: 550px;
+      padding: 40px;
+      font-family: "Microsoft YaHei", "SimHei", "PingFang SC", sans-serif;
+      font-size: 14px;
+      line-height: 1.8;
+      background: white;
+      color: black;
+    `
+    document.body.appendChild(container)
     
-    // 创建 PDF
-    const pdf = new jsPDF({
-      orientation: 'portrait',
-      unit: 'pt',
-      format: 'a4'
-    })
+    // 等待渲染
+    await new Promise(resolve => setTimeout(resolve, 100))
     
-    // 使用 html 方法转换（需要 html2canvas）
-    // 简单方案：提取纯文本
-    const text = tempDiv.innerText || tempDiv.textContent || ''
-    document.body.removeChild(tempDiv)
+    const pdfDoc = await PDFDocument.create()
+    const pageWidth = 595
+    const pageHeight = 842
+    const margin = 50
+    const contentWidth = pageWidth - margin * 2
+    const fontSize = 12
+    const lineHeight = fontSize * 1.8
     
-    const lines = pdf.splitTextToSize(text, 500)
-    const pageHeight = pdf.internal.pageSize.getHeight()
-    const lineHeight = 14
-    let y = 40
+    // 获取文本内容
+    const text = container.innerText || ''
+    document.body.removeChild(container)
     
-    for (const line of lines) {
-      if (y + lineHeight > pageHeight - 40) {
-        pdf.addPage()
-        y = 40
+    if (!text.trim()) {
+      // 空文档
+      pdfDoc.addPage([pageWidth, pageHeight])
+      const pdfBytes = await pdfDoc.save()
+      const baseName = file.name.replace(/\.(docx?|doc)$/i, '')
+      return {
+        blob: new Blob([pdfBytes as BlobPart], { type: 'application/pdf' }),
+        pageCount: 1,
+        fileName: `${baseName}.pdf`
       }
-      pdf.text(line, 40, y)
-      y += lineHeight
     }
     
-    const pdfBlob = pdf.output('blob')
+    // 分割文本为行
+    const allLines: string[] = []
+    const paragraphs = text.split('\n')
+    
+    for (const para of paragraphs) {
+      if (!para.trim()) {
+        allLines.push('')
+        continue
+      }
+      
+      // 按字符宽度分行
+      const charsPerLine = Math.floor(contentWidth / (fontSize * 0.55))
+      let remaining = para
+      
+      while (remaining.length > 0) {
+        if (remaining.length <= charsPerLine) {
+          allLines.push(remaining)
+          break
+        }
+        allLines.push(remaining.slice(0, charsPerLine))
+        remaining = remaining.slice(charsPerLine)
+      }
+    }
+    
+    // 每页行数
+    const linesPerPage = Math.floor((pageHeight - margin * 2) / lineHeight)
+    
+    // 分页渲染
+    for (let pageStart = 0; pageStart < allLines.length; pageStart += linesPerPage) {
+      const pageLines = allLines.slice(pageStart, pageStart + linesPerPage)
+      
+      // 创建 Canvas 渲染文字
+      const scale = 2
+      const canvas = document.createElement('canvas')
+      canvas.width = pageWidth * scale
+      canvas.height = pageHeight * scale
+      const ctx = canvas.getContext('2d')!
+      
+      ctx.fillStyle = 'white'
+      ctx.fillRect(0, 0, canvas.width, canvas.height)
+      
+      ctx.scale(scale, scale)
+      ctx.fillStyle = 'black'
+      ctx.font = `${fontSize}px "Microsoft YaHei", "SimHei", sans-serif`
+      ctx.textBaseline = 'top'
+      
+      let y = margin
+      for (const line of pageLines) {
+        if (line) {
+          ctx.fillText(line, margin, y)
+        }
+        y += lineHeight
+      }
+      
+      // 嵌入图片到 PDF
+      const imgData = canvas.toDataURL('image/png')
+      const imgBytes = await fetch(imgData).then(r => r.arrayBuffer())
+      const img = await pdfDoc.embedPng(imgBytes)
+      
+      const page = pdfDoc.addPage([pageWidth, pageHeight])
+      page.drawImage(img, { x: 0, y: 0, width: pageWidth, height: pageHeight })
+    }
+    
+    if (pdfDoc.getPageCount() === 0) {
+      pdfDoc.addPage([pageWidth, pageHeight])
+    }
+    
+    const pdfBytes = await pdfDoc.save()
     const baseName = file.name.replace(/\.(docx?|doc)$/i, '')
     
     return {
-      blob: pdfBlob,
-      pageCount: pdf.getNumberOfPages(),
+      blob: new Blob([pdfBytes as BlobPart], { type: 'application/pdf' }),
+      pageCount: pdfDoc.getPageCount(),
       fileName: `${baseName}.pdf`
     }
   }
 
-  // PDF 转 Word (提取文本)
+  // PDF 转 Word (提取文本) - 使用 pdf.js 配置 worker
   const pdfToWord = async (file: File): Promise<Blob> => {
     const pdfjsLib = await import('pdfjs-dist')
     
-    // 设置 worker
-    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`
+    // 使用 CDN worker，指定兼容版本
+    const version = pdfjsLib.version
+    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${version}/build/pdf.worker.min.mjs`
     
     const arrayBuffer = await readFileAsArrayBuffer(file)
-    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
     
     let fullText = ''
     
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i)
-      const textContent = await page.getTextContent()
-      const pageText = textContent.items
-        .map((item: any) => item.str)
-        .join(' ')
-      fullText += pageText + '\n\n'
+    try {
+      const pdf = await pdfjsLib.getDocument({ 
+        data: arrayBuffer,
+      }).promise
+      
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i)
+        const textContent = await page.getTextContent()
+        const pageText = textContent.items
+          .map((item: any) => item.str)
+          .join(' ')
+        fullText += pageText + '\n\n'
+      }
+    } catch (e) {
+      console.error('PDF 解析失败:', e)
+      // 如果 PDF 解析失败，返回空文档
+      fullText = '(PDF 文本提取失败，请尝试其他方式)'
     }
     
-    // 创建简单的 DOCX 文件
+    // 创建 DOCX 文件
     const { Document, Packer, Paragraph, TextRun } = await import('docx')
     
     const paragraphs = fullText.split('\n\n').filter(p => p.trim()).map(text => 
@@ -406,6 +599,12 @@ export function usePdfProcessor() {
         children: [new TextRun(text)]
       })
     )
+    
+    if (paragraphs.length === 0) {
+      paragraphs.push(new Paragraph({
+        children: [new TextRun('(文档内容为空或无法提取)')]
+      }))
+    }
     
     const doc = new Document({
       sections: [{
@@ -431,7 +630,7 @@ export function usePdfProcessor() {
       } else if (file.type === 'image/jpeg' || file.type === 'image/jpg') {
         image = await pdfDoc.embedJpg(arrayBuffer)
       } else {
-        // 对于其他格式，先转换为 PNG
+        // 其他格式转换为 PNG
         const bitmap = await createImageBitmap(new Blob([arrayBuffer], { type: file.type }))
         const canvas = document.createElement('canvas')
         canvas.width = bitmap.width
@@ -456,7 +655,7 @@ export function usePdfProcessor() {
     }
     
     const pdfBytes = await pdfDoc.save()
-    const blob = new Blob([pdfBytes], { type: 'application/pdf' })
+    const blob = new Blob([pdfBytes as BlobPart], { type: 'application/pdf' })
     
     return {
       blob,
@@ -474,7 +673,6 @@ export function usePdfProcessor() {
     const pdfDoc = await PDFDocument.load(arrayBuffer)
     const totalPages = pdfDoc.getPageCount()
     
-    // 获取要保留的页面
     const pagesToKeep = Array.from({ length: totalPages }, (_, i) => i + 1)
       .filter(n => !pageNumbers.includes(n))
       .map(n => n - 1)
@@ -484,7 +682,7 @@ export function usePdfProcessor() {
     pages.forEach(page => newPdf.addPage(page))
     
     const pdfBytes = await newPdf.save()
-    const blob = new Blob([pdfBytes], { type: 'application/pdf' })
+    const blob = new Blob([pdfBytes as BlobPart], { type: 'application/pdf' })
     
     return {
       blob,
@@ -501,6 +699,7 @@ export function usePdfProcessor() {
     splitPdfToSinglePages,
     compressPdf,
     addWatermark,
+    removeWatermark,
     extractPages,
     rotatePages,
     wordToPdf,
