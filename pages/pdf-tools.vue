@@ -47,16 +47,23 @@
           @files="handleMergeFiles"
         />
 
-        <div v-if="mergeFiles.length > 0" class="space-y-3">
+        <div v-if="mergeItems.length > 0" class="space-y-3">
           <div class="flex items-center justify-between">
             <span class="text-sm text-gray-500">拖拽调整顺序</span>
-            <UButton size="xs" variant="ghost" color="red" @click="mergeFiles = []">清空</UButton>
+            <UButton size="xs" variant="ghost" color="red" @click="clearMergeItems">清空</UButton>
           </div>
+          <UAlert
+            color="blue"
+            variant="soft"
+            icon="i-heroicons-eye"
+            title="先预览再填页码"
+            description="每个文件右侧都有“预览PDF”按钮，可先确认页码再设置 from/to。"
+          />
           
           <div class="space-y-2">
             <div
-              v-for="(file, index) in mergeFiles"
-              :key="file.name + index"
+              v-for="(item, index) in mergeItems"
+              :key="item.file.name + index"
               draggable="true"
               class="flex items-center gap-3 p-3 bg-gray-50 dark:bg-gray-800 rounded-lg cursor-move hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
               @dragstart="dragStart(index)"
@@ -68,8 +75,27 @@
               <div class="flex items-center justify-center w-6 h-6 rounded-full bg-primary-100 dark:bg-primary-900 text-primary-600 dark:text-primary-400 text-xs font-medium">
                 {{ index + 1 }}
               </div>
-              <span class="flex-1 text-sm truncate">{{ file.name }}</span>
-              <UBadge color="gray" variant="soft" size="xs">{{ formatSize(file.size) }}</UBadge>
+              <div class="flex-1 min-w-0">
+                <p class="text-sm truncate">{{ item.file.name }}</p>
+                <div class="mt-2 grid grid-cols-2 gap-2 max-w-xs">
+                  <UFormGroup label="from" size="xs">
+                    <UInput v-model.number="item.start" type="number" :min="1" :max="item.pageCount || 1" />
+                  </UFormGroup>
+                  <UFormGroup label="to" size="xs">
+                    <UInput v-model.number="item.end" type="number" :min="1" :max="item.pageCount || 1" />
+                  </UFormGroup>
+                </div>
+              </div>
+              <UBadge color="gray" variant="soft" size="xs">{{ item.pageCount }}页</UBadge>
+              <UButton
+                size="xs"
+                color="primary"
+                variant="soft"
+                icon="i-heroicons-eye"
+                @click.stop="openPdfPreview(item.file, item.file.name)"
+              >
+                预览PDF
+              </UButton>
               <UButton size="xs" variant="ghost" icon="i-heroicons-x-mark" @click="removeMergeFile(index)" />
             </div>
           </div>
@@ -81,10 +107,10 @@
               <div class="flex-1 text-sm">
                 <div class="font-medium text-blue-700 dark:text-blue-300 mb-1">预览</div>
                 <div class="text-blue-600 dark:text-blue-400">
-                  将按顺序合并 {{ mergeFiles.length }} 个 PDF 文件为 1 个文件
+                  将按顺序合并 {{ mergeItems.length }} 个 PDF 文件为 1 个文件
                 </div>
                 <div class="text-blue-500 dark:text-blue-500 text-xs mt-1">
-                  合并顺序：{{ mergeFiles.map((f, i) => `${i + 1}. ${f.name}`).join(' → ') }}
+                  合并顺序：{{ mergeItems.map((f, i) => `${i + 1}. ${f.file.name}(${f.start}-${f.end})`).join(' → ') }}
                 </div>
                 <div class="text-blue-500 dark:text-blue-500 text-xs">
                   预计大小：约 {{ formatSize(mergeFilesTotalSize) }}
@@ -96,11 +122,11 @@
           <UButton 
             color="primary" 
             :loading="processing" 
-            :disabled="mergeFiles.length < 2"
+            :disabled="mergeItems.length < 2"
             @click="doMerge"
           >
             <UIcon name="i-heroicons-arrow-down-tray" class="w-4 h-4 mr-1" />
-            合并并下载 ({{ mergeFiles.length }} 个文件)
+            合并并下载 ({{ mergeItems.length }} 个文件)
           </UButton>
         </div>
       </div>
@@ -130,8 +156,24 @@
             <UIcon name="i-heroicons-document" class="w-5 h-5 text-red-500" />
             <span class="flex-1 text-sm truncate">{{ splitFile.name }}</span>
             <UBadge color="gray" variant="soft">{{ splitPageCount }} 页</UBadge>
-            <UButton size="xs" variant="ghost" icon="i-heroicons-x-mark" @click="splitFile = null" />
+            <UButton
+              size="xs"
+              color="primary"
+              variant="soft"
+              icon="i-heroicons-eye"
+              @click="openPdfPreview(splitFile, splitFile.name)"
+            >
+              预览PDF
+            </UButton>
+            <UButton size="xs" variant="ghost" icon="i-heroicons-x-mark" @click="clearSplitFile" />
           </div>
+          <UAlert
+            color="purple"
+            variant="soft"
+            icon="i-heroicons-eye"
+            title="建议先预览页码"
+            description="点击“预览PDF”查看文档后，再填写 Range 的 from/to。"
+          />
 
           <UFormGroup label="拆分方式">
             <URadioGroup v-model="splitMode" :options="splitModeOptions" />
@@ -376,6 +418,25 @@
         </div>
       </div>
     </UCard>
+
+    <UModal v-model="showPdfPreview" :ui="{ width: 'max-w-[92vw] sm:max-w-[88vw]' }">
+      <UCard>
+        <template #header>
+          <div class="flex items-center justify-between gap-3">
+            <span class="font-medium truncate">{{ previewPdfTitle || 'PDF 预览' }}</span>
+            <UButton variant="ghost" icon="i-heroicons-x-mark" @click="showPdfPreview = false" />
+          </div>
+        </template>
+        <div class="space-y-3">
+          <iframe
+            v-if="previewPdfUrl"
+            :src="previewPdfUrl"
+            class="w-full h-[75vh] rounded border border-gray-200 dark:border-gray-700"
+          />
+          <div v-else class="text-sm text-gray-500">暂无可预览内容</div>
+        </div>
+      </UCard>
+    </UModal>
   </div>
 </template>
 
@@ -384,7 +445,7 @@ import JSZip from 'jszip'
 import type { PdfProcessResult } from '~/composables/usePdfProcessor'
 
 const { 
-  mergePdfs, 
+  mergePdfsWithRanges, 
   splitPdf,
   splitAndMergePdf,
   splitPdfToSinglePages,
@@ -433,21 +494,74 @@ const openExternal = (url: string) => {
   window.open(url, '_blank', 'noopener,noreferrer')
 }
 
+const pdfPreviewUrls = new Map<File, string>()
+const showPdfPreview = ref(false)
+const previewPdfTitle = ref('')
+const previewPdfUrl = ref('')
+
+const getPdfPreviewUrl = (file: File): string => {
+  if (pdfPreviewUrls.has(file)) {
+    return pdfPreviewUrls.get(file)!
+  }
+  const url = URL.createObjectURL(file)
+  pdfPreviewUrls.set(file, url)
+  return url
+}
+
+const openPdfPreview = (file: File, title?: string) => {
+  previewPdfTitle.value = title || file.name
+  previewPdfUrl.value = getPdfPreviewUrl(file)
+  showPdfPreview.value = true
+}
+
+const revokePdfPreview = (file: File) => {
+  const url = pdfPreviewUrls.get(file)
+  if (url) {
+    URL.revokeObjectURL(url)
+    pdfPreviewUrls.delete(file)
+  }
+}
+
 // ========== PDF 合并 ==========
-const mergeFiles = ref<File[]>([])
+interface MergeItem {
+  file: File
+  pageCount: number
+  start: number
+  end: number
+}
+
+const mergeItems = ref<MergeItem[]>([])
 let dragIndex = -1
 
 // 合并文件总大小
 const mergeFilesTotalSize = computed(() => {
-  return mergeFiles.value.reduce((sum, f) => sum + f.size, 0)
+  return mergeItems.value.reduce((sum, f) => sum + f.file.size, 0)
 })
 
-const handleMergeFiles = (files: File[]) => {
-  mergeFiles.value.push(...files.filter(f => f.type === 'application/pdf'))
+const handleMergeFiles = async (files: File[]) => {
+  const pdfFiles = files.filter(f => f.type === 'application/pdf')
+  for (const file of pdfFiles) {
+    const pageCount = await getPdfPageCount(file)
+    mergeItems.value.push({
+      file,
+      pageCount,
+      start: 1,
+      end: pageCount
+    })
+  }
 }
 
 const removeMergeFile = (index: number) => {
-  mergeFiles.value.splice(index, 1)
+  const item = mergeItems.value[index]
+  if (item) {
+    revokePdfPreview(item.file)
+  }
+  mergeItems.value.splice(index, 1)
+}
+
+const clearMergeItems = () => {
+  mergeItems.value.forEach(item => revokePdfPreview(item.file))
+  mergeItems.value = []
 }
 
 const dragStart = (index: number) => {
@@ -456,16 +570,28 @@ const dragStart = (index: number) => {
 
 const drop = (index: number) => {
   if (dragIndex === -1 || dragIndex === index) return
-  const item = mergeFiles.value.splice(dragIndex, 1)[0]
-  mergeFiles.value.splice(index, 0, item)
+  const item = mergeItems.value.splice(dragIndex, 1)[0]
+  mergeItems.value.splice(index, 0, item)
   dragIndex = -1
 }
 
 const doMerge = async () => {
-  if (mergeFiles.value.length < 2) return
+  if (mergeItems.value.length < 2) return
   processing.value = true
   try {
-    const result = await mergePdfs(mergeFiles.value)
+    const validItems = mergeItems.value
+      .map(item => ({
+        file: item.file,
+        start: Math.max(1, Math.min(item.start, item.pageCount)),
+        end: Math.max(1, Math.min(item.end, item.pageCount))
+      }))
+      .map(item => ({
+        ...item,
+        start: Math.min(item.start, item.end),
+        end: Math.max(item.start, item.end)
+      }))
+
+    const result = await mergePdfsWithRanges(validItems)
     downloadResult(result)
   } catch (e) {
     console.error(e)
@@ -545,6 +671,14 @@ const handleSplitFile = async (files: File[]) => {
     splitPageCount.value = await getPdfPageCount(file)
     splitRanges.value = [{ start: 1, end: splitPageCount.value || 1 }]
   }
+}
+
+const clearSplitFile = () => {
+  if (splitFile.value) {
+    revokePdfPreview(splitFile.value)
+  }
+  splitFile.value = null
+  splitPageCount.value = 0
 }
 
 const doSplit = async () => {
@@ -665,5 +799,7 @@ const doImagesToPdf = async () => {
 onUnmounted(() => {
   imagePreviews.forEach(url => URL.revokeObjectURL(url))
   imagePreviews.clear()
+  pdfPreviewUrls.forEach(url => URL.revokeObjectURL(url))
+  pdfPreviewUrls.clear()
 })
 </script>

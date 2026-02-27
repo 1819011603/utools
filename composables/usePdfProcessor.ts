@@ -15,6 +15,12 @@ export interface WatermarkOptions {
   position: 'center' | 'diagonal' | 'tile'
 }
 
+export interface PdfMergeRangeItem {
+  file: File
+  start: number
+  end: number
+}
+
 export function usePdfProcessor() {
   
   // 读取 PDF 文件为 ArrayBuffer
@@ -48,6 +54,33 @@ export function usePdfProcessor() {
     const pdfBytes = await mergedPdf.save()
     const blob = new Blob([pdfBytes as BlobPart], { type: 'application/pdf' })
     
+    return {
+      blob,
+      pageCount: mergedPdf.getPageCount(),
+      fileName: 'merged.pdf'
+    }
+  }
+
+  // PDF 合并（每个文件可指定页码范围）
+  const mergePdfsWithRanges = async (items: PdfMergeRangeItem[]): Promise<PdfProcessResult> => {
+    const mergedPdf = await PDFDocument.create()
+
+    for (const item of items) {
+      const arrayBuffer = await readFileAsArrayBuffer(item.file)
+      const pdfDoc = await PDFDocument.load(arrayBuffer)
+      const pageCount = pdfDoc.getPageCount()
+
+      const start = Math.max(1, Math.min(item.start, pageCount))
+      const end = Math.max(start, Math.min(item.end, pageCount))
+      const indices = Array.from({ length: end - start + 1 }, (_, i) => start - 1 + i)
+
+      const pages = await mergedPdf.copyPages(pdfDoc, indices)
+      pages.forEach(page => mergedPdf.addPage(page))
+    }
+
+    const pdfBytes = await mergedPdf.save()
+    const blob = new Blob([pdfBytes as BlobPart], { type: 'application/pdf' })
+
     return {
       blob,
       pageCount: mergedPdf.getPageCount(),
@@ -694,6 +727,7 @@ export function usePdfProcessor() {
   return {
     getPdfPageCount,
     mergePdfs,
+    mergePdfsWithRanges,
     splitPdf,
     splitAndMergePdf,
     splitPdfToSinglePages,
