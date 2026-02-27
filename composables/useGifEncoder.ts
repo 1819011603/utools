@@ -59,6 +59,91 @@ export function useGifEncoder() {
     message: ''
   })
 
+  const seekVideo = (video: HTMLVideoElement, time: number): Promise<void> => {
+    return new Promise((resolve) => {
+      const onSeeked = () => {
+        video.removeEventListener('seeked', onSeeked)
+        resolve()
+      }
+      video.addEventListener('seeked', onSeeked)
+      video.currentTime = time
+    })
+  }
+
+  const isSimilarFrame = (
+    a: Uint8ClampedArray,
+    b: Uint8ClampedArray,
+    stride = 10,
+    thresholdPercent = 5
+  ): boolean => {
+    let diff = 0, count = 0
+    const len = Math.min(a.length, b.length)
+    for (let i = 0; i < len; i += 4 * stride) {
+      diff += Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2])
+      count++
+    }
+    const max = count * 3 * 255
+    return count > 0 ? ((diff / max) * 100) < thresholdPercent : false
+  }
+
+  const pickTargetColors = (w: number, h: number, quality: number, dither: DitherType): number => {
+    const px = w * h
+    let base = px <= 300 * 300 ? 160 : 192
+    if (dither === false) base = Math.min(256, base + 32)
+    if (quality <= 5) base = Math.min(256, base + 16)
+    return Math.max(64, Math.min(256, base))
+  }
+
+  const ensureQuantize = async (): Promise<any | null> => {
+    try {
+      // @ts-ignore
+      const mod = await import('quantize')
+      return (mod as any).default || mod
+    } catch {
+      return null
+    }
+  }
+
+  const buildGlobalPalette = async (
+    video: HTMLVideoElement,
+    opts: { start: number; end: number; samples: number; width: number; height: number; targetColors: number }
+  ): Promise<number[] | undefined> => {
+    const quantize = await ensureQuantize()
+    if (!quantize) return undefined
+
+    const { start, end, samples, width, height, targetColors } = opts
+    const dur = Math.max(0.01, end - start)
+    const step = dur / samples
+
+    const sampleW = Math.min(120, width)
+    const sampleH = Math.round(sampleW * (height / width))
+
+    const canvas = document.createElement('canvas')
+    canvas.width = sampleW
+    canvas.height = sampleH
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })!
+
+    const pixels: number[][] = []
+    for (let i = 0; i < samples; i++) {
+      const t = start + i * step
+      await seekVideo(video, t)
+      ctx.drawImage(video, 0, 0, sampleW, sampleH)
+      const data = ctx.getImageData(0, 0, sampleW, sampleH).data
+      for (let p = 0; p < data.length; p += 4 * 6) {
+        if (data[p + 3] < 128) continue
+        pixels.push([data[p], data[p + 1], data[p + 2]])
+      }
+    }
+
+    const cmap = quantize(pixels, Math.min(256, Math.max(2, targetColors)))
+    const pal = cmap ? cmap.palette() : null
+    if (!pal) return undefined
+
+    const flat: number[] = []
+    for (const [r, g, b] of pal) flat.push(r, g, b)
+    return flat
+  }
+
   const extractFramesFromVideo = async (
     video: HTMLVideoElement,
     options: {
@@ -79,6 +164,10 @@ export function useGifEncoder() {
     canvas.width = width
     canvas.height = height
     const ctx = canvas.getContext('2d', { willReadFrequently: true })!
+    ctx.imageSmoothingEnabled = true
+    if ('imageSmoothingQuality' in ctx) {
+      (ctx as any).imageSmoothingQuality = 'high'
+    }
 
     const frames: GifFrame[] = []
 
@@ -87,26 +176,16 @@ export function useGifEncoder() {
       if (time > endTime) break
 
       await seekVideo(video, time)
-      
+
+      ctx.clearRect(0, 0, width, height)
       ctx.drawImage(video, 0, 0, width, height)
       const imageData = ctx.getImageData(0, 0, width, height)
-      
+
       frames.push({ imageData, delay: frameDelay })
       onProgress?.(i + 1, totalFrames)
     }
 
     return frames
-  }
-
-  const seekVideo = (video: HTMLVideoElement, time: number): Promise<void> => {
-    return new Promise((resolve) => {
-      const onSeeked = () => {
-        video.removeEventListener('seeked', onSeeked)
-        resolve()
-      }
-      video.addEventListener('seeked', onSeeked)
-      video.currentTime = time
-    })
   }
 
   const encodeGif = async (
@@ -126,9 +205,8 @@ export function useGifEncoder() {
     })
 
     for (const frame of frames) {
-      gif.addFrame(frame.imageData, { 
-        delay: frame.delay,
-        transparent: options.transparent ? 0x00FF00 : null
+      gif.addFrame(frame.imageData, {
+        delay: frame.delay
       })
     }
 
@@ -138,7 +216,7 @@ export function useGifEncoder() {
 
     return new Promise<Blob>((resolve, reject) => {
       gif.on('finished', (blob: Blob) => resolve(blob))
-      gif.on('error', (err: Error) => reject(err))
+      ;(gif as any).on('error', (err: Error) => reject(err))
       gif.render()
     })
   }
@@ -156,51 +234,118 @@ export function useGifEncoder() {
       dither: DitherType
       repeat: number
       transparent?: string | null
+      skipSimilar?: boolean
     }
   ): Promise<Blob> => {
     isEncoding.value = true
-    
+
     try {
+      const duration = Math.max(0, options.endTime - options.startTime)
+      const totalFrames = Math.ceil(duration * options.fps)
+      const frameDelay = Math.round(1000 / options.fps)
+      const skipSimilar = options.skipSimilar !== false
+
+      const canvas = document.createElement('canvas')
+      canvas.width = options.width
+      canvas.height = options.height
+      const ctx = canvas.getContext('2d', { willReadFrequently: true })!
+      ctx.imageSmoothingEnabled = true
+      if ('imageSmoothingQuality' in ctx) {
+        (ctx as any).imageSmoothingQuality = 'high'
+      }
+
+      const thumbW = 48
+      const thumbH = Math.round(thumbW * (options.height / options.width))
+      const thumbCanvas = document.createElement('canvas')
+      thumbCanvas.width = thumbW
+      thumbCanvas.height = thumbH
+      const thumbCtx = thumbCanvas.getContext('2d', { willReadFrequently: true })!
+
       progress.value = {
         phase: 'extracting',
         progress: 0,
         currentFrame: 0,
-        totalFrames: Math.ceil((options.endTime - options.startTime) * options.fps),
-        message: '提取帧中...'
+        totalFrames,
+        message: '构建调色板...'
       }
 
-      const frames = await extractFramesFromVideo(video, {
-        startTime: options.startTime,
-        endTime: options.endTime,
-        fps: options.fps,
+      const targetColors = pickTargetColors(options.width, options.height, options.quality, options.dither)
+      let globalPalette: number[] | undefined
+      try {
+        globalPalette = await buildGlobalPalette(video, {
+          start: options.startTime,
+          end: options.endTime,
+          samples: Math.min(12, Math.max(6, Math.ceil(totalFrames / 5))),
+          width: options.width,
+          height: options.height,
+          targetColors
+        })
+      } catch {}
+
+      const gif = new (GIF as any)({
+        workers: options.workers,
+        quality: options.quality,
         width: options.width,
         height: options.height,
-        onProgress: (current, total) => {
-          progress.value = {
-            phase: 'extracting',
-            progress: Math.round((current / total) * 50),
-            currentFrame: current,
-            totalFrames: total,
-            message: `提取帧 (${current}/${total})`
-          }
-        }
+        workerScript: '/gif.worker.js',
+        dither: options.dither,
+        repeat: options.repeat,
+        globalPalette
       })
+
+      let lastThumb: Uint8ClampedArray | null = null
+      let accDelay = 0
+      let pushedFrames = 0
+
+      for (let i = 0; i < totalFrames; i++) {
+        const time = options.startTime + (i / options.fps)
+        if (time > options.endTime) break
+
+        await seekVideo(video, time)
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height)
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+
+        thumbCtx.drawImage(video, 0, 0, thumbW, thumbH)
+        const currThumb = thumbCtx.getImageData(0, 0, thumbW, thumbH).data
+
+        const isLast = i === totalFrames - 1
+        const similar = skipSimilar && lastThumb && isSimilarFrame(currThumb, lastThumb, 8, 4)
+
+        if (similar && !isLast) {
+          accDelay += frameDelay
+        } else {
+          gif.addFrame(ctx, {
+            copy: true,
+            delay: frameDelay + accDelay,
+            dispose: 2
+          })
+          accDelay = 0
+          pushedFrames++
+          lastThumb = new Uint8ClampedArray(currThumb)
+        }
+
+        const pct = Math.round(((i + 1) / totalFrames) * 50)
+        progress.value = {
+          phase: 'extracting',
+          progress: pct,
+          currentFrame: i + 1,
+          totalFrames,
+          message: `提取帧 (${i + 1}/${totalFrames})${skipSimilar ? ` - 已优化 ${totalFrames - pushedFrames} 帧` : ''}`
+        }
+      }
+
+      if (pushedFrames === 0) {
+        gif.addFrame(ctx, { copy: true, delay: frameDelay, dispose: 2 })
+      }
 
       progress.value = {
         phase: 'encoding',
         progress: 50,
-        message: `生成 GIF (${options.workers} 线程)...`
+        message: `生成 GIF (${options.workers} 线程, ${pushedFrames} 帧)...`
       }
 
-      const blob = await encodeGif(frames, {
-        width: options.width,
-        height: options.height,
-        quality: options.quality,
-        workers: options.workers,
-        dither: options.dither,
-        repeat: options.repeat,
-        transparent: options.transparent
-      }, (p) => {
+      gif.on('progress', (p: number) => {
         progress.value = {
           phase: 'encoding',
           progress: 50 + Math.round(p * 50),
@@ -208,10 +353,16 @@ export function useGifEncoder() {
         }
       })
 
+      const blob = await new Promise<Blob>((resolve, reject) => {
+        gif.on('finished', (blob: Blob) => resolve(blob))
+        gif.on('error', (err: Error) => reject(err))
+        gif.render()
+      })
+
       progress.value = {
         phase: 'done',
         progress: 100,
-        message: '完成!'
+        message: `完成! (${pushedFrames}/${totalFrames} 帧)`
       }
 
       return blob
@@ -236,6 +387,10 @@ export function useGifEncoder() {
     canvas.width = width
     canvas.height = height
     const ctx = canvas.getContext('2d')!
+    ctx.imageSmoothingEnabled = true
+    if ('imageSmoothingQuality' in ctx) {
+      (ctx as any).imageSmoothingQuality = 'high'
+    }
     ctx.drawImage(video, 0, 0, width, height)
     return canvas.toDataURL('image/png')
   }
@@ -250,8 +405,8 @@ export function useGifEncoder() {
     const pixels = width * height
     const colorFactor = colors / 256
     const qualityFactor = (40 - quality) / 40
-    const bytesPerFrame = pixels * 0.4 * colorFactor * qualityFactor
-    return Math.round(frames * bytesPerFrame)
+    const bytesPerFrame = pixels * 0.35 * colorFactor * qualityFactor
+    return Math.round(frames * bytesPerFrame * 0.7)
   }
 
   const formatFileSize = (bytes: number): string => {
