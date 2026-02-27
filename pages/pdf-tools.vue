@@ -123,13 +123,13 @@
             <URadioGroup v-model="splitOutputMode" :options="splitOutputOptions" />
           </UFormGroup>
 
-          <div v-if="splitMode === 'range' && splitRangeInput" class="text-sm text-gray-500 dark:text-gray-400">
-            <span>预览：</span>
-            <span v-if="splitOutputMode === 'merge'">
-              将提取 {{ parsedRangesPreview }} 合并为 1 个 PDF 文件
+          <div v-if="splitMode === 'range' && splitRangeInput" class="text-sm text-gray-500 dark:text-gray-400 p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
+            <span class="font-medium">预览：</span>
+            <span v-if="splitOutputMode === 'merge'" class="text-green-600 dark:text-green-400">
+              将提取 {{ parsedRangesPreview }}，合并为 1 个 PDF 文件
             </span>
-            <span v-else>
-              将拆分为 {{ parsedRangesCount }} 个独立 PDF 文件
+            <span v-else class="text-blue-600 dark:text-blue-400">
+              将拆分为 {{ parsedRangesCount }} 个独立 PDF 文件（{{ parsedRangesPreview }}）
             </span>
           </div>
 
@@ -598,7 +598,7 @@ const splitOutputOptions = [
 const parsedRangesPreview = computed(() => {
   const ranges = parseRanges(splitRangeInput.value, splitPageCount.value)
   if (ranges.length === 0) return '无有效范围'
-  return ranges.map(r => r.start === r.end ? `第${r.start}页` : `第${r.start}-${r.end}页`).join('、')
+  return ranges.map(r => r.start === r.end ? `第${r.start}页` : `第${r.start}-${r.end}页`).join(' 和 ')
 })
 
 const parsedRangesCount = computed(() => {
