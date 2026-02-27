@@ -60,6 +60,13 @@
               class="w-32" 
             />
           </UFormGroup>
+
+          <UFormGroup label="并行数">
+            <div class="flex items-center gap-2">
+              <URange v-model="maxConcurrent" :min="1" :max="8" :step="1" class="w-24" />
+              <UBadge variant="soft" class="w-8 justify-center">{{ maxConcurrent }}</UBadge>
+            </div>
+          </UFormGroup>
         </div>
 
         <FileUpload
@@ -110,12 +117,20 @@
                 <UIcon name="i-heroicons-magnifying-glass-plus" class="w-6 h-6 text-white" />
               </div>
               <UBadge
-                v-if="item.status === 'completed'"
+                v-if="item.status === 'completed' && item.processedSize && item.processedSize < item.originalSize"
                 color="green"
                 size="xs"
                 class="absolute bottom-1 right-1"
               >
                 -{{ getCompressionRate(item) }}
+              </UBadge>
+              <UBadge
+                v-else-if="item.status === 'completed'"
+                color="gray"
+                size="xs"
+                class="absolute bottom-1 right-1"
+              >
+                原图
               </UBadge>
             </div>
             
@@ -128,8 +143,13 @@
                 </div>
                 <div v-if="item.processedSize" class="flex justify-between">
                   <span class="text-gray-500 dark:text-gray-400">压缩后:</span>
-                  <span class="text-green-600 dark:text-green-400 font-medium">
+                  <span 
+                    :class="item.processedSize < item.originalSize 
+                      ? 'text-green-600 dark:text-green-400 font-medium' 
+                      : 'text-gray-500 dark:text-gray-400'"
+                  >
                     {{ formatSize(item.processedSize) }}
+                    <span v-if="item.processedSize >= item.originalSize" class="text-xs">(已是最优)</span>
                   </span>
                 </div>
               </div>
@@ -180,41 +200,48 @@
             <UBadge color="primary" variant="soft">节省 {{ getCompressionRate(selectedItem) }}</UBadge>
           </div>
 
-          <div class="relative rounded-lg overflow-hidden bg-gray-100 dark:bg-gray-800" style="aspect-ratio: 16/10;">
-            <div class="absolute inset-0 flex">
-              <div class="flex-1 overflow-hidden" :style="{ clipPath: `inset(0 ${100 - comparePosition}% 0 0)` }">
-                <img
-                  :src="selectedItem.preview"
-                  class="w-full h-full object-contain"
-                  alt="original"
-                />
-              </div>
-            </div>
-            <div class="absolute inset-0 flex">
-              <div class="flex-1 overflow-hidden" :style="{ clipPath: `inset(0 0 0 ${comparePosition}%)` }">
-                <img
-                  :src="selectedItem.processedPreview"
-                  class="w-full h-full object-contain"
-                  alt="compressed"
-                />
-              </div>
+          <div 
+            ref="compareContainer"
+            class="relative rounded-lg overflow-hidden bg-gray-100 dark:bg-gray-800 select-none" 
+            style="aspect-ratio: 16/10;"
+            @mousedown="startDrag"
+            @mousemove="onDrag"
+            @mouseup="stopDrag"
+            @mouseleave="stopDrag"
+          >
+            <img
+              :src="selectedItem.preview"
+              class="absolute inset-0 w-full h-full object-contain pointer-events-none"
+              alt="original"
+              draggable="false"
+            />
+            <div 
+              class="absolute inset-0 overflow-hidden pointer-events-none"
+              :style="{ width: `${comparePosition}%` }"
+            >
+              <img
+                :src="selectedItem.processedPreview"
+                class="absolute top-0 left-0 h-full object-contain"
+                :style="{ width: `${100 / comparePosition * 100}%`, maxWidth: 'none' }"
+                alt="compressed"
+                draggable="false"
+              />
             </div>
             
             <div 
-              class="absolute top-0 bottom-0 w-1 bg-white shadow-lg cursor-ew-resize"
-              :style="{ left: `${comparePosition}%` }"
-              @mousedown="startDrag"
+              class="absolute top-0 bottom-0 w-0.5 bg-white shadow-lg pointer-events-none"
+              :style="{ left: `${comparePosition}%`, transform: 'translateX(-50%)' }"
             >
-              <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-8 h-8 bg-white rounded-full shadow-lg flex items-center justify-center">
+              <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-8 h-8 bg-white rounded-full shadow-lg flex items-center justify-center cursor-ew-resize pointer-events-auto">
                 <UIcon name="i-heroicons-arrows-right-left" class="w-4 h-4 text-gray-600" />
               </div>
             </div>
 
-            <div class="absolute bottom-2 left-2 px-2 py-1 bg-black/60 text-white text-xs rounded">
-              原图
-            </div>
-            <div class="absolute bottom-2 right-2 px-2 py-1 bg-black/60 text-white text-xs rounded">
+            <div class="absolute bottom-2 left-2 px-2 py-1 bg-black/60 text-white text-xs rounded pointer-events-none">
               压缩后
+            </div>
+            <div class="absolute bottom-2 right-2 px-2 py-1 bg-black/60 text-white text-xs rounded pointer-events-none">
+              原图
             </div>
           </div>
 
@@ -245,6 +272,7 @@ const {
 const quality = ref(75)
 const maxWidth = ref<number | undefined>()
 const outputFormat = ref('image/jpeg')
+const maxConcurrent = ref(4)
 const selectedItem = ref<typeof items.value[0] | null>(null)
 const showCompareModal = ref(false)
 const comparePosition = ref(50)
@@ -261,13 +289,36 @@ const qualityColor = computed(() => {
   return 'red'
 })
 
+const processingQueue: Array<typeof items.value[0]> = []
+let activeCount = 0
+
+const processNext = async () => {
+  if (activeCount >= maxConcurrent.value || processingQueue.length === 0) return
+  
+  const item = processingQueue.shift()
+  if (!item) return
+  
+  activeCount++
+  try {
+    await compressImage(item)
+  } finally {
+    activeCount--
+    processNext()
+  }
+}
+
 const handleFiles = async (files: File[]) => {
-  for (const file of files) {
-    if (!file.type.startsWith('image/')) continue
-    
+  const imageFiles = Array.from(files).filter(f => f.type.startsWith('image/'))
+  
+  for (const file of imageFiles) {
     const item = addItem(file)
     item.preview = await createPreview(file)
-    compressImage(item)
+    processingQueue.push(item)
+  }
+  
+  const startCount = Math.min(maxConcurrent.value, processingQueue.length)
+  for (let i = 0; i < startCount; i++) {
+    processNext()
   }
 }
 
@@ -290,7 +341,6 @@ const compressImage = async (item: typeof items.value[0]) => {
     canvas.height = height
     
     const ctx = canvas.getContext('2d')!
-    ctx.drawImage(bitmap, 0, 0, width, height)
 
     let mimeType = outputFormat.value === 'original' 
       ? (item.file.type || 'image/jpeg')
@@ -300,14 +350,15 @@ const compressImage = async (item: typeof items.value[0]) => {
       mimeType = 'image/png'
     }
 
-    const supportsQuality = ['image/jpeg', 'image/webp'].includes(mimeType)
-    const qualityValue = supportsQuality ? quality.value / 100 : undefined
-
     if (mimeType === 'image/jpeg') {
       ctx.fillStyle = '#FFFFFF'
       ctx.fillRect(0, 0, width, height)
-      ctx.drawImage(bitmap, 0, 0, width, height)
     }
+    
+    ctx.drawImage(bitmap, 0, 0, width, height)
+
+    const supportsQuality = ['image/jpeg', 'image/webp'].includes(mimeType)
+    const qualityValue = supportsQuality ? quality.value / 100 : undefined
 
     let blob: Blob
 
@@ -321,6 +372,10 @@ const compressImage = async (item: typeof items.value[0]) => {
           qualityValue
         )
       })
+    }
+
+    if (blob.size >= item.originalSize) {
+      blob = item.file
     }
 
     const processedPreview = URL.createObjectURL(blob)
@@ -344,22 +399,39 @@ const reprocess = (item: typeof items.value[0]) => {
   if (item.processedPreview) {
     URL.revokeObjectURL(item.processedPreview)
   }
-  compressImage(item)
+  updateItem(item.id, { status: 'pending', processedBlob: undefined, processedSize: undefined, processedPreview: undefined })
+  processingQueue.push(item)
+  processNext()
 }
 
 const compressPng = async (
-  canvas: HTMLCanvasElement, 
-  _ctx: CanvasRenderingContext2D, 
-  _width: number, 
-  _height: number,
-  _qualityPercent: number
+  _canvas: HTMLCanvasElement, 
+  ctx: CanvasRenderingContext2D, 
+  width: number, 
+  height: number,
+  qualityPercent: number
 ): Promise<Blob> => {
-  return new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob(
-      b => b ? resolve(b) : reject(new Error('PNG 压缩失败')),
-      'image/png'
-    )
-  })
+  try {
+    // @ts-ignore
+    const UPNG = await import('upng-js')
+    
+    const imageData = ctx.getImageData(0, 0, width, height)
+    const rgba = new Uint8Array(imageData.data.buffer)
+    
+    const targetColors = Math.max(8, Math.min(256, Math.round(qualityPercent * 2.56)))
+    
+    const pngData = UPNG.encode([rgba.buffer], width, height, targetColors)
+    
+    return new Blob([pngData], { type: 'image/png' })
+  } catch (e) {
+    console.error('PNG compression failed:', e)
+    return new Promise<Blob>((resolve, reject) => {
+      _canvas.toBlob(
+        b => b ? resolve(b) : reject(new Error('PNG 压缩失败')),
+        'image/png'
+      )
+    })
+  }
 }
 
 const getCompressionRate = (item: typeof items.value[0]): string => {
@@ -375,31 +447,54 @@ const selectItem = (item: typeof items.value[0]) => {
   }
 }
 
+const compareContainer = ref<HTMLElement>()
 let isDragging = false
-const startDrag = (e: MouseEvent) => {
-  isDragging = true
-  const handleMove = (e: MouseEvent) => {
-    if (!isDragging) return
-    const rect = (e.target as HTMLElement).parentElement?.getBoundingClientRect()
-    if (rect) {
-      const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left))
-      comparePosition.value = Math.round((x / rect.width) * 100)
-    }
-  }
-  const handleUp = () => {
-    isDragging = false
-    document.removeEventListener('mousemove', handleMove)
-    document.removeEventListener('mouseup', handleUp)
-  }
-  document.addEventListener('mousemove', handleMove)
-  document.addEventListener('mouseup', handleUp)
+
+const updateComparePosition = (e: MouseEvent) => {
+  if (!compareContainer.value) return
+  const rect = compareContainer.value.getBoundingClientRect()
+  const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left))
+  comparePosition.value = Math.round((x / rect.width) * 100)
 }
 
-watch([quality, maxWidth, outputFormat], () => {
-  items.value.forEach(item => {
-    if (item.status === 'completed') {
-      reprocess(item)
+const startDrag = (e: MouseEvent) => {
+  isDragging = true
+  updateComparePosition(e)
+}
+
+const onDrag = (e: MouseEvent) => {
+  if (!isDragging) return
+  e.preventDefault()
+  updateComparePosition(e)
+}
+
+const stopDrag = () => {
+  isDragging = false
+}
+
+let reprocessTimer: ReturnType<typeof setTimeout> | null = null
+
+const debouncedReprocess = () => {
+  if (reprocessTimer) {
+    clearTimeout(reprocessTimer)
+  }
+  reprocessTimer = setTimeout(() => {
+    const toReprocess = items.value.filter(item => item.status === 'completed' || item.status === 'error')
+    toReprocess.forEach(item => {
+      if (item.processedPreview) {
+        URL.revokeObjectURL(item.processedPreview)
+      }
+      updateItem(item.id, { status: 'pending', processedBlob: undefined, processedSize: undefined, processedPreview: undefined })
+      processingQueue.push(item)
+    })
+    
+    const startCount = Math.min(maxConcurrent.value, processingQueue.length)
+    for (let i = 0; i < startCount; i++) {
+      processNext()
     }
-  })
-})
+    reprocessTimer = null
+  }, 800)
+}
+
+watch([quality, maxWidth, outputFormat], debouncedReprocess)
 </script>

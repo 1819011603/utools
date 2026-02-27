@@ -20,6 +20,7 @@
     "jszip": "^3.10.1",
     "nuxt": "3.15.4",
     "quantize": "^1.0.2",
+    "upng-js": "^2.1.0",
     "vue": "^3.4.0"
   },
   "devDependencies": {
