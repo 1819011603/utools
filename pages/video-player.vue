@@ -146,8 +146,12 @@
           @play="isPlaying = true"
           @pause="isPlaying = false"
           @ended="onVideoEnded"
-          @waiting="isBuffering = true"
+          @waiting="onWaiting"
           @canplay="onCanPlay"
+          @canplaythrough="onCanPlayThrough"
+          @seeking="onSeeking"
+          @seeked="onSeeked"
+          @playing="onPlaying"
           @volumechange="onVolumeChange"
           @error="onVideoError"
         />
@@ -372,157 +376,58 @@
         <div class="flex items-center gap-2">
           <UIcon name="i-heroicons-cog-6-tooth" class="w-5 h-5 text-gray-500" />
           <span class="font-semibold">HLS 配置</span>
-          <UBadge color="gray" variant="soft" size="xs">预加载与缓冲设置</UBadge>
         </div>
       </template>
 
-      <div class="space-y-6">
-        <UAlert color="blue" variant="soft" icon="i-heroicons-information-circle">
-          <template #description>
-            <span class="text-xs">修改配置后点击"应用配置"重新加载视频生效。增大缓冲值可减少卡顿，但会占用更多内存和带宽。</span>
-          </template>
-        </UAlert>
-
-        <!-- 缓冲时间设置 -->
-        <div>
-          <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3 flex items-center gap-2">
-            <UIcon name="i-heroicons-clock" class="w-4 h-4" />
-            缓冲时间设置
-          </h4>
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <UFormGroup label="预加载时长" help="提前缓冲多少秒视频（减少卡顿）">
-              <div class="flex items-center gap-2">
-                <UInput 
-                  v-model.number="hlsConfig.maxBufferLength" 
-                  type="number" 
-                  :min="5" 
-                  :max="120"
-                  class="flex-1"
-                />
-                <span class="text-sm text-gray-500">秒</span>
-              </div>
-            </UFormGroup>
-            <UFormGroup label="最大缓冲时长" help="缓冲区最大可存储的视频时长">
-              <div class="flex items-center gap-2">
-                <UInput 
-                  v-model.number="hlsConfig.maxMaxBufferLength" 
-                  type="number" 
-                  :min="30" 
-                  :max="600"
-                  class="flex-1"
-                />
-                <span class="text-sm text-gray-500">秒</span>
-              </div>
-            </UFormGroup>
-            <UFormGroup label="后台缓冲保留" help="已播放内容保留时长（方便回看）">
-              <div class="flex items-center gap-2">
-                <UInput 
-                  v-model.number="hlsConfig.backBufferLength" 
-                  type="number" 
-                  :min="0" 
-                  :max="300"
-                  class="flex-1"
-                />
-                <span class="text-sm text-gray-500">秒</span>
-              </div>
-            </UFormGroup>
-          </div>
-        </div>
-
-        <!-- 内存设置 -->
-        <div>
-          <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3 flex items-center gap-2">
-            <UIcon name="i-heroicons-cpu-chip" class="w-4 h-4" />
-            内存设置
-          </h4>
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <UFormGroup label="最大缓冲内存" help="缓冲区占用的最大内存">
-              <div class="flex items-center gap-2">
-                <UInput 
-                  v-model.number="hlsConfig.maxBufferSizeMB" 
-                  type="number" 
-                  :min="30" 
-                  :max="1024"
-                  class="flex-1"
-                />
-                <span class="text-sm text-gray-500">MB</span>
-              </div>
-            </UFormGroup>
-            <div class="flex items-end pb-1">
-              <div class="text-xs text-gray-500 space-y-1">
-                <p>💡 建议值：</p>
-                <p>• 普通使用：60-100 MB</p>
-                <p>• 高清视频：150-300 MB</p>
-                <p>• 4K视频：300-500 MB</p>
-              </div>
+      <div class="space-y-4">
+        <!-- 缓冲设置 -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <UFormGroup label="预加载时长" help="提前缓冲多少秒视频">
+            <div class="flex items-center gap-2">
+              <UInput 
+                v-model.number="hlsConfig.maxBufferLength" 
+                type="number" 
+                :min="10" 
+                :max="120"
+                class="flex-1"
+              />
+              <span class="text-sm text-gray-500">秒</span>
             </div>
-          </div>
-        </div>
-
-        <!-- 下载速度设置 -->
-        <div>
-          <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3 flex items-center gap-2">
-            <UIcon name="i-heroicons-arrow-down-tray" class="w-4 h-4" />
-            下载速度设置
-          </h4>
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <UFormGroup label="分片下载超时" help="单个分片下载的超时时间">
-              <div class="flex items-center gap-2">
-                <UInput 
-                  v-model.number="hlsConfig.fragLoadingTimeOut" 
-                  type="number" 
-                  :min="5000" 
-                  :max="120000"
-                  :step="1000"
-                  class="flex-1"
-                />
-                <span class="text-sm text-gray-500">ms</span>
-              </div>
-            </UFormGroup>
-            <UFormGroup label="带宽估计" help="初始带宽估计（影响首次加载画质）">
-              <div class="flex items-center gap-2">
-                <UInput 
-                  v-model.number="hlsConfig.abrBandwidthMbps" 
-                  type="number" 
-                  :min="1" 
-                  :max="100"
-                  :step="1"
-                  class="flex-1"
-                />
-                <span class="text-sm text-gray-500">Mbps</span>
-              </div>
-            </UFormGroup>
-            <UFormGroup label="最大重试次数" help="分片加载失败后的重试次数">
-              <div class="flex items-center gap-2">
-                <UInput 
-                  v-model.number="hlsConfig.fragLoadingMaxRetry" 
-                  type="number" 
-                  :min="1" 
-                  :max="20"
-                  class="flex-1"
-                />
-                <span class="text-sm text-gray-500">次</span>
-              </div>
-            </UFormGroup>
-          </div>
+          </UFormGroup>
+          <UFormGroup label="最大缓冲时长" help="缓冲区最大存储时长">
+            <div class="flex items-center gap-2">
+              <UInput 
+                v-model.number="hlsConfig.maxMaxBufferLength" 
+                type="number" 
+                :min="30" 
+                :max="300"
+                class="flex-1"
+              />
+              <span class="text-sm text-gray-500">秒</span>
+            </div>
+          </UFormGroup>
+          <UFormGroup label="缓冲内存" help="缓冲区占用的最大内存">
+            <div class="flex items-center gap-2">
+              <UInput 
+                v-model.number="hlsConfig.maxBufferSizeMB" 
+                type="number" 
+                :min="30" 
+                :max="500"
+                class="flex-1"
+              />
+              <span class="text-sm text-gray-500">MB</span>
+            </div>
+          </UFormGroup>
         </div>
 
         <!-- 高级设置 -->
-        <div>
-          <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3 flex items-center gap-2">
-            <UIcon name="i-heroicons-adjustments-horizontal" class="w-4 h-4" />
-            高级设置
-          </h4>
-          <div class="flex flex-wrap gap-4">
-            <UCheckbox v-model="hlsConfig.enableWorker" label="启用 Web Worker（提高性能）" />
-            <UCheckbox v-model="hlsConfig.lowLatencyMode" label="低延迟模式（直播推荐）" />
-            <UCheckbox v-model="hlsConfig.progressive" label="渐进式加载" />
-          </div>
+        <div class="flex flex-wrap gap-4">
+          <UCheckbox v-model="hlsConfig.enableWorker" label="启用 Web Worker" />
+          <UCheckbox v-model="hlsConfig.lowLatencyMode" label="低延迟模式（直播）" />
         </div>
 
         <!-- 实时状态 -->
         <div v-if="hlsStats" class="p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
-          <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">实时状态</h4>
           <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
             <div>
               <span class="text-gray-500">已缓冲：</span>
@@ -767,20 +672,18 @@ const hoverPercent = ref(0)
 let hls: HlsType | null = null
 const hlsStats = ref<{ buffered: number; level: string } | null>(null)
 const hlsConfig = ref({
-  // 缓冲时间设置
+  // 缓冲时间设置（精简配置）
   maxBufferLength: 30,        // 预加载时长（秒）
   maxMaxBufferLength: 60,     // 最大缓冲时长（秒）
   backBufferLength: 30,       // 后台缓冲（秒）
   // 内存设置
-  maxBufferSizeMB: 100,       // 缓冲大小（MB）
+  maxBufferSizeMB: 60,        // 缓冲大小（MB）
   // 下载速度设置
-  fragLoadingTimeOut: 20000,  // 分片下载超时（ms）
-  abrBandwidthMbps: 10,       // 带宽估计（Mbps）
-  fragLoadingMaxRetry: 6,     // 最大重试次数
+  fragLoadingTimeOut: 30000,  // 分片下载超时（ms）
+  fragLoadingMaxRetry: 3,     // 最大重试次数
   // 高级设置
   enableWorker: true,         // 启用 Web Worker
   lowLatencyMode: false,      // 低延迟模式
-  progressive: true           // 渐进式加载
 })
 
 // MP4 预加载策略
@@ -982,9 +885,9 @@ const loadHlsVideo = async (url: string) => {
   // 先显示播放器容器
   isVideoLoaded.value = true
   
-  // 等待 DOM 更新（video 元素重新创建需要更多时间）
+  // 等待 DOM 更新
   await nextTick()
-  await new Promise(resolve => setTimeout(resolve, 100))
+  await new Promise(resolve => setTimeout(resolve, 50))
   
   if (!Hls.isSupported()) {
     // 尝试原生支持（Safari）
@@ -1001,54 +904,71 @@ const loadHlsVideo = async (url: string) => {
     throw new Error('视频元素未初始化')
   }
   
+  const finalUrl = getProxyUrl(url)
+  console.log('加载 HLS 视频:', finalUrl)
+  
+  // 简化的 HLS 配置
   hls = new Hls({
-    // 缓冲时间配置（用户可调）
+    // 基础缓冲配置
     maxBufferLength: hlsConfig.value.maxBufferLength,
     maxMaxBufferLength: hlsConfig.value.maxMaxBufferLength,
     backBufferLength: hlsConfig.value.backBufferLength,
-    // 内存配置
     maxBufferSize: hlsConfig.value.maxBufferSizeMB * 1024 * 1024,
-    // 下载速度配置
+    // 加载配置
     fragLoadingTimeOut: hlsConfig.value.fragLoadingTimeOut,
     fragLoadingMaxRetry: hlsConfig.value.fragLoadingMaxRetry,
-    fragLoadingRetryDelay: 500,
-    fragLoadingMaxRetryTimeout: 64000,
-    // 带宽估计（Mbps 转 bps）
-    abrEwmaDefaultEstimate: hlsConfig.value.abrBandwidthMbps * 1000 * 1000,
-    abrBandWidthFactor: 0.95,
-    abrBandWidthUpFactor: 0.7,
-    // 高级设置
+    manifestLoadingTimeOut: 20000,
+    manifestLoadingMaxRetry: 3,
+    levelLoadingTimeOut: 20000,
+    levelLoadingMaxRetry: 3,
+    // 性能配置
     enableWorker: hlsConfig.value.enableWorker,
     lowLatencyMode: hlsConfig.value.lowLatencyMode,
-    progressive: hlsConfig.value.progressive,
-    // 并发优化配置
-    maxBufferHole: 0.5,
-    testBandwidth: true,
-    // 自动选择最高可用画质
     startLevel: -1,
-    autoStartLoad: true
+    // 关键：允许跨域获取密钥（AES-128 加密视频需要）
+    xhrSetup: (xhr: XMLHttpRequest, url: string) => {
+      xhr.withCredentials = false
+    }
   })
-  
-  const finalUrl = getProxyUrl(url)
-  console.log('加载 HLS 视频:', finalUrl)
   
   hls.loadSource(finalUrl)
   hls.attachMedia(videoEl.value)
   
-  hls.on(Hls.Events.MANIFEST_PARSED, () => {
+  // manifest 解析完成
+  hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
+    console.log('HLS manifest 解析完成，画质数:', data.levels.length)
     isLoading.value = false
+    isBuffering.value = false
+    
+    // 自动播放
+    if (videoEl.value) {
+      videoEl.value.play().catch(e => {
+        console.log('自动播放被阻止:', e.message)
+      })
+    }
   })
   
+  // 错误处理
   hls.on(Hls.Events.ERROR, (_, data) => {
+    console.warn('HLS 错误:', data.type, data.details, 'fatal:', data.fatal)
+    
     if (data.fatal) {
       switch (data.type) {
         case Hls.ErrorTypes.NETWORK_ERROR:
-          errorMessage.value = '网络错误，正在尝试恢复...'
-          hls?.startLoad()
+          console.log('网络错误，尝试恢复...')
+          errorMessage.value = '网络错误，正在重试...'
+          setTimeout(() => {
+            hls?.startLoad()
+            errorMessage.value = ''
+          }, 1000)
           break
         case Hls.ErrorTypes.MEDIA_ERROR:
-          errorMessage.value = '媒体错误，正在尝试恢复...'
+          console.log('媒体错误，尝试恢复...')
+          errorMessage.value = '媒体错误，正在恢复...'
           hls?.recoverMediaError()
+          setTimeout(() => {
+            errorMessage.value = ''
+          }, 2000)
           break
         default:
           errorMessage.value = '播放失败: ' + data.details
@@ -1057,16 +977,20 @@ const loadHlsVideo = async (url: string) => {
     }
   })
   
-  // 更新 HLS 统计；首帧缓冲完成后延迟播放
+  // 分片加载完成
   hls.on(Hls.Events.FRAG_BUFFERED, () => {
     updateHlsStats()
-    if (isRestoringFromSaved.value && videoEl.value) {
-      isRestoringFromSaved.value = false
-      videoEl.value.playbackRate = playbackRate.value
-      videoEl.value.volume = volume.value
-      videoEl.value.muted = isMuted.value
-      // 延迟播放，等待预缓冲
-      scheduleDelayedPlay()
+    isBuffering.value = false
+  })
+  
+  // 分片加载中
+  hls.on(Hls.Events.FRAG_LOADING, () => {
+    // 只在没有足够缓冲时显示加载
+    if (videoEl.value && videoEl.value.buffered.length > 0) {
+      const bufferedEnd = videoEl.value.buffered.end(videoEl.value.buffered.length - 1)
+      if (bufferedEnd - videoEl.value.currentTime < 2) {
+        isBuffering.value = true
+      }
     }
   })
   
@@ -1225,13 +1149,27 @@ const seekTo = (e: MouseEvent) => {
   if (!progressBar.value || !videoEl.value) return
   
   const rect = progressBar.value.getBoundingClientRect()
-  const percent = (e.clientX - rect.left) / rect.width
-  videoEl.value.currentTime = percent * duration.value
+  const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+  const targetTime = percent * duration.value
+  
+  console.log('Seek to:', targetTime)
+  isBuffering.value = true
+  videoEl.value.currentTime = targetTime
 }
+
+// 拖动前的播放状态
+let wasPlayingBeforeSeek = false
 
 // 开始拖动进度条
 const startSeek = (e: MouseEvent) => {
   isSeeking.value = true
+  wasPlayingBeforeSeek = videoEl.value ? !videoEl.value.paused : false
+  
+  // 拖动时暂停播放（避免 HLS 缓冲冲突）
+  if (wasPlayingBeforeSeek && videoEl.value) {
+    videoEl.value.pause()
+  }
+  
   updateSeekPreview(e)
   
   const onMove = (e: MouseEvent) => {
@@ -1241,7 +1179,21 @@ const startSeek = (e: MouseEvent) => {
   const onUp = (e: MouseEvent) => {
     isSeeking.value = false
     seekPreviewTime.value = null
-    seekTo(e)
+    
+    // 执行 seek
+    if (progressBar.value && videoEl.value) {
+      const rect = progressBar.value.getBoundingClientRect()
+      const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+      videoEl.value.currentTime = percent * duration.value
+      
+      // 恢复播放
+      if (wasPlayingBeforeSeek) {
+        setTimeout(() => {
+          videoEl.value?.play().catch(() => {})
+        }, 100)
+      }
+    }
+    
     document.removeEventListener('mousemove', onMove)
     document.removeEventListener('mouseup', onUp)
   }
@@ -1430,25 +1382,19 @@ const PRELOAD_BUFFER_TIME = 1
 
 const onCanPlay = () => {
   console.log('视频可以播放了')
-  isBuffering.value = false
   isLoading.value = false
+  isBuffering.value = false
   
-  // 切换/恢复时延迟播放：等待缓冲一段时间后再播放
-  if (isRestoringFromSaved.value) {
-    isRestoringFromSaved.value = false
-    if (videoEl.value) {
-      videoEl.value.playbackRate = playbackRate.value
-      videoEl.value.volume = volume.value
-      videoEl.value.muted = isMuted.value
-      // 延迟播放，等待预缓冲
-      scheduleDelayedPlay()
-    }
+  // 应用播放设置
+  if (videoEl.value) {
+    videoEl.value.playbackRate = playbackRate.value
+    videoEl.value.volume = volume.value
+    videoEl.value.muted = isMuted.value
   }
   
   // 首次加载且开启自动全屏
   if (isFirstLoad && autoFullscreen.value) {
     isFirstLoad = false
-    // 延迟一点执行全屏，确保视频已经开始播放
     setTimeout(() => {
       if (playerContainer.value && !document.fullscreenElement) {
         playerContainer.value.requestFullscreen().catch(() => {
@@ -1464,31 +1410,46 @@ const onLoadedData = () => {
   isLoading.value = false
 }
 
-// 延迟播放：等待预缓冲后再播放
-const scheduleDelayedPlay = () => {
-  // 清除之前的定时器
-  if (delayedPlayTimer) {
-    clearTimeout(delayedPlayTimer)
-    delayedPlayTimer = null
-  }
-  
-  if (!videoEl.value) return
-  
-  // 显示缓冲状态
+// 等待缓冲
+const onWaiting = () => {
+  console.log('视频等待缓冲...')
   isBuffering.value = true
-  console.log(`等待预缓冲 ${PRELOAD_BUFFER_TIME} 秒后播放...`)
-  
-  delayedPlayTimer = setTimeout(() => {
-    delayedPlayTimer = null
-    if (videoEl.value && !isPlaying.value) {
-      console.log('预缓冲完成，开始播放')
-      isBuffering.value = false
-      videoEl.value.play().catch((e) => {
-        console.error('播放失败:', e)
-        isBuffering.value = false
-      })
-    }
-  }, PRELOAD_BUFFER_TIME * 1000)
+}
+
+// 可以流畅播放
+const onCanPlayThrough = () => {
+  console.log('视频可以流畅播放')
+  isBuffering.value = false
+}
+
+// 开始 seek
+const onSeeking = () => {
+  console.log('开始跳转...')
+  isBuffering.value = true
+}
+
+// seek 完成
+const onSeeked = () => {
+  console.log('跳转完成')
+  // 简单处理：seek 完成后关闭缓冲状态
+  setTimeout(() => {
+    isBuffering.value = false
+  }, 200)
+}
+
+// 开始播放
+const onPlaying = () => {
+  console.log('视频开始播放')
+  isBuffering.value = false
+  isPlaying.value = true
+}
+
+// 延迟播放（已弃用，保留函数避免报错）
+const scheduleDelayedPlay = () => {
+  if (!videoEl.value) return
+  videoEl.value.play().catch((e) => {
+    console.log('播放失败:', e.message)
+  })
 }
 
 // 视频播放结束
@@ -1531,20 +1492,14 @@ const applyHlsConfig = async () => {
 
 const resetHlsConfig = () => {
   hlsConfig.value = {
-    // 缓冲时间设置
     maxBufferLength: 30,
     maxMaxBufferLength: 60,
     backBufferLength: 30,
-    // 内存设置
-    maxBufferSizeMB: 100,
-    // 下载速度设置
-    fragLoadingTimeOut: 20000,
-    abrBandwidthMbps: 10,
-    fragLoadingMaxRetry: 6,
-    // 高级设置
+    maxBufferSizeMB: 60,
+    fragLoadingTimeOut: 30000,
+    fragLoadingMaxRetry: 3,
     enableWorker: true,
     lowLatencyMode: false,
-    progressive: true
   }
 }
 
