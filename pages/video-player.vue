@@ -1426,7 +1426,7 @@ const isRestoringFromSaved = ref(false)
 // 切换集数后延迟播放的定时器
 let delayedPlayTimer: ReturnType<typeof setTimeout> | null = null
 // 预缓冲时间（秒）
-const PRELOAD_BUFFER_TIME = 20
+const PRELOAD_BUFFER_TIME = 3
 
 const onCanPlay = () => {
   console.log('视频可以播放了')
