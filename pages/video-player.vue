@@ -1388,11 +1388,19 @@ const onVideoError = (e: Event) => {
 
 // 首次加载标记
 let isFirstLoad = true
+// 从保存状态恢复后需要自动播放（MP4 等原生视频无 MANIFEST_PARSED，需在 canplay 时触发）
+const isRestoringFromSaved = ref(false)
 
 const onCanPlay = () => {
   console.log('视频可以播放了')
   isBuffering.value = false
   isLoading.value = false
+  
+  // 从保存状态恢复：MP4 等原生视频需在此触发自动播放（HLS 已在 MANIFEST_PARSED 中播放）
+  if (isRestoringFromSaved.value && videoEl.value && !isPlaying.value) {
+    isRestoringFromSaved.value = false
+    videoEl.value.play().catch(() => {})
+  }
   
   // 首次加载且开启自动全屏
   if (isFirstLoad && autoFullscreen.value) {
@@ -1556,7 +1564,7 @@ onMounted(async () => {
     if (!urlParam && savedState.videoUrlInput) {
       videoUrlInput.value = savedState.videoUrlInput
       playlist.value = savedState.playlist || []
-      currentIndex.value = savedState.currentIndex || 0
+      currentIndex.value = savedState.currentIndex ?? 0
     }
   }
   
@@ -1565,9 +1573,22 @@ onMounted(async () => {
   if (urlParam) {
     console.log('从 URL 参数加载视频:', urlParam)
     videoUrlInput.value = urlParam
-    // 延迟执行，确保组件已完全挂载
     await nextTick()
     parseAndLoad()
+  } else if (savedState?.playlist?.length) {
+    // 刷新后恢复：有保存的播放列表且为 URL 链接（非本地 blob），自动加载并播放
+    const idx = savedState.currentIndex ?? 0
+    const url = savedState.playlist[idx]
+    if (url?.startsWith('http')) {
+      isRestoringFromSaved.value = true
+      await nextTick()
+      await playByIndex(idx)
+    }
+  } else if (savedState?.videoUrlInput?.trim()) {
+    // 有视频地址但无播放列表（如粘贴后未解析），尝试解析并加载
+    await nextTick()
+    isRestoringFromSaved.value = true
+    await parseAndLoad()
   }
   
   // 页面关闭前保存进度
