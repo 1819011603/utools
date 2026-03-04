@@ -993,6 +993,10 @@ const loadHlsVideo = async (url: string) => {
     throw new Error('视频元素未初始化')
   }
   
+  // 切换源时清空 video，避免 MP4→HLS 时残留 src 导致冲突
+  videoEl.value.removeAttribute('src')
+  videoEl.value.load()
+  
   hls = new Hls({
     // 缓冲时间配置（用户可调）
     maxBufferLength: hlsConfig.value.maxBufferLength,
@@ -1029,7 +1033,6 @@ const loadHlsVideo = async (url: string) => {
   
   hls.on(Hls.Events.MANIFEST_PARSED, () => {
     isLoading.value = false
-    videoEl.value?.play().catch(() => {})
   })
   
   hls.on(Hls.Events.ERROR, (_, data) => {
@@ -1050,9 +1053,13 @@ const loadHlsVideo = async (url: string) => {
     }
   })
   
-  // 更新 HLS 统计
+  // 更新 HLS 统计；首帧缓冲完成后自动播放（切换集数时需等待数据就绪）
   hls.on(Hls.Events.FRAG_BUFFERED, () => {
     updateHlsStats()
+    if (isRestoringFromSaved.value && videoEl.value && !isPlaying.value) {
+      isRestoringFromSaved.value = false
+      videoEl.value.play().catch(() => {})
+    }
   })
   
   hls.on(Hls.Events.LEVEL_SWITCHED, () => {
@@ -1107,6 +1114,9 @@ const loadNativeVideo = async (url: string) => {
     throw new Error('视频元素未初始化，请刷新页面重试')
   }
   
+  // 切换源时先清空，避免 HLS→MP4 时残留 MediaSource 导致无法播放
+  videoEl.value.removeAttribute('src')
+  videoEl.value.load()
   videoEl.value.src = finalUrl
   videoEl.value.load()
   
