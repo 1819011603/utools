@@ -135,6 +135,7 @@
       >
         <video
           ref="videoEl"
+          :key="videoKey"
           class="max-w-full max-h-full"
           :class="isFullscreen ? 'w-auto h-full' : 'w-full aspect-video'"
           :crossorigin="isLocalFile ? undefined : 'anonymous'"
@@ -723,6 +724,7 @@ const isLoading = ref(false)
 const useProxy = ref(false)
 const autoFullscreen = ref(true)  // 自动全屏
 const savedProgress = ref<Record<string, number>>({})  // 保存的播放进度
+const videoKey = ref(0)  // 用于强制重新创建 video 元素
 
 // 播放列表
 const playlist = ref<string[]>([])
@@ -938,10 +940,16 @@ const loadVideo = async () => {
   
   errorMessage.value = ''
   isLoading.value = true
-  // 切换集数时不隐藏播放器，避免 video 元素被销毁导致点击失效
-  if (!isVideoLoaded.value) {
-    isVideoLoaded.value = true
-  }
+  isBuffering.value = true
+  isPlaying.value = false
+  currentTime.value = 0
+  duration.value = 0
+  bufferedPercent.value = 0
+  
+  // 强制重新创建 video 元素，彻底重置状态
+  videoKey.value++
+  
+  isVideoLoaded.value = true
   isLocalFile.value = false  // URL 加载不是本地文件
   destroyHls()
   
@@ -974,9 +982,9 @@ const loadHlsVideo = async (url: string) => {
   // 先显示播放器容器
   isVideoLoaded.value = true
   
-  // 等待 DOM 更新
+  // 等待 DOM 更新（video 元素重新创建需要更多时间）
   await nextTick()
-  await new Promise(resolve => setTimeout(resolve, 50))
+  await new Promise(resolve => setTimeout(resolve, 100))
   
   if (!Hls.isSupported()) {
     // 尝试原生支持（Safari）
@@ -992,10 +1000,6 @@ const loadHlsVideo = async (url: string) => {
   if (!videoEl.value) {
     throw new Error('视频元素未初始化')
   }
-  
-  // 切换源时清空 video，避免 MP4→HLS 时残留 src 导致冲突
-  videoEl.value.removeAttribute('src')
-  videoEl.value.load()
   
   hls = new Hls({
     // 缓冲时间配置（用户可调）
@@ -1053,12 +1057,16 @@ const loadHlsVideo = async (url: string) => {
     }
   })
   
-  // 更新 HLS 统计；首帧缓冲完成后自动播放（切换集数时需等待数据就绪）
+  // 更新 HLS 统计；首帧缓冲完成后延迟播放
   hls.on(Hls.Events.FRAG_BUFFERED, () => {
     updateHlsStats()
-    if (isRestoringFromSaved.value && videoEl.value && !isPlaying.value) {
+    if (isRestoringFromSaved.value && videoEl.value) {
       isRestoringFromSaved.value = false
-      videoEl.value.play().catch(() => {})
+      videoEl.value.playbackRate = playbackRate.value
+      videoEl.value.volume = volume.value
+      videoEl.value.muted = isMuted.value
+      // 延迟播放，等待预缓冲
+      scheduleDelayedPlay()
     }
   })
   
@@ -1104,19 +1112,14 @@ const loadNativeVideo = async (url: string) => {
   // 先显示播放器容器
   isVideoLoaded.value = true
   
-  // 等待 DOM 更新，video 元素渲染出来
+  // 等待 DOM 更新（video 元素重新创建需要更多时间）
   await nextTick()
-  
-  // 再次等待确保渲染完成
-  await new Promise(resolve => setTimeout(resolve, 50))
+  await new Promise(resolve => setTimeout(resolve, 100))
   
   if (!videoEl.value) {
     throw new Error('视频元素未初始化，请刷新页面重试')
   }
   
-  // 切换源时先清空，避免 HLS→MP4 时残留 MediaSource 导致无法播放
-  videoEl.value.removeAttribute('src')
-  videoEl.value.load()
   videoEl.value.src = finalUrl
   videoEl.value.load()
   
@@ -1125,6 +1128,11 @@ const loadNativeVideo = async (url: string) => {
 
 // 销毁 HLS 实例
 const destroyHls = () => {
+  // 清除延迟播放定时器
+  if (delayedPlayTimer) {
+    clearTimeout(delayedPlayTimer)
+    delayedPlayTimer = null
+  }
   if (hls) {
     hls.destroy()
     hls = null
@@ -1363,6 +1371,11 @@ const onLoadedMetadata = () => {
     console.log('恢复播放进度:', savedTime)
     videoEl.value.currentTime = savedTime
   }
+  
+  // 切换/刷新后应用倍速和音量（video 换源时会重置）
+  videoEl.value.playbackRate = playbackRate.value
+  videoEl.value.volume = volume.value
+  videoEl.value.muted = isMuted.value
 }
 
 const onVolumeChange = () => {
@@ -1410,17 +1423,25 @@ const onVideoError = (e: Event) => {
 let isFirstLoad = true
 // 从保存状态恢复后需要自动播放（MP4 等原生视频无 MANIFEST_PARSED，需在 canplay 时触发）
 const isRestoringFromSaved = ref(false)
+// 切换集数后延迟播放的定时器
+let delayedPlayTimer: ReturnType<typeof setTimeout> | null = null
+// 预缓冲时间（秒）
+const PRELOAD_BUFFER_TIME = 10
 
 const onCanPlay = () => {
   console.log('视频可以播放了')
   isBuffering.value = false
   isLoading.value = false
   
-  // 切换/恢复时自动播放：MP4 需在此触发（HLS 已在 MANIFEST_PARSED 中播放）
+  // 切换/恢复时延迟播放：等待缓冲一段时间后再播放
   if (isRestoringFromSaved.value) {
     isRestoringFromSaved.value = false
-    if (videoEl.value && !isPlaying.value) {
-      videoEl.value.play().catch(() => {})
+    if (videoEl.value) {
+      videoEl.value.playbackRate = playbackRate.value
+      videoEl.value.volume = volume.value
+      videoEl.value.muted = isMuted.value
+      // 延迟播放，等待预缓冲
+      scheduleDelayedPlay()
     }
   }
   
@@ -1441,6 +1462,33 @@ const onCanPlay = () => {
 const onLoadedData = () => {
   console.log('视频数据已加载')
   isLoading.value = false
+}
+
+// 延迟播放：等待预缓冲后再播放
+const scheduleDelayedPlay = () => {
+  // 清除之前的定时器
+  if (delayedPlayTimer) {
+    clearTimeout(delayedPlayTimer)
+    delayedPlayTimer = null
+  }
+  
+  if (!videoEl.value) return
+  
+  // 显示缓冲状态
+  isBuffering.value = true
+  console.log(`等待预缓冲 ${PRELOAD_BUFFER_TIME} 秒后播放...`)
+  
+  delayedPlayTimer = setTimeout(() => {
+    delayedPlayTimer = null
+    if (videoEl.value && !isPlaying.value) {
+      console.log('预缓冲完成，开始播放')
+      isBuffering.value = false
+      videoEl.value.play().catch((e) => {
+        console.error('播放失败:', e)
+        isBuffering.value = false
+      })
+    }
+  }, PRELOAD_BUFFER_TIME * 1000)
 }
 
 // 视频播放结束
@@ -1633,6 +1681,7 @@ onUnmounted(() => {
   if (controlsTimer) clearTimeout(controlsTimer)
   if (playIconTimer) clearTimeout(playIconTimer)
   if (progressSaveTimer) clearTimeout(progressSaveTimer)
+  if (delayedPlayTimer) clearTimeout(delayedPlayTimer)
   
   // 清理本地文件 URL
   localFileUrls.forEach(url => URL.revokeObjectURL(url))
