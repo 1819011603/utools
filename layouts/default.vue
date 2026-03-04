@@ -119,6 +119,7 @@ const toolCategories: Category[] = [
       { label: '图片压缩', path: '/image-compress', icon: 'i-heroicons-arrow-down-tray' },
       { label: '图片格式转换', path: '/image-convert', icon: 'i-heroicons-arrows-right-left' },
       { label: '视频转GIF', path: '/video-to-gif', icon: 'i-heroicons-film' },
+      { label: '视频播放器', path: '/video-player', icon: 'i-heroicons-play-circle' },
       { label: '音频格式转换', path: '/audio-convert', icon: 'i-heroicons-musical-note' }
     ]
   },
@@ -136,7 +137,8 @@ const toolCategories: Category[] = [
     icon: 'i-heroicons-wrench-screwdriver',
     tools: [
       { label: '时间戳转换', path: '/timestamp', icon: 'i-heroicons-clock' },
-      { label: '内容对比', path: '/content-diff', icon: 'i-heroicons-document-duplicate' }
+      { label: '内容对比', path: '/content-diff', icon: 'i-heroicons-document-duplicate' },
+      { label: 'PDF 工具箱', path: '/pdf-tools', icon: 'i-heroicons-document' }
     ]
   }
 ]
