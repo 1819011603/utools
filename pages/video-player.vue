@@ -227,8 +227,8 @@
             </div>
 
             <!-- 控制按钮 -->
-            <div class="flex items-center justify-between">
-              <div class="flex items-center gap-3">
+            <div class="flex items-center justify-between gap-2 flex-wrap min-w-0">
+              <div class="flex items-center gap-2 min-w-0 flex-1">
                 <!-- 上一集 -->
                 <button 
                   v-if="playlist.length > 1"
@@ -305,12 +305,12 @@
                 </div>
 
                 <!-- 时间 -->
-                <span class="text-white text-sm font-mono">
+                <span class="text-white text-sm font-mono shrink-0">
                   {{ formatTime(currentTime) }} / {{ formatTime(duration) }}
                 </span>
               </div>
 
-              <div class="flex items-center gap-3">
+              <div class="flex items-center gap-2 shrink-0">
                 <!-- 倍速 -->
                 <div class="relative" ref="speedMenuRef">
                   <button 
@@ -611,6 +611,10 @@
           <span class="text-gray-600 dark:text-gray-400">全屏</span>
         </div>
         <div class="flex items-center gap-2">
+          <kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-800 rounded text-xs font-mono">Enter</kbd>
+          <span class="text-gray-600 dark:text-gray-400">全屏/恢复</span>
+        </div>
+        <div class="flex items-center gap-2">
           <kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-800 rounded text-xs font-mono">&lt;/&gt;</kbd>
           <span class="text-gray-600 dark:text-gray-400">倍速调整</span>
         </div>
@@ -895,6 +899,9 @@ const playByIndex = async (index: number) => {
   // 保存状态
   saveState()
   
+  // 切换集数时标记需要自动播放（MP4 在 onCanPlay 中触发，HLS 在 MANIFEST_PARSED 中已有）
+  isRestoringFromSaved.value = true
+  
   await loadVideo()
 }
 
@@ -931,7 +938,10 @@ const loadVideo = async () => {
   
   errorMessage.value = ''
   isLoading.value = true
-  isVideoLoaded.value = false
+  // 切换集数时不隐藏播放器，避免 video 元素被销毁导致点击失效
+  if (!isVideoLoaded.value) {
+    isVideoLoaded.value = true
+  }
   isLocalFile.value = false  // URL 加载不是本地文件
   destroyHls()
   
@@ -1396,10 +1406,12 @@ const onCanPlay = () => {
   isBuffering.value = false
   isLoading.value = false
   
-  // 从保存状态恢复：MP4 等原生视频需在此触发自动播放（HLS 已在 MANIFEST_PARSED 中播放）
-  if (isRestoringFromSaved.value && videoEl.value && !isPlaying.value) {
+  // 切换/恢复时自动播放：MP4 需在此触发（HLS 已在 MANIFEST_PARSED 中播放）
+  if (isRestoringFromSaved.value) {
     isRestoringFromSaved.value = false
-    videoEl.value.play().catch(() => {})
+    if (videoEl.value && !isPlaying.value) {
+      videoEl.value.play().catch(() => {})
+    }
   }
   
   // 首次加载且开启自动全屏
@@ -1489,10 +1501,15 @@ const applyPreload = () => {
 const handleKeydown = (e: KeyboardEvent) => {
   if (!isVideoLoaded.value) return
   
-  // 忽略输入框中的按键
-  if ((e.target as HTMLElement).tagName === 'INPUT') return
+  // 忽略输入框、文本域中的按键
+  const tag = (e.target as HTMLElement).tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return
   
   switch (e.key) {
+    case 'Enter':
+      e.preventDefault()
+      toggleFullscreen()
+      break
     case ' ':
       e.preventDefault()
       togglePlay()
