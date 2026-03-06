@@ -939,16 +939,15 @@ const loadHlsVideo = async (url: string) => {
     console.log('HLS manifest 解析完成，画质数:', data.levels.length)
     isLoading.value = false
     
-    // 延迟 3 秒后自动播放，等待缓冲
-    console.log('等待 3 秒缓冲后自动播放...')
-    setTimeout(() => {
-      if (videoEl.value) {
-        isBuffering.value = false
-        videoEl.value.play().catch(e => {
-          console.log('自动播放被阻止:', e.message)
-        })
-      }
-    }, 3000)
+    // 应用播放设置
+    if (videoEl.value) {
+      videoEl.value.playbackRate = playbackRate.value
+      videoEl.value.volume = volume.value
+      videoEl.value.muted = isMuted.value
+    }
+    
+    // 延迟 3 秒后自动播放
+    scheduleAutoPlay()
   })
   
   // 错误处理
@@ -1394,20 +1393,9 @@ const onCanPlay = () => {
     videoEl.value.muted = isMuted.value
   }
   
-  // 切换集数后延迟 3 秒自动播放（非 HLS 视频）
-  if (isRestoringFromSaved.value && !isHls.value) {
-    isRestoringFromSaved.value = false
-    console.log('等待 3 秒缓冲后自动播放...')
-    setTimeout(() => {
-      if (videoEl.value) {
-        isBuffering.value = false
-        videoEl.value.play().catch(e => {
-          console.log('自动播放被阻止:', e.message)
-        })
-      }
-    }, 3000)
-  } else {
-    isBuffering.value = false
+  // 非 HLS 视频：延迟自动播放
+  if (!isHls.value) {
+    scheduleAutoPlay()
   }
   
   // 首次加载且开启自动全屏
@@ -1421,6 +1409,30 @@ const onCanPlay = () => {
       }
     }, 100)
   }
+}
+
+// 统一的自动播放函数：延迟 3 秒后播放
+const scheduleAutoPlay = () => {
+  // 清除之前的定时器
+  if (delayedPlayTimer) {
+    clearTimeout(delayedPlayTimer)
+    delayedPlayTimer = null
+  }
+  
+  console.log('等待 3 秒缓冲后自动播放...')
+  isBuffering.value = true
+  
+  delayedPlayTimer = setTimeout(() => {
+    delayedPlayTimer = null
+    if (videoEl.value) {
+      console.log('开始自动播放')
+      isBuffering.value = false
+      videoEl.value.play().catch(e => {
+        console.log('自动播放被阻止:', e.message)
+        isBuffering.value = false
+      })
+    }
+  }, 3000)
 }
 
 const onLoadedData = () => {
@@ -1462,13 +1474,6 @@ const onPlaying = () => {
   isPlaying.value = true
 }
 
-// 延迟播放（已弃用，保留函数避免报错）
-const scheduleDelayedPlay = () => {
-  if (!videoEl.value) return
-  videoEl.value.play().catch((e) => {
-    console.log('播放失败:', e.message)
-  })
-}
 
 // 视频播放结束
 const onVideoEnded = () => {
