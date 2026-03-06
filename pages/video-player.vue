@@ -38,6 +38,38 @@
           <UCheckbox v-model="autoFullscreen" label="加载后自动全屏" />
           <UCheckbox v-model="useProxy" label="使用跨域代理" />
         </div>
+        
+        <!-- 片头片尾跳过设置 -->
+        <div class="flex gap-4 flex-wrap items-end">
+          <UFormGroup label="跳过片头" help="视频开始时自动跳过的时间">
+            <div class="flex items-center gap-2">
+              <UInput 
+                v-model.number="skipIntro" 
+                type="number" 
+                :min="0" 
+                :max="300"
+                :step="5"
+                class="w-24"
+                @change="saveState"
+              />
+              <span class="text-sm text-gray-500">秒</span>
+            </div>
+          </UFormGroup>
+          <UFormGroup label="跳过片尾" help="剩余时间少于此值时自动下一集">
+            <div class="flex items-center gap-2">
+              <UInput 
+                v-model.number="skipOutro" 
+                type="number" 
+                :min="0" 
+                :max="300"
+                :step="5"
+                class="w-24"
+                @change="saveState"
+              />
+              <span class="text-sm text-gray-500">秒</span>
+            </div>
+          </UFormGroup>
+        </div>
 
         <!-- 播放列表 -->
         <div v-if="playlist.length > 1" class="space-y-2">
@@ -52,7 +84,7 @@
             <div
               v-for="(item, index) in playlist"
               :key="index"
-              class="flex items-center gap-2 p-2 rounded cursor-pointer transition-colors text-sm"
+              class="flex items-center gap-2 p-2 rounded cursor-pointer transition-colors text-sm group/item"
               :class="index === currentIndex ? 'bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300' : 'hover:bg-gray-100 dark:hover:bg-gray-700'"
               @click="playByIndex(index)"
             >
@@ -64,6 +96,14 @@
               <span v-if="getSavedProgress(item) > 0" class="text-xs text-gray-400">
                 {{ formatTime(getSavedProgress(item)) }}
               </span>
+              <button
+                v-if="item.startsWith('http') && !isDownloading"
+                class="opacity-0 group-hover/item:opacity-100 p-1 rounded hover:bg-violet-500/30 transition-all shrink-0"
+                title="下载"
+                @click.stop="downloadVideo(item)"
+              >
+                <UIcon name="i-heroicons-arrow-down-tray" class="w-4 h-4" />
+              </button>
               <UBadge v-if="index === currentIndex" color="violet" variant="soft" size="xs">当前</UBadge>
             </div>
           </div>
@@ -342,6 +382,22 @@
                   </Transition>
                 </div>
 
+                <!-- 下载 -->
+                <button 
+                  v-if="canDownload"
+                  class="text-white hover:text-violet-400 transition-colors"
+                  :class="{ 'opacity-50 cursor-not-allowed': isDownloading }"
+                  :disabled="isDownloading"
+                  @click="downloadVideo"
+                  :title="isDownloading ? '下载中...' : '下载视频'"
+                >
+                  <UIcon 
+                    :name="isDownloading ? 'i-heroicons-arrow-path' : 'i-heroicons-arrow-down-tray'" 
+                    class="w-5 h-5"
+                    :class="{ 'animate-spin': isDownloading }"
+                  />
+                </button>
+
                 <!-- 画中画 -->
                 <button 
                   v-if="supportsPiP"
@@ -571,6 +627,8 @@ interface SavedState {
   playbackRate: number
   useProxy: boolean
   autoFullscreen: boolean
+  skipIntro: number  // 跳过片头时间（秒）
+  skipOutro: number  // 跳过片尾时间（秒）
 }
 
 // 从本地存储加载状态
@@ -597,7 +655,9 @@ const saveState = () => {
       volume: volume.value,
       playbackRate: playbackRate.value,
       useProxy: useProxy.value,
-      autoFullscreen: autoFullscreen.value
+      autoFullscreen: autoFullscreen.value,
+      skipIntro: skipIntro.value,
+      skipOutro: skipOutro.value
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
   } catch (e) {
@@ -630,6 +690,9 @@ const useProxy = ref(false)
 const autoFullscreen = ref(true)  // 自动全屏
 const savedProgress = ref<Record<string, number>>({})  // 保存的播放进度
 const videoKey = ref(0)  // 用于强制重新创建 video 元素
+const skipIntro = ref(0)  // 跳过片头时间（秒）
+const skipOutro = ref(0)  // 跳过片尾时间（秒）
+const hasSkippedIntro = ref(false)  // 是否已跳过片头（本次播放）
 
 // 播放列表
 const playlist = ref<string[]>([])
@@ -658,6 +721,7 @@ const isFullscreen = ref(false)
 const showControls = ref(true)
 const showPlayIcon = ref(false)
 const showSpeedMenu = ref(false)
+const isDownloading = ref(false)
 
 // 进度条
 const progressPercent = computed(() => duration.value ? (currentTime.value / duration.value) * 100 : 0)
@@ -764,6 +828,154 @@ const getVideoName = (url: string, index: number): string => {
   return `视频 ${index + 1}`
 }
 
+// 是否可下载（仅网络视频，本地文件无需下载）
+const canDownload = computed(() => 
+  isVideoLoaded.value && !isLocalFile.value && videoUrl.value && (videoUrl.value.startsWith('http') || videoUrl.value.startsWith('//'))
+)
+
+// 解析 URL（相对路径转绝对路径）
+const resolveUrl = (base: string, relative: string): string => {
+  if (relative.startsWith('http://') || relative.startsWith('https://')) return relative
+  try {
+    return new URL(relative, base).href
+  } catch {
+    return relative
+  }
+}
+
+// 解析 M3U8 获取分片列表（支持主列表、媒体列表、fMP4）
+const parseM3u8Segments = (content: string, baseUrl: string): string[] => {
+  const lines = content.split(/\r?\n/).map(l => l.trim())
+  const segments: string[] = []
+  const variants: { bandwidth: number; url: string }[] = []
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    if (line.startsWith('#EXT-X-STREAM-INF')) {
+      const bwMatch = line.match(/BANDWIDTH=(\d+)/)
+      const bandwidth = bwMatch ? parseInt(bwMatch[1], 10) : 0
+      if (lines[i + 1]) {
+        variants.push({ bandwidth, url: resolveUrl(baseUrl, lines[i + 1].trim()) })
+      }
+    }
+    // #EXT-X-MAP:URI="init.mp4" (fMP4 初始化分片)
+    if (line.startsWith('#EXT-X-MAP:')) {
+      const uriMatch = line.match(/URI="([^"]+)"/)
+      if (uriMatch) segments.push(resolveUrl(baseUrl, uriMatch[1]))
+    }
+    if (line.startsWith('#EXTINF') && lines[i + 1]) {
+      const uri = lines[i + 1].trim()
+      if (!uri.startsWith('#')) {
+        segments.push(resolveUrl(baseUrl, uri))
+      }
+    }
+  }
+
+  if (variants.length > 0) {
+    const best = variants.sort((a, b) => b.bandwidth - a.bandwidth)[0]
+    return [best.url]
+  }
+  return segments
+}
+
+// 获取 M3U8 媒体列表的所有分片 URL（递归处理主列表）
+const getM3u8SegmentUrls = async (m3u8Url: string): Promise<string[]> => {
+  const url = getProxyUrl(m3u8Url)
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`获取 M3U8 失败: ${res.status}`)
+  const text = await res.text()
+  const baseUrl = m3u8Url.replace(/\/[^/]*$/, '/')
+
+  const parsed = parseM3u8Segments(text, baseUrl)
+  if (parsed.length === 0) throw new Error('M3U8 解析失败，未找到分片')
+
+  // 若是子列表 URL，递归获取
+  if (parsed.length === 1 && parsed[0].endsWith('.m3u8')) {
+    return getM3u8SegmentUrls(parsed[0])
+  }
+  return parsed
+}
+
+// 触发浏览器下载
+const triggerDownload = (blob: Blob, filename: string) => {
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(a.href)
+}
+
+// 下载视频（可选指定 URL，否则用当前播放的）
+const downloadVideo = async (targetUrl?: string) => {
+  const url = (targetUrl || videoUrl.value)?.trim()
+  if (!url || (!url.startsWith('http') && !url.startsWith('//'))) {
+    errorMessage.value = '无可下载的视频地址'
+    return
+  }
+
+  const normalizedUrl = url.startsWith('//') ? 'https:' + url : url
+  isDownloading.value = true
+  errorMessage.value = ''
+
+  try {
+    const idx = playlist.value.indexOf(url)
+    const filename = getVideoName(normalizedUrl, idx >= 0 ? idx : currentIndex.value) || `video_${Date.now()}`
+    const isHlsVideo = isHlsUrl(normalizedUrl)
+
+    if (isHlsVideo) {
+      // M3U8: 解析分片 → 逐个下载 → 合并为 .ts
+      const segmentUrls = await getM3u8SegmentUrls(normalizedUrl)
+      const chunks: ArrayBuffer[] = []
+      const total = segmentUrls.length
+
+      for (let i = 0; i < total; i++) {
+        const segUrl = getProxyUrl(segmentUrls[i])
+        const res = await fetch(segUrl)
+        if (!res.ok) throw new Error(`分片 ${i + 1}/${total} 下载失败`)
+        chunks.push(await res.arrayBuffer())
+        // 简单进度反馈
+        if (total > 5 && (i + 1) % Math.ceil(total / 10) === 0) {
+          console.log(`M3U8 下载进度: ${Math.round(((i + 1) / total) * 100)}%`)
+        }
+      }
+
+      const totalSize = chunks.reduce((s, c) => s + c.byteLength, 0)
+      const merged = new Uint8Array(totalSize)
+      let offset = 0
+      for (const chunk of chunks) {
+        merged.set(new Uint8Array(chunk), offset)
+        offset += chunk.byteLength
+      }
+
+      const isFmp4 = segmentUrls.some(u => u.includes('.m4s') || u.includes('.mp4'))
+      const mime = isFmp4 ? 'video/mp4' : 'video/mp2t'
+      const ext = isFmp4 ? '.mp4' : '.ts'
+      const outName = filename.includes('.m3u8') ? filename.replace('.m3u8', ext) : (filename.includes('.') ? filename : filename + ext)
+      triggerDownload(new Blob([merged], { type: mime }), outName)
+      useToast().add({ title: '下载完成: ' + outName, color: 'green', timeout: 3000 })
+    } else {
+      // MP4: 直接 fetch 下载
+      const finalUrl = getProxyUrl(normalizedUrl)
+      const res = await fetch(finalUrl)
+      if (!res.ok) throw new Error(`下载失败: ${res.status}`)
+      const blob = await res.blob()
+      const ext = filename.includes('.') ? '' : '.mp4'
+      const outName = filename.includes('.mp4') ? filename : filename + ext
+      triggerDownload(blob, outName)
+      useToast().add({ title: '下载完成: ' + outName, color: 'green', timeout: 3000 })
+    }
+  } catch (e) {
+    console.error('下载失败:', e)
+    let msg = e instanceof Error ? e.message : String(e)
+    if (!useProxy.value && (msg.includes('fetch') || msg.includes('CORS') || msg.includes('403'))) {
+      msg += '，可尝试开启「使用跨域代理」'
+    }
+    errorMessage.value = '下载失败: ' + msg
+  } finally {
+    isDownloading.value = false
+  }
+}
+
 // 解析多行输入并加载
 const parseAndLoad = async () => {
   const input = videoUrlInput.value.trim()
@@ -800,6 +1012,9 @@ const playByIndex = async (index: number) => {
   
   currentIndex.value = index
   videoUrl.value = playlist.value[index]
+  
+  // 重置片头跳过标记
+  hasSkippedIntro.value = false
   
   // 保存状态
   saveState()
@@ -1306,6 +1521,16 @@ const onTimeUpdate = () => {
     bufferedPercent.value = (videoEl.value.buffered.end(videoEl.value.buffered.length - 1) / duration.value) * 100
   }
   
+  // 自动跳过片尾
+  if (skipOutro.value > 0 && duration.value > 0) {
+    const timeRemaining = duration.value - currentTime.value
+    if (timeRemaining > 0 && timeRemaining <= skipOutro.value && hasNext.value) {
+      console.log('自动跳过片尾，播放下一集')
+      playNext()
+      return
+    }
+  }
+  
   // 每 5 秒保存一次进度（防抖）
   if (!progressSaveTimer) {
     progressSaveTimer = setTimeout(() => {
@@ -1324,6 +1549,12 @@ const onLoadedMetadata = () => {
   if (savedTime > 0 && savedTime < duration.value - 5) {
     console.log('恢复播放进度:', savedTime)
     videoEl.value.currentTime = savedTime
+    hasSkippedIntro.value = true  // 已恢复进度，标记为已跳过片头
+  } else if (skipIntro.value > 0 && !hasSkippedIntro.value) {
+    // 跳过片头
+    console.log('跳过片头:', skipIntro.value)
+    videoEl.value.currentTime = skipIntro.value
+    hasSkippedIntro.value = true
   }
   
   // 切换/刷新后应用倍速和音量（video 换源时会重置）
@@ -1611,6 +1842,8 @@ onMounted(async () => {
     playbackRate.value = savedState.playbackRate ?? 1
     useProxy.value = savedState.useProxy ?? false
     autoFullscreen.value = savedState.autoFullscreen ?? true
+    skipIntro.value = savedState.skipIntro ?? 0
+    skipOutro.value = savedState.skipOutro ?? 0
     
     // 如果没有 URL 参数，恢复保存的视频地址
     const urlParam = route.query.url as string
