@@ -938,14 +938,17 @@ const loadHlsVideo = async (url: string) => {
   hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
     console.log('HLS manifest 解析完成，画质数:', data.levels.length)
     isLoading.value = false
-    isBuffering.value = false
     
-    // 自动播放
-    if (videoEl.value) {
-      videoEl.value.play().catch(e => {
-        console.log('自动播放被阻止:', e.message)
-      })
-    }
+    // 延迟 3 秒后自动播放，等待缓冲
+    console.log('等待 3 秒缓冲后自动播放...')
+    setTimeout(() => {
+      if (videoEl.value) {
+        isBuffering.value = false
+        videoEl.value.play().catch(e => {
+          console.log('自动播放被阻止:', e.message)
+        })
+      }
+    }, 3000)
   })
   
   // 错误处理
@@ -1383,13 +1386,28 @@ const PRELOAD_BUFFER_TIME = 1
 const onCanPlay = () => {
   console.log('视频可以播放了')
   isLoading.value = false
-  isBuffering.value = false
   
   // 应用播放设置
   if (videoEl.value) {
     videoEl.value.playbackRate = playbackRate.value
     videoEl.value.volume = volume.value
     videoEl.value.muted = isMuted.value
+  }
+  
+  // 切换集数后延迟 3 秒自动播放（非 HLS 视频）
+  if (isRestoringFromSaved.value && !isHls.value) {
+    isRestoringFromSaved.value = false
+    console.log('等待 3 秒缓冲后自动播放...')
+    setTimeout(() => {
+      if (videoEl.value) {
+        isBuffering.value = false
+        videoEl.value.play().catch(e => {
+          console.log('自动播放被阻止:', e.message)
+        })
+      }
+    }, 3000)
+  } else {
+    isBuffering.value = false
   }
   
   // 首次加载且开启自动全屏
