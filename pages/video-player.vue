@@ -733,6 +733,9 @@ const hoverTime = ref<number | null>(null)  // 悬停时间预览
 const hoverPercent = ref(0)
 const hlsRetryCount = ref(0)  // HLS 重试计数
 const MAX_HLS_RETRY = 3  // 最大重试次数
+const LOAD_TIMEOUT = 3000  // 加载超时时间（毫秒）
+let loadTimeoutTimer: ReturnType<typeof setTimeout> | null = null  // 加载超时定时器
+let hasReceivedData = false  // 是否收到有效数据
 
 // HLS
 let hls: HlsType | null = null
@@ -1055,6 +1058,37 @@ const clearPlaylist = () => {
 }
 
 // 加载视频
+// 清除加载超时定时器
+const clearLoadTimeout = () => {
+  if (loadTimeoutTimer) {
+    clearTimeout(loadTimeoutTimer)
+    loadTimeoutTimer = null
+  }
+}
+
+// 启动加载超时检测
+const startLoadTimeout = () => {
+  clearLoadTimeout()
+  hasReceivedData = false
+  
+  loadTimeoutTimer = setTimeout(() => {
+    if (!hasReceivedData && isLoading.value) {
+      console.log('加载超时，3秒内未收到有效数据')
+      errorMessage.value = '加载超时，视频链接可能已过期或无法访问（403/404）'
+      isLoading.value = false
+      isBuffering.value = false
+      isVideoLoaded.value = false
+      destroyHls()
+    }
+  }, LOAD_TIMEOUT)
+}
+
+// 标记已收到有效数据
+const markDataReceived = () => {
+  hasReceivedData = true
+  clearLoadTimeout()
+}
+
 const loadVideo = async () => {
   if (!videoUrl.value.trim()) return
   
@@ -1073,6 +1107,9 @@ const loadVideo = async () => {
   isVideoLoaded.value = true
   isLocalFile.value = false  // URL 加载不是本地文件
   destroyHls()
+  
+  // 启动加载超时检测
+  startLoadTimeout()
   
   const url = videoUrl.value.trim()
   isHls.value = isHlsUrl(url)
@@ -1157,6 +1194,7 @@ const loadHlsVideo = async (url: string) => {
   // manifest 解析完成
   hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
     console.log('HLS manifest 解析完成，画质数:', data.levels.length)
+    markDataReceived()  // 标记收到有效数据
     isLoading.value = false
     
     // 应用播放设置
@@ -1289,6 +1327,8 @@ const loadNativeVideo = async (url: string) => {
 
 // 销毁 HLS 实例
 const destroyHls = () => {
+  // 清除加载超时定时器
+  clearLoadTimeout()
   // 清除延迟播放定时器
   if (delayedPlayTimer) {
     clearTimeout(delayedPlayTimer)
@@ -1562,6 +1602,7 @@ const onTimeUpdate = () => {
 
 const onLoadedMetadata = () => {
   if (!videoEl.value) return
+  markDataReceived()  // 标记收到有效数据
   duration.value = videoEl.value.duration
   
   // 恢复保存的播放进度
@@ -1590,6 +1631,7 @@ const onVolumeChange = () => {
 }
 
 const onVideoError = (e: Event) => {
+  clearLoadTimeout()  // 清除超时定时器
   const video = e.target as HTMLVideoElement
   const error = video?.error
   let msg = '视频加载失败'
@@ -1908,6 +1950,7 @@ onUnmounted(() => {
   saveCurrentProgress()
   
   destroyHls()
+  clearLoadTimeout()  // 清除加载超时定时器
   document.removeEventListener('keydown', handleKeydown)
   document.removeEventListener('fullscreenchange', handleFullscreenChange)
   window.removeEventListener('beforeunload', saveCurrentProgress)
