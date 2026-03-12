@@ -731,6 +731,8 @@ const seekPreviewPercent = ref(0)
 const isSeeking = ref(false)
 const hoverTime = ref<number | null>(null)  // 悬停时间预览
 const hoverPercent = ref(0)
+const hlsRetryCount = ref(0)  // HLS 重试计数
+const MAX_HLS_RETRY = 3  // 最大重试次数
 
 // HLS
 let hls: HlsType | null = null
@@ -1063,6 +1065,7 @@ const loadVideo = async () => {
   currentTime.value = 0
   duration.value = 0
   bufferedPercent.value = 0
+  hlsRetryCount.value = 0  // 重置重试计数
   
   // 强制重新创建 video 元素，彻底重置状态
   videoKey.value++
@@ -1086,6 +1089,8 @@ const loadVideo = async () => {
     console.error('加载视频失败:', e)
     errorMessage.value = '加载视频失败: ' + (e instanceof Error ? e.message : String(e))
     isLoading.value = false
+    isBuffering.value = false
+    isVideoLoaded.value = false
   }
 }
 
@@ -1172,12 +1177,24 @@ const loadHlsVideo = async (url: string) => {
     if (data.fatal) {
       switch (data.type) {
         case Hls.ErrorTypes.NETWORK_ERROR:
-          console.log('网络错误，尝试恢复...')
-          errorMessage.value = '网络错误，正在重试...'
-          setTimeout(() => {
-            hls?.startLoad()
-            errorMessage.value = ''
-          }, 1000)
+          hlsRetryCount.value++
+          if (hlsRetryCount.value <= MAX_HLS_RETRY) {
+            console.log(`网络错误，尝试恢复... (${hlsRetryCount.value}/${MAX_HLS_RETRY})`)
+            errorMessage.value = `网络错误，正在重试 (${hlsRetryCount.value}/${MAX_HLS_RETRY})...`
+            setTimeout(() => {
+              hls?.startLoad()
+            }, 1000)
+          } else {
+            // 超过重试次数，停止加载
+            const errMsg = data.details === 'manifestLoadError' 
+              ? '视频链接无效或已过期，请检查链接是否正确'
+              : `网络错误: ${data.details}，链接可能已过期`
+            errorMessage.value = errMsg
+            isLoading.value = false
+            isBuffering.value = false
+            isVideoLoaded.value = false
+            destroyHls()
+          }
           break
         case Hls.ErrorTypes.MEDIA_ERROR:
           console.log('媒体错误，尝试恢复...')
@@ -1189,6 +1206,9 @@ const loadHlsVideo = async (url: string) => {
           break
         default:
           errorMessage.value = '播放失败: ' + data.details
+          isLoading.value = false
+          isBuffering.value = false
+          isVideoLoaded.value = false
           destroyHls()
       }
     }
@@ -1583,7 +1603,7 @@ const onVideoError = (e: Event) => {
         if (useProxy.value) {
           msg = '网络错误（403/防盗链），请关闭代理直接播放，或使用本地文件'
         } else {
-          msg = '网络错误，可能是跨域问题，请尝试开启"使用跨域代理"'
+          msg = '网络错误，可能是跨域问题或链接已过期，请尝试开启"使用跨域代理"或检查链接'
         }
         break
       case MediaError.MEDIA_ERR_DECODE:
@@ -1593,7 +1613,7 @@ const onVideoError = (e: Event) => {
         if (useProxy.value) {
           msg = '视频源被拒绝（可能有防盗链），请关闭代理直接播放，或拖拽本地文件播放'
         } else {
-          msg = '不支持的视频格式或地址无效，请检查链接是否正确'
+          msg = '不支持的视频格式或链接已过期，请检查链接是否正确'
         }
         break
     }
@@ -1602,6 +1622,8 @@ const onVideoError = (e: Event) => {
   console.error('视频错误:', error)
   errorMessage.value = msg
   isLoading.value = false
+  isBuffering.value = false
+  isVideoLoaded.value = false
 }
 
 // 首次加载标记
