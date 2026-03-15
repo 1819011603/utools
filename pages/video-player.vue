@@ -1163,7 +1163,9 @@ const clearPlaylist = () => {
 const getAdaptivePrefetchCount = (bufferSecs: number): number => {
   if (bufferSecs < 6) return 4  
   if (bufferSecs < 10) return 3  // 缓冲不足10秒：3 线程全力预取
-  if (bufferSecs < 20) return 2  // 正常：1 线程
+  if (bufferSecs < 20) return 2  // 正常：2 线程
+  if (bufferSecs < 30) return 1  // 正常：1 线程
+
   return 0                        // 充足：暂停预取，节省带宽
 }
 
