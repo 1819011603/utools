@@ -1161,7 +1161,7 @@ const clearPlaylist = () => {
 
 // 根据缓冲健康度决定并发预取数：缓冲越少 → 线程越多
 const getAdaptivePrefetchCount = (bufferSecs: number): number => {
-  if (bufferSecs < 3) return 4  
+  if (bufferSecs < 6) return 4  
   if (bufferSecs < 10) return 3  // 缓冲不足10秒：3 线程全力预取
   if (bufferSecs < 20) return 2  // 正常：1 线程
   return 0                        // 充足：暂停预取，节省带宽
