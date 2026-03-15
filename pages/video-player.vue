@@ -253,6 +253,18 @@
           </div>
         </Transition>
 
+        <!-- 全屏时固定显示的退出全屏按钮（控制栏隐藏时也可见） -->
+        <Transition name="fade">
+          <button
+            v-if="isFullscreen && !showControls"
+            class="absolute top-3 right-3 z-10 text-white/60 hover:text-white transition-colors bg-black/30 rounded-full p-1.5"
+            @click.stop="toggleFullscreen"
+            title="退出全屏"
+          >
+            <UIcon name="i-heroicons-arrows-pointing-in" class="w-5 h-5" />
+          </button>
+        </Transition>
+
         <!-- 控制栏 -->
         <Transition name="slide-up">
           <div 
@@ -414,20 +426,28 @@
                 </div>
 
                 <!-- 下载 -->
-                <button 
-                  v-if="canDownload"
-                  class="text-white hover:text-violet-400 transition-colors"
-                  :class="{ 'opacity-50 cursor-not-allowed': isDownloading }"
-                  :disabled="isDownloading"
-                  @click="downloadVideo"
-                  :title="isDownloading ? '下载中...' : '下载视频'"
-                >
-                  <UIcon 
-                    :name="isDownloading ? 'i-heroicons-arrow-path' : 'i-heroicons-arrow-down-tray'" 
-                    class="w-5 h-5"
-                    :class="{ 'animate-spin': isDownloading }"
-                  />
-                </button>
+                <template v-if="canDownload">
+                  <!-- 下载中：显示进度 + 取消按钮 -->
+                  <template v-if="isDownloading">
+                    <span class="text-white text-xs font-medium w-8 text-center">{{ downloadProgress }}%</span>
+                    <button
+                      class="text-amber-400 hover:text-red-400 transition-colors"
+                      @click="cancelDownload"
+                      title="取消下载"
+                    >
+                      <UIcon name="i-heroicons-x-circle" class="w-5 h-5" />
+                    </button>
+                  </template>
+                  <!-- 未下载：显示下载按钮 -->
+                  <button
+                    v-else
+                    class="text-white hover:text-violet-400 transition-colors"
+                    @click="downloadVideo()"
+                    title="下载视频"
+                  >
+                    <UIcon name="i-heroicons-arrow-down-tray" class="w-5 h-5" />
+                  </button>
+                </template>
 
                 <!-- 画中画 -->
                 <button 
@@ -684,6 +704,7 @@ interface SavedState {
   requestOrigin: string
   requestReferer: string
   manifestOnly: boolean
+  hlsConfig: typeof hlsConfig.value
 }
 
 // 从本地存储加载状态
@@ -715,7 +736,8 @@ const saveState = () => {
       skipOutro: skipOutro.value,
       requestOrigin: requestOrigin.value,
       requestReferer: requestReferer.value,
-      manifestOnly: manifestOnly.value
+      manifestOnly: manifestOnly.value,
+      hlsConfig: { ...hlsConfig.value }
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
   } catch (e) {
@@ -795,6 +817,9 @@ const showControls = ref(true)
 const showPlayIcon = ref(false)
 const showSpeedMenu = ref(false)
 const isDownloading = ref(false)
+const downloadProgress = ref(0)   // 下载进度 0-100
+let downloadModeActive = false    // 下载模式：激活后缓存无限制，直到换视频/刷新才重置
+let downloadCancelled = false     // 下载取消标志
 
 // 进度条
 const progressPercent = computed(() => duration.value ? (currentTime.value / duration.value) * 100 : 0)
@@ -949,7 +974,7 @@ const resolveUrl = (base: string, relative: string): string => {
 }
 
 // 解析 M3U8 获取分片列表（支持主列表、媒体列表、fMP4）
-const parseM3u8Segments = (content: string, baseUrl: string): string[] => {
+const parseM3u8Segments = (content: string, baseUrl: string): { urls: string[]; isVariant: boolean } => {
   const lines = content.split(/\r?\n/).map(l => l.trim())
   const segments: string[] = []
   const variants: { bandwidth: number; url: string }[] = []
@@ -978,27 +1003,42 @@ const parseM3u8Segments = (content: string, baseUrl: string): string[] => {
 
   if (variants.length > 0) {
     const best = variants.sort((a, b) => b.bandwidth - a.bandwidth)[0]
-    return [best.url]
+    return { urls: [best.url], isVariant: true }
   }
-  return segments
+  return { urls: segments, isVariant: false }
 }
 
 // 获取 M3U8 媒体列表的所有分片 URL（递归处理主列表）
 const getM3u8SegmentUrls = async (m3u8Url: string): Promise<string[]> => {
-  const url = getProxyUrl(m3u8Url)
-  const res = await fetch(url, )
+  // 支持传入已经是完整 URL（含本地代理地址）的情况
+  const proxyUrl = m3u8Url.startsWith('/api/proxy')
+    ? m3u8Url  // 已是本地代理路径，直接使用
+    : getProxyUrl(m3u8Url)
+  const res = await fetch(proxyUrl)
   if (!res.ok) throw new Error(`获取 M3U8 失败: ${res.status}`)
   const text = await res.text()
-  const baseUrl = m3u8Url.replace(/\/[^/]*$/, '/')
 
-  const parsed = parseM3u8Segments(text, baseUrl)
-  if (parsed.length === 0) throw new Error('M3U8 解析失败，未找到分片')
-
-  // 若是子列表 URL，递归获取
-  if (parsed.length === 1 && parsed[0].endsWith('.m3u8')) {
-    return getM3u8SegmentUrls(parsed[0])
+  // baseUrl 用实际请求地址（可能是本地 /api/proxy 路径），
+  // 这样服务端改写的相对路径 /api/proxy?url=... 能正确解析为本地地址，
+  // 而不会被拼到原始 CDN 域名上。
+  const actualUrl = res.url || proxyUrl
+  let baseUrl: string
+  try {
+    const u = new URL(actualUrl, window.location.href)
+    // 取 origin + pathname 目录（不含文件名和 query）
+    baseUrl = u.origin + u.pathname.replace(/\/[^/]*$/, '/') 
+  } catch {
+    baseUrl = actualUrl.replace(/\/[^/]*$/, '/')
   }
-  return parsed
+
+  const { urls, isVariant } = parseM3u8Segments(text, baseUrl)
+  if (urls.length === 0) throw new Error('M3U8 解析失败，未找到分片')
+
+  // 主播放列表（含多码率）→ 递归获取最高码率子列表的分片
+  if (isVariant) {
+    return getM3u8SegmentUrls(urls[0])
+  }
+  return urls
 }
 
 // 触发浏览器下载
@@ -1011,6 +1051,11 @@ const triggerDownload = (blob: Blob, filename: string) => {
 }
 
 // 下载视频（可选指定 URL，否则用当前播放的）
+// 策略：将下载视为增强预取
+//   1. 激活下载模式（缓存无限制）
+//   2. 解析 M3U8 拿到全部分片 URL
+//   3. 优先获取当前播放进度之后的分片，再补全之前的分片
+//   4. 所有分片进入 segPrefetchCache 后，合并为文件触发浏览器下载
 const downloadVideo = async (targetUrl?: string) => {
   const url = (targetUrl || videoUrl.value)?.trim()
   if (!url || (!url.startsWith('http') && !url.startsWith('//'))) {
@@ -1020,7 +1065,10 @@ const downloadVideo = async (targetUrl?: string) => {
 
   const normalizedUrl = url.startsWith('//') ? 'https:' + url : url
   isDownloading.value = true
+  downloadProgress.value = 0
+  downloadCancelled = false
   errorMessage.value = ''
+  downloadModeActive = true  // 缓存无限制
 
   try {
     const idx = playlist.value.indexOf(url)
@@ -1028,48 +1076,93 @@ const downloadVideo = async (targetUrl?: string) => {
     const isHlsVideo = isHlsUrl(normalizedUrl)
 
     if (isHlsVideo) {
-      // M3U8: 解析分片 → 逐个下载 → 合并为 .ts
+      // ── M3U8：预取增强下载 ──
       const segmentUrls = await getM3u8SegmentUrls(normalizedUrl)
-      const chunks: ArrayBuffer[] = []
+      if (downloadCancelled) return
       const total = segmentUrls.length
 
-      for (let i = 0; i < total; i++) {
-        const segUrl = getProxyUrl(segmentUrls[i])
-        const res = await fetch(segUrl, )
-        if (!res.ok) throw new Error(`分片 ${i + 1}/${total} 下载失败`)
-        chunks.push(await res.arrayBuffer())
-        // 简单进度反馈
-        if (total > 5 && (i + 1) % Math.ceil(total / 10) === 0) {
-          console.log(`M3U8 下载进度: ${Math.round(((i + 1) / total) * 100)}%`)
+      // 当前播放时间用于分片排序：先后段再前段
+      const curTime = videoEl.value?.currentTime ?? 0
+      const level = hls ? (hls.currentLevel >= 0 ? hls.currentLevel : 0) : 0
+      const hlsFrags: any[] = (hls as any)?.levels?.[level]?.details?.fragments ?? []
+      const fragTimeMap = new Map<string, number>()
+      for (const f of hlsFrags) fragTimeMap.set(f.url, f.start ?? 0)
+
+      // 排序：当前进度之后的分片排前面，其余按时间顺序
+      const ordered = [...segmentUrls].sort((a, b) => {
+        const ta = fragTimeMap.get(a) ?? Infinity
+        const tb = fragTimeMap.get(b) ?? Infinity
+        const afterA = ta >= curTime
+        const afterB = tb >= curTime
+        if (afterA && !afterB) return -1
+        if (!afterA && afterB) return 1
+        return ta - tb
+      })
+
+      // 每个分片的获取：优先缓存 → 复用预取 → 新 fetch，结果写入 segPrefetchCache
+      let completed = 0
+      const fetchOne = async (segUrl: string): Promise<void> => {
+        if (downloadCancelled) return
+        if (!segPrefetchCache.has(segUrl)) {
+          const existing = segPrefetching.get(segUrl)
+          if (existing) {
+            await existing.catch(() => {})
+          } else {
+            try {
+              const r = await fetch(getProxyUrl(segUrl))
+              const buf = r.ok ? await r.arrayBuffer() : new ArrayBuffer(0)
+              if (buf.byteLength > 0) {
+                segPrefetchCache.set(segUrl, buf)
+                prefetchInfo.value.cached = segPrefetchCache.size
+              }
+            } catch { /* 单片失败不中断整体 */ }
+          }
         }
+        completed++
+        downloadProgress.value = Math.round((completed / total) * 100)
       }
 
-      const totalSize = chunks.reduce((s, c) => s + c.byteLength, 0)
+      // 按批次并发执行（每批 6 个），批次间检查取消状态
+      const CONCURRENCY = 6
+      for (let i = 0; i < total; i += CONCURRENCY) {
+        if (downloadCancelled) return
+        await Promise.all(ordered.slice(i, i + CONCURRENCY).map(fetchOne))
+      }
+
+      if (downloadCancelled) return
+
+      // 所有分片已在 segPrefetchCache，按原始顺序合并
+      const totalSize = segmentUrls.reduce((s, u) => s + (segPrefetchCache.get(u)?.byteLength ?? 0), 0)
       const merged = new Uint8Array(totalSize)
       let offset = 0
-      for (const chunk of chunks) {
-        merged.set(new Uint8Array(chunk), offset)
-        offset += chunk.byteLength
+      for (const u of segmentUrls) {
+        const buf = segPrefetchCache.get(u)
+        if (buf?.byteLength) { merged.set(new Uint8Array(buf), offset); offset += buf.byteLength }
       }
 
       const isFmp4 = segmentUrls.some(u => u.includes('.m4s') || u.includes('.mp4'))
       const mime = isFmp4 ? 'video/mp4' : 'video/mp2t'
       const ext = isFmp4 ? '.mp4' : '.ts'
-      const outName = filename.includes('.m3u8') ? filename.replace('.m3u8', ext) : (filename.includes('.') ? filename : filename + ext)
+      const outName = filename.replace(/\.m3u8.*$/, '') + ext
       triggerDownload(new Blob([merged], { type: mime }), outName)
       useToast().add({ title: '下载完成: ' + outName, color: 'green', timeout: 3000 })
+
     } else {
-      // MP4: 直接 fetch 下载
-      const finalUrl = getProxyUrl(normalizedUrl)
-      const res = await fetch(finalUrl, )
+      // ── MP4：直接下载 ──
+      const res = await fetch(getProxyUrl(normalizedUrl))
       if (!res.ok) throw new Error(`下载失败: ${res.status}`)
       const blob = await res.blob()
+      downloadProgress.value = 100
       const ext = filename.includes('.') ? '' : '.mp4'
       const outName = filename.includes('.mp4') ? filename : filename + ext
       triggerDownload(blob, outName)
       useToast().add({ title: '下载完成: ' + outName, color: 'green', timeout: 3000 })
     }
-  } catch (e) {
+  } catch (e: any) {
+    if (downloadCancelled || e?.message === 'cancelled') {
+      useToast().add({ title: '下载已取消', color: 'amber', timeout: 2000 })
+      return
+    }
     console.error('下载失败:', e)
     let msg = e instanceof Error ? e.message : String(e)
     if (!useProxy.value && (msg.includes('fetch') || msg.includes('CORS') || msg.includes('403'))) {
@@ -1078,7 +1171,15 @@ const downloadVideo = async (targetUrl?: string) => {
     errorMessage.value = '下载失败: ' + msg
   } finally {
     isDownloading.value = false
+    downloadProgress.value = 0
   }
+}
+
+// 取消下载
+const cancelDownload = () => {
+  downloadCancelled = true
+  isDownloading.value = false
+  downloadProgress.value = 0
 }
 
 // 解析多行输入并加载
@@ -1161,10 +1262,10 @@ const clearPlaylist = () => {
 
 // 根据缓冲健康度决定并发预取数：缓冲越少 → 线程越多
 const getAdaptivePrefetchCount = (bufferSecs: number): number => {
-  if (bufferSecs < 3) return 4  // 正常：2 线程
+  if (bufferSecs < 3) return 6  // 正常：2 线程
   if (bufferSecs < 10) return 1  // 正常：2 线程
-  if (bufferSecs < 35) return 2  // 正常：1 线程
-  if (bufferSecs < 40) return 1  // 正常：1 线程
+  if (bufferSecs < 35) return 4  // 正常：1 线程
+  if (bufferSecs < 60) return 1  // 正常：1 线程
 
 
   return 0                        // 充足：暂停预取，节省带宽
@@ -1224,19 +1325,28 @@ const createHlsFragLoader = () => {
         callbacks.onError({ code: 0, text: e.message }, context, null, this.stats)
       }
 
-      // 1. 命中预取缓存 → 即时返回
+      // 1. 命中预取缓存 → 即时返回（保留缓存供回放复用，不立即删除）
       if (segPrefetchCache.has(url)) {
         const buf = segPrefetchCache.get(url)!
+        // 重新插入使其成为 Map 中最新（LRU 刷新），下载时也可复用
         segPrefetchCache.delete(url)
+        segPrefetchCache.set(url, buf)
         prefetchInfo.value.cached = segPrefetchCache.size
         succeed(buf)
         return
       }
 
-      // 2. 正在预取中 → 等待 Promise
+      // 2. 正在预取中 → 等待 Promise，完成后也存入缓存
       if (segPrefetching.has(url)) {
         segPrefetching.get(url)!
-          .then(buf => buf.byteLength > 0 ? succeed(buf) : this.doFetch(url, config, succeed, fail))
+          .then(buf => {
+            if (buf.byteLength > 0) {
+              // 预取完成的数据已在 segPrefetchCache，直接命中
+              succeed(buf)
+            } else {
+              this.doFetch(url, config, succeed, fail)
+            }
+          })
           .catch(() => this.doFetch(url, config, succeed, fail))
         return
       }
@@ -1323,6 +1433,7 @@ const triggerAdaptivePrefetch = (lastFragSn: number) => {
         segPrefetching.delete(url)
         prefetchInfo.value.cached = segPrefetchCache.size
         prefetchInfo.value.pending = segPrefetching.size
+        evictPrefetchCache()
         // 完成1个 → 补充1个，维持并发数（不递归全量触发，避免请求爆炸）
         startOnePrefetch()
         return buf
@@ -1339,14 +1450,29 @@ const triggerAdaptivePrefetch = (lastFragSn: number) => {
 
   prefetchInfo.value.pending = segPrefetching.size
 
-  // 防止缓存无限增长（最多保留 15 个分片）
-  if (segPrefetchCache.size > 15) {
-    const keys = [...segPrefetchCache.keys()]
-    keys.slice(0, segPrefetchCache.size - 15).forEach(k => segPrefetchCache.delete(k))
-  }
+  // 按内存上限 LRU 淘汰（在新分片加入后检查）
+  evictPrefetchCache()
 }
 
 // ========== end 自适应并行预取 ==========
+
+// LRU 淘汰：按 hlsConfig.maxBufferSizeMB 控制预取缓存总大小，超出则删除最旧的分片
+// 下载模式激活时跳过淘汰，保留所有分片供下载复用
+const evictPrefetchCache = () => {
+  if (downloadModeActive) return  // 下载模式：无限缓存
+  const limitBytes = hlsConfig.value.maxBufferSizeMB * 1024 * 1024
+  // 计算当前缓存总占用
+  let totalBytes = 0
+  for (const buf of segPrefetchCache.values()) totalBytes += buf.byteLength
+  if (totalBytes <= limitBytes) return
+  // 按插入顺序（Map 保证）删除最旧的，直到低于上限
+  for (const [key, buf] of segPrefetchCache) {
+    if (totalBytes <= limitBytes) break
+    totalBytes -= buf.byteLength
+    segPrefetchCache.delete(key)
+  }
+  prefetchInfo.value.cached = segPrefetchCache.size
+}
 
 // 完成1个分片后补充1个，基于当前播放进度定位下一个未下载分片
 const startOnePrefetch = () => {
@@ -1383,6 +1509,7 @@ const startOnePrefetch = () => {
         segPrefetching.delete(url)
         prefetchInfo.value.cached = segPrefetchCache.size
         prefetchInfo.value.pending = segPrefetching.size
+        evictPrefetchCache()
         startOnePrefetch()
         return buf
       })
@@ -1689,6 +1816,9 @@ const destroyHls = () => {
   segPrefetchCache.clear()
   segPrefetching.clear()
   prefetchInfo.value = { bufferSecs: 0, threads: 0, cached: 0, pending: 0 }
+  // 重置下载模式（换视频后缓存重新受大小限制）
+  downloadModeActive = false
+  cancelDownload()
 }
 
 // 本地文件 URL 映射
@@ -2160,6 +2290,7 @@ const applyHlsConfig = async () => {
       videoEl.value.addEventListener('loadedmetadata', restorePosition, { once: true })
     }
   }
+  saveState()
 }
 
 const resetHlsConfig = () => {
@@ -2173,6 +2304,7 @@ const resetHlsConfig = () => {
     enableWorker: true,
     lowLatencyMode: false,
   }
+  saveState()
 }
 
 // MP4 预加载设置
@@ -2265,6 +2397,9 @@ onMounted(async () => {
     requestOrigin.value = savedState.requestOrigin ?? ''
     requestReferer.value = savedState.requestReferer ?? ''
     manifestOnly.value = savedState.manifestOnly ?? true
+    if (savedState.hlsConfig) {
+      hlsConfig.value = { ...hlsConfig.value, ...savedState.hlsConfig }
+    }
 
     // 如果没有 URL 参数，恢复保存的视频地址
     const urlParam = route.query.url as string
