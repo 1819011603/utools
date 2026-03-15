@@ -24,5 +24,11 @@ export default defineNuxtConfig({
     preference: 'light'
   },
 
+  vite: {
+    optimizeDeps: {
+      exclude: ['@ffmpeg/ffmpeg', '@ffmpeg/util']
+    }
+  },
+
   compatibilityDate: '2024-07-01'
 })
