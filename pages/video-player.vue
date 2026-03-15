@@ -38,6 +38,37 @@
           <UCheckbox v-model="autoFullscreen" label="加载后自动全屏" />
           <UCheckbox v-model="useProxy" label="使用跨域代理" />
         </div>
+
+        <!-- Origin / Referer 防盗链设置 -->
+        <div class="flex gap-4 flex-wrap items-end">
+          <UFormGroup label="Origin" help="注入请求头 Origin，用于绕过防盗链">
+            <UInput
+              v-model="requestOrigin"
+              placeholder="https://example.com"
+              class="w-52"
+              @change="saveState"
+            />
+          </UFormGroup>
+          <UFormGroup label="Referer" :help="refererHelp">
+            <UInput
+              v-model="requestReferer"
+              :placeholder="effectiveReferer || 'https://example.com/'"
+              class="w-64"
+              @change="saveState"
+            />
+          </UFormGroup>
+          <UFormGroup label=" " class="pt-1">
+            <UCheckbox
+              v-model="manifestOnly"
+              label="仅代理 Manifest（推荐）"
+              @change="saveState"
+            />
+            <p class="text-xs text-gray-400 mt-1">
+              分片直连 CDN，速度与无代理相同<br>
+              不勾选 = 全程代理，更兼容但较慢
+            </p>
+          </UFormGroup>
+        </div>
         
         <!-- 片头片尾跳过设置 -->
         <div class="flex gap-4 flex-wrap items-end">
@@ -650,6 +681,9 @@ interface SavedState {
   autoFullscreen: boolean
   skipIntro: number  // 跳过片头时间（秒）
   skipOutro: number  // 跳过片尾时间（秒）
+  requestOrigin: string
+  requestReferer: string
+  manifestOnly: boolean
 }
 
 // 从本地存储加载状态
@@ -678,7 +712,10 @@ const saveState = () => {
       useProxy: useProxy.value,
       autoFullscreen: autoFullscreen.value,
       skipIntro: skipIntro.value,
-      skipOutro: skipOutro.value
+      skipOutro: skipOutro.value,
+      requestOrigin: requestOrigin.value,
+      requestReferer: requestReferer.value,
+      manifestOnly: manifestOnly.value
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
   } catch (e) {
@@ -708,6 +745,21 @@ const isLocalFile = ref(false)
 const errorMessage = ref('')
 const isLoading = ref(false)
 const useProxy = ref(false)
+const requestOrigin = ref('')    // 自定义 Origin 请求头
+const requestReferer = ref('')   // 自定义 Referer 请求头（空则自动为 origin + /）
+const manifestOnly = ref(true)   // 仅代理 manifest，分片直连 CDN（更快）
+// 实际生效的 Referer：用户填了就用用户的，否则 origin 非空时自动补 /
+const effectiveReferer = computed(() => {
+  const r = requestReferer.value.trim()
+  if (r) return r
+  const o = requestOrigin.value.trim()
+  return o ? o.replace(/\/$/, '') + '/' : ''
+})
+const refererHelp = computed(() => {
+  const o = requestOrigin.value.trim()
+  const defaultVal = o ? o.replace(/\/$/, '') + '/' : 'Origin + /'
+  return '注入请求头 Referer，留空时自动填 ' + defaultVal
+})
 const autoFullscreen = ref(true)  // 自动全屏
 const savedProgress = ref<Record<string, number>>({})  // 保存的播放进度
 const videoKey = ref(0)  // 用于强制重新创建 video 元素
@@ -754,7 +806,9 @@ const hoverTime = ref<number | null>(null)  // 悬停时间预览
 const hoverPercent = ref(0)
 const hlsRetryCount = ref(0)  // HLS 重试计数
 const MAX_HLS_RETRY = 3  // 最大重试次数
-const LOAD_TIMEOUT = 3000  // 加载超时时间（毫秒）
+// 加载超时时间：走服务端代理时需要更长，统一设 15s
+// （代理需要先请求远端再返回，3s 往往不够，导致 destroyHls 取消所有请求）
+const LOAD_TIMEOUT = 15000
 let loadTimeoutTimer: ReturnType<typeof setTimeout> | null = null  // 加载超时定时器
 let hasReceivedData = false  // 是否收到有效数据
 
@@ -839,9 +893,29 @@ const isHlsUrl = (url: string): boolean => {
 }
 
 // 获取代理 URL
+// Origin/Referer 是浏览器禁止 JS 修改的 forbidden headers，
+// 必须走服务端代理（/api/proxy）注入，fetch/XHR 直接设置会被浏览器忽略。
 const getProxyUrl = (url: string): string => {
-  if (!useProxy.value) return url
-  return corsProxies[0] + encodeURIComponent(url)
+  // 已经是本地代理 URL，直接透传，避免二次包装
+  if (url.includes('/api/proxy?')) return url
+
+  const o = requestOrigin.value.trim()
+  const r = effectiveReferer.value
+  if (o || r) {
+    // Manifest-Only 模式：分片（非 m3u8）直连 CDN，速度与无代理相同
+    // 服务端只改写了子 playlist URL，分片 URL 保持原始直链，此处直接透传
+    if (manifestOnly.value && !isHlsUrl(url)) return url
+
+    const params = new URLSearchParams({ url })
+    if (o) params.set('origin',  o)
+    if (r) params.set('referer', r)
+    if (manifestOnly.value) params.set('noseg', '1') // 告知服务端不改写分片 URL
+    return '/api/proxy?' + params.toString()
+  }
+
+  // 普通 CORS 代理
+  if (useProxy.value) return corsProxies[0] + encodeURIComponent(url)
+  return url
 }
 
 // 从 URL 获取视频名称
@@ -912,7 +986,7 @@ const parseM3u8Segments = (content: string, baseUrl: string): string[] => {
 // 获取 M3U8 媒体列表的所有分片 URL（递归处理主列表）
 const getM3u8SegmentUrls = async (m3u8Url: string): Promise<string[]> => {
   const url = getProxyUrl(m3u8Url)
-  const res = await fetch(url)
+  const res = await fetch(url, )
   if (!res.ok) throw new Error(`获取 M3U8 失败: ${res.status}`)
   const text = await res.text()
   const baseUrl = m3u8Url.replace(/\/[^/]*$/, '/')
@@ -961,7 +1035,7 @@ const downloadVideo = async (targetUrl?: string) => {
 
       for (let i = 0; i < total; i++) {
         const segUrl = getProxyUrl(segmentUrls[i])
-        const res = await fetch(segUrl)
+        const res = await fetch(segUrl, )
         if (!res.ok) throw new Error(`分片 ${i + 1}/${total} 下载失败`)
         chunks.push(await res.arrayBuffer())
         // 简单进度反馈
@@ -987,7 +1061,7 @@ const downloadVideo = async (targetUrl?: string) => {
     } else {
       // MP4: 直接 fetch 下载
       const finalUrl = getProxyUrl(normalizedUrl)
-      const res = await fetch(finalUrl)
+      const res = await fetch(finalUrl, )
       if (!res.ok) throw new Error(`下载失败: ${res.status}`)
       const blob = await res.blob()
       const ext = filename.includes('.') ? '' : '.mp4'
@@ -1087,9 +1161,9 @@ const clearPlaylist = () => {
 
 // 根据缓冲健康度决定并发预取数：缓冲越少 → 线程越多
 const getAdaptivePrefetchCount = (bufferSecs: number): number => {
-  if (bufferSecs < 3)  return 3  // 极少缓冲：3 线程全力预取
-  if (bufferSecs < 10) return 2  // 偏低：2 线程
-  if (bufferSecs < 20) return 1  // 正常：1 线程
+  if (bufferSecs < 3) return 4  
+  if (bufferSecs < 10) return 3  // 缓冲不足10秒：3 线程全力预取
+  if (bufferSecs < 20) return 2  // 正常：1 线程
   return 0                        // 充足：暂停预取，节省带宽
 }
 
@@ -1196,6 +1270,11 @@ const createHlsFragLoader = () => {
 const triggerAdaptivePrefetch = (lastFragSn: number) => {
   if (!hls || !videoEl.value) return
 
+  // 全程代理模式（!manifestOnly）时禁用预取：
+  // 预取请求和 hls.js 分片请求会竞争同一个 Nitro 服务线程，反而拖慢实际播放。
+  // manifestOnly=true 时分片直连 CDN，不经过服务端，无竞争，可正常预取。
+  if ((requestOrigin.value.trim() || effectiveReferer.value) && !manifestOnly.value) return
+
   const video = videoEl.value
   const bufferSecs = video.buffered.length > 0
     ? Math.max(0, video.buffered.end(video.buffered.length - 1) - video.currentTime)
@@ -1223,7 +1302,10 @@ const triggerAdaptivePrefetch = (lastFragSn: number) => {
 
   // 计算还能发起几个新请求（不超过并发上限）
   const canStart = Math.max(0, count - segPrefetching.size)
-  const candidates = frags.slice(startIdx, startIdx + count)
+  if (canStart === 0) return
+  
+  // 取足够多的候选分片（跳过已缓存/正在下载的）
+  const candidates = frags.slice(startIdx, startIdx + count + segPrefetchCache.size + segPrefetching.size)
 
   let started = 0
   for (const frag of candidates) {
@@ -1238,6 +1320,8 @@ const triggerAdaptivePrefetch = (lastFragSn: number) => {
         segPrefetching.delete(url)
         prefetchInfo.value.cached = segPrefetchCache.size
         prefetchInfo.value.pending = segPrefetching.size
+        // 下载完成后继续触发预取，保持并发数
+        triggerAdaptivePrefetch(frag.sn)
         return buf
       })
       .catch(() => {
@@ -1388,8 +1472,8 @@ const loadHlsVideo = async (url: string) => {
     startLevel: -1,
     // 自定义分片加载器：接管分片请求，命中预取缓存直接返回
     fLoader: createHlsFragLoader() as any,
-    // 关键：允许跨域获取密钥（AES-128 加密视频需要）
-    xhrSetup: (xhr: XMLHttpRequest, url: string) => {
+    // Origin/Referer 由 /api/proxy 服务端注入，XHR 层只需关闭 credentials
+    xhrSetup: (xhr: XMLHttpRequest) => {
       xhr.withCredentials = false
     }
   })
@@ -2125,7 +2209,10 @@ onMounted(async () => {
     autoFullscreen.value = savedState.autoFullscreen ?? true
     skipIntro.value = savedState.skipIntro ?? 0
     skipOutro.value = savedState.skipOutro ?? 0
-    
+    requestOrigin.value = savedState.requestOrigin ?? ''
+    requestReferer.value = savedState.requestReferer ?? ''
+    manifestOnly.value = savedState.manifestOnly ?? true
+
     // 如果没有 URL 参数，恢复保存的视频地址
     const urlParam = route.query.url as string
     if (!urlParam && savedState.videoUrlInput) {
