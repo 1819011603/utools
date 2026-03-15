@@ -826,7 +826,7 @@ const hlsConfig = ref({
   maxMaxBufferLength: 60,     // 最大缓冲时长（秒）
   backBufferLength: 30,       // 后台缓冲（秒）
   // 内存设置
-  maxBufferSizeMB: 60,        // 缓冲大小（MB）
+  maxBufferSizeMB: 600,        // 缓冲大小（MB）
   // 下载速度设置
   fragLoadingTimeOut: 30000,  // 分片下载超时（ms）
   fragLoadingMaxRetry: 3,     // 最大重试次数
@@ -2114,7 +2114,7 @@ const resetHlsConfig = () => {
     maxBufferLength: 30,
     maxMaxBufferLength: 60,
     backBufferLength: 30,
-    maxBufferSizeMB: 60,
+    maxBufferSizeMB: 600,
     fragLoadingTimeOut: 30000,
     fragLoadingMaxRetry: 3,
     enableWorker: true,
