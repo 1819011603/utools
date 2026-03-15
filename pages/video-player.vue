@@ -483,7 +483,7 @@
         </div>
 
         <!-- 实时状态 -->
-        <div v-if="hlsStats" class="p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
+        <div v-if="hlsStats" class="p-3 bg-gray-50 dark:bg-gray-800 rounded-lg space-y-2">
           <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
             <div>
               <span class="text-gray-500">已缓冲：</span>
@@ -500,6 +500,27 @@
             <div>
               <span class="text-gray-500">播放进度：</span>
               <span class="font-medium">{{ progressPercent.toFixed(1) }}%</span>
+            </div>
+          </div>
+          <!-- 自适应预取状态 -->
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm border-t border-gray-200 dark:border-gray-700 pt-2">
+            <div>
+              <span class="text-gray-500">预取线程：</span>
+              <span class="font-medium" :class="prefetchInfo.threads === 3 ? 'text-red-500' : prefetchInfo.threads === 2 ? 'text-amber-500' : 'text-green-500'">
+                {{ prefetchInfo.threads }} 线程
+              </span>
+            </div>
+            <div>
+              <span class="text-gray-500">缓冲健康：</span>
+              <span class="font-medium">{{ prefetchInfo.bufferSecs }} 秒</span>
+            </div>
+            <div>
+              <span class="text-gray-500">预取完成：</span>
+              <span class="font-medium">{{ prefetchInfo.cached }} 分片</span>
+            </div>
+            <div>
+              <span class="text-gray-500">预取中：</span>
+              <span class="font-medium">{{ prefetchInfo.pending }} 分片</span>
             </div>
           </div>
         </div>
@@ -736,6 +757,11 @@ const MAX_HLS_RETRY = 3  // 最大重试次数
 const LOAD_TIMEOUT = 3000  // 加载超时时间（毫秒）
 let loadTimeoutTimer: ReturnType<typeof setTimeout> | null = null  // 加载超时定时器
 let hasReceivedData = false  // 是否收到有效数据
+
+// 自适应并行预取系统
+const segPrefetchCache = new Map<string, ArrayBuffer>()        // 已预取完成的缓存
+const segPrefetching = new Map<string, Promise<ArrayBuffer>>() // 正在预取中
+const prefetchInfo = ref({ bufferSecs: 0, threads: 0, cached: 0, pending: 0 })
 
 // HLS
 let hls: HlsType | null = null
@@ -1057,6 +1083,184 @@ const clearPlaylist = () => {
   videoUrlInput.value = ''
 }
 
+// ========== 自适应并行预取 ==========
+
+// 根据缓冲健康度决定并发预取数：缓冲越少 → 线程越多
+const getAdaptivePrefetchCount = (bufferSecs: number): number => {
+  if (bufferSecs < 3)  return 3  // 极少缓冲：3 线程全力预取
+  if (bufferSecs < 10) return 2  // 偏低：2 线程
+  if (bufferSecs < 20) return 1  // 正常：1 线程
+  return 0                        // 充足：暂停预取，节省带宽
+}
+
+// 创建自定义 HLS 分片加载器（fLoader）
+// 优先从预取缓存返回数据，cache miss 时走 fetch 正常加载
+const createHlsFragLoader = () => {
+  return class PrefetchFragLoader {
+    context: any
+    // hls.js 在创建 loader 实例后立刻执行 frag.stats = loader.stats，
+    // 时机早于 load() 调用。若此处不提前初始化，frag.stats 会是 undefined，
+    // AbrController 的 setInterval 轮询时读 frag.stats.loading 直接崩溃。
+    stats: any = {
+      aborted: false, loaded: 0, total: 0,
+      retry: 0, chunkCount: 0, bwEstimate: 0,
+      loading:   { start: 0, first: 0, end: 0 },
+      parsing:   { start: 0, end: 0 },
+      buffering: { start: 0, first: 0, end: 0 },
+    }
+    private ctrl: AbortController | null = null
+
+    load(context: any, config: any, callbacks: any): void {
+      this.context = context
+      const url: string = context.url
+      const t0 = performance.now()
+
+      // 重置 stats 字段（必须原地修改，不能替换整个对象）
+      // frag.stats 持有的是同一个对象引用，替换会导致 frag.stats 仍指向旧的 undefined
+      this.stats.aborted = false
+      this.stats.loaded = 0
+      this.stats.total = 0
+      this.stats.retry = 0
+      this.stats.chunkCount = 0
+      this.stats.bwEstimate = 0
+      this.stats.loading.start = t0
+      this.stats.loading.first = 0
+      this.stats.loading.end   = 0
+      this.stats.parsing.start = 0
+      this.stats.parsing.end   = 0
+      this.stats.buffering.start = 0
+      this.stats.buffering.first = 0
+      this.stats.buffering.end   = 0
+
+      const succeed = (data: ArrayBuffer) => {
+        const t1 = performance.now()
+        this.stats.loaded = data.byteLength
+        this.stats.total  = data.byteLength
+        this.stats.chunkCount = 1
+        if (!this.stats.loading.first) this.stats.loading.first = t0 + 1
+        this.stats.loading.end = t1
+        callbacks.onSuccess({ data, url }, this.stats, context)
+      }
+
+      const fail = (e: Error) => {
+        this.stats.loading.end = performance.now()
+        callbacks.onError({ code: 0, text: e.message }, context, null, this.stats)
+      }
+
+      // 1. 命中预取缓存 → 即时返回
+      if (segPrefetchCache.has(url)) {
+        const buf = segPrefetchCache.get(url)!
+        segPrefetchCache.delete(url)
+        prefetchInfo.value.cached = segPrefetchCache.size
+        succeed(buf)
+        return
+      }
+
+      // 2. 正在预取中 → 等待 Promise
+      if (segPrefetching.has(url)) {
+        segPrefetching.get(url)!
+          .then(buf => buf.byteLength > 0 ? succeed(buf) : this.doFetch(url, config, succeed, fail))
+          .catch(() => this.doFetch(url, config, succeed, fail))
+        return
+      }
+
+      // 3. 普通加载
+      this.doFetch(url, config, succeed, fail)
+    }
+
+    private doFetch(url: string, config: any, succeed: (b: ArrayBuffer) => void, fail: (e: Error) => void) {
+      this.ctrl = new AbortController()
+      const timeout = config?.timeout ?? 30000
+      const timer = setTimeout(() => this.ctrl?.abort(), timeout)
+      fetch(getProxyUrl(url), { signal: this.ctrl.signal })
+        .then(r => {
+          clearTimeout(timer)
+          if (!r.ok) throw new Error(`HTTP ${r.status}`)
+          // 标记首字节时间，供 AbrController 带宽估算使用
+          this.stats.loading.first = performance.now()
+          return r.arrayBuffer()
+        })
+        .then(succeed)
+        .catch(e => { clearTimeout(timer); if (e?.name !== 'AbortError') fail(e instanceof Error ? e : new Error(String(e))) })
+    }
+
+    abort(): void {
+      this.ctrl?.abort()
+      if (this.stats) this.stats.aborted = true
+    }
+    destroy(): void { this.abort() }
+  }
+}
+
+// 触发自适应预取（每次 FRAG_BUFFERED 后调用）
+const triggerAdaptivePrefetch = (lastFragSn: number) => {
+  if (!hls || !videoEl.value) return
+
+  const video = videoEl.value
+  const bufferSecs = video.buffered.length > 0
+    ? Math.max(0, video.buffered.end(video.buffered.length - 1) - video.currentTime)
+    : 0
+  const count = getAdaptivePrefetchCount(bufferSecs)
+
+  // 更新状态显示
+  prefetchInfo.value = {
+    bufferSecs: Math.round(bufferSecs * 10) / 10,
+    threads: count,
+    cached: segPrefetchCache.size,
+    pending: segPrefetching.size,
+  }
+
+  if (count === 0) return
+
+  // 取当前画质的分片列表
+  const level = hls.currentLevel >= 0 ? hls.currentLevel : 0
+  const levelDetails = (hls as any).levels?.[level]?.details
+  if (!levelDetails) return
+
+  const frags: any[] = levelDetails.fragments
+  const startIdx = frags.findIndex((f: any) => f.sn === lastFragSn) + 1
+  if (startIdx <= 0) return
+
+  // 计算还能发起几个新请求（不超过并发上限）
+  const canStart = Math.max(0, count - segPrefetching.size)
+  const candidates = frags.slice(startIdx, startIdx + count)
+
+  let started = 0
+  for (const frag of candidates) {
+    if (started >= canStart) break
+    const url: string = frag.url
+    if (!url || segPrefetchCache.has(url) || segPrefetching.has(url)) continue
+
+    const promise = fetch(getProxyUrl(url))
+      .then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(buf => {
+        segPrefetchCache.set(url, buf)
+        segPrefetching.delete(url)
+        prefetchInfo.value.cached = segPrefetchCache.size
+        prefetchInfo.value.pending = segPrefetching.size
+        return buf
+      })
+      .catch(() => {
+        segPrefetching.delete(url)
+        prefetchInfo.value.pending = segPrefetching.size
+        return new ArrayBuffer(0)
+      })
+
+    segPrefetching.set(url, promise)
+    started++
+  }
+
+  prefetchInfo.value.pending = segPrefetching.size
+
+  // 防止缓存无限增长（最多保留 15 个分片）
+  if (segPrefetchCache.size > 15) {
+    const keys = [...segPrefetchCache.keys()]
+    keys.slice(0, segPrefetchCache.size - 15).forEach(k => segPrefetchCache.delete(k))
+  }
+}
+
+// ========== end 自适应并行预取 ==========
+
 // 加载视频
 // 清除加载超时定时器
 const clearLoadTimeout = () => {
@@ -1182,6 +1386,8 @@ const loadHlsVideo = async (url: string) => {
     enableWorker: hlsConfig.value.enableWorker,
     lowLatencyMode: hlsConfig.value.lowLatencyMode,
     startLevel: -1,
+    // 自定义分片加载器：接管分片请求，命中预取缓存直接返回
+    fLoader: createHlsFragLoader() as any,
     // 关键：允许跨域获取密钥（AES-128 加密视频需要）
     xhrSetup: (xhr: XMLHttpRequest, url: string) => {
       xhr.withCredentials = false
@@ -1252,10 +1458,13 @@ const loadHlsVideo = async (url: string) => {
     }
   })
   
-  // 分片加载完成
-  hls.on(Hls.Events.FRAG_BUFFERED, () => {
+  // 分片加载完成 → 更新统计 + 触发自适应预取
+  hls.on(Hls.Events.FRAG_BUFFERED, (_, data) => {
     updateHlsStats()
     isBuffering.value = false
+    if (data?.frag != null) {
+      triggerAdaptivePrefetch(data.frag.sn)
+    }
   })
   
   // 分片加载中
@@ -1339,6 +1548,10 @@ const destroyHls = () => {
     hls = null
   }
   hlsStats.value = null
+  // 清空预取缓存
+  segPrefetchCache.clear()
+  segPrefetching.clear()
+  prefetchInfo.value = { bufferSecs: 0, threads: 0, cached: 0, pending: 0 }
 }
 
 // 本地文件 URL 映射
@@ -1756,7 +1969,11 @@ const onSeeking = () => {
 // seek 完成
 const onSeeked = () => {
   console.log('跳转完成')
-  // 简单处理：seek 完成后关闭缓冲状态
+  // seek 后播放位置改变，预取的分片大概率无效，直接清空节省内存
+  segPrefetchCache.clear()
+  segPrefetching.clear()
+  prefetchInfo.value.cached = 0
+  prefetchInfo.value.pending = 0
   setTimeout(() => {
     isBuffering.value = false
   }, 200)
