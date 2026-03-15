@@ -120,7 +120,6 @@ const toolCategories: Category[] = [
       { label: '图片格式转换', path: '/image-convert', icon: 'i-heroicons-arrows-right-left' },
       { label: '视频转GIF', path: '/video-to-gif', icon: 'i-heroicons-film' },
       { label: '视频播放器', path: '/video-player', icon: 'i-heroicons-play-circle' },
-      { label: '视频播放器 V2', path: '/video-player-v2', icon: 'i-heroicons-play-circle' },
       { label: '音频格式转换', path: '/audio-convert', icon: 'i-heroicons-musical-note' }
     ]
   },

@@ -146,6 +146,14 @@ const categories: Category[] = [
         description: '音频格式互转，支持 MP3、WAV、AAC、OGG 等',
         bgColor: 'bg-violet-100 dark:bg-violet-900/50',
         iconColor: 'text-violet-600 dark:text-violet-400'
+      },
+      {
+        name: '视频播放器',
+        path: '/video-player',
+        icon: 'i-heroicons-play-circle',
+        description: '支持 M3U8/MP4 播放、代理、防盗链处理与下载',
+        bgColor: 'bg-fuchsia-100 dark:bg-fuchsia-900/50',
+        iconColor: 'text-fuchsia-600 dark:text-fuchsia-400'
       }
     ]
   },
