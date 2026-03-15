@@ -1161,10 +1161,11 @@ const clearPlaylist = () => {
 
 // 根据缓冲健康度决定并发预取数：缓冲越少 → 线程越多
 const getAdaptivePrefetchCount = (bufferSecs: number): number => {
-  if (bufferSecs < 6) return 4  
-  if (bufferSecs < 10) return 3  // 缓冲不足10秒：3 线程全力预取
-  if (bufferSecs < 20) return 2  // 正常：2 线程
-  if (bufferSecs < 30) return 1  // 正常：1 线程
+  if (bufferSecs < 3) return 4  // 正常：2 线程
+  if (bufferSecs < 10) return 1  // 正常：2 线程
+  if (bufferSecs < 35) return 2  // 正常：1 线程
+  if (bufferSecs < 40) return 1  // 正常：1 线程
+
 
   return 0                        // 充足：暂停预取，节省带宽
 }
@@ -1305,9 +1306,9 @@ const triggerAdaptivePrefetch = (lastFragSn: number) => {
   // 计算还能发起几个新请求（不超过并发上限）
   const canStart = Math.max(0, count - segPrefetching.size)
   if (canStart === 0) return
-  
-  // 取足够多的候选分片（跳过已缓存/正在下载的）
-  const candidates = frags.slice(startIdx, startIdx + count + segPrefetchCache.size + segPrefetching.size)
+
+  // 候选窗口：从 startIdx 往后扫描，最多看 count*3 个，足以跳过已缓存/下载中的
+  const candidates = frags.slice(startIdx, startIdx + count * 3)
 
   let started = 0
   for (const frag of candidates) {
@@ -1322,8 +1323,8 @@ const triggerAdaptivePrefetch = (lastFragSn: number) => {
         segPrefetching.delete(url)
         prefetchInfo.value.cached = segPrefetchCache.size
         prefetchInfo.value.pending = segPrefetching.size
-        // 下载完成后继续触发预取，保持并发数
-        triggerAdaptivePrefetch(frag.sn)
+        // 完成1个 → 补充1个，维持并发数（不递归全量触发，避免请求爆炸）
+        startOnePrefetch()
         return buf
       })
       .catch(() => {
@@ -1346,6 +1347,56 @@ const triggerAdaptivePrefetch = (lastFragSn: number) => {
 }
 
 // ========== end 自适应并行预取 ==========
+
+// 完成1个分片后补充1个，基于当前播放进度定位下一个未下载分片
+const startOnePrefetch = () => {
+  if (!hls || !videoEl.value) return
+  const video = videoEl.value
+  const bufferSecs = video.buffered.length > 0
+    ? Math.max(0, video.buffered.end(video.buffered.length - 1) - video.currentTime)
+    : 0
+  const count = getAdaptivePrefetchCount(bufferSecs)
+
+  // 更新状态
+  prefetchInfo.value.bufferSecs = Math.round(bufferSecs * 10) / 10
+  prefetchInfo.value.threads = count
+  prefetchInfo.value.cached = segPrefetchCache.size
+  prefetchInfo.value.pending = segPrefetching.size
+
+  if (count === 0 || segPrefetching.size >= count) return
+
+  const level = hls.currentLevel >= 0 ? hls.currentLevel : 0
+  const frags: any[] = (hls as any).levels?.[level]?.details?.fragments ?? []
+  if (!frags.length) return
+
+  // 从当前播放时间往后找第一个未缓存、未下载中的分片
+  const currentTime = video.currentTime
+  for (const frag of frags) {
+    if (frag.start < currentTime) continue
+    const url: string = frag.url
+    if (!url || segPrefetchCache.has(url) || segPrefetching.has(url)) continue
+
+    const promise = fetch(getProxyUrl(url))
+      .then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(buf => {
+        segPrefetchCache.set(url, buf)
+        segPrefetching.delete(url)
+        prefetchInfo.value.cached = segPrefetchCache.size
+        prefetchInfo.value.pending = segPrefetching.size
+        startOnePrefetch()
+        return buf
+      })
+      .catch(() => {
+        segPrefetching.delete(url)
+        prefetchInfo.value.pending = segPrefetching.size
+        return new ArrayBuffer(0)
+      })
+
+    segPrefetching.set(url, promise)
+    prefetchInfo.value.pending = segPrefetching.size
+    break  // 只补1个
+  }
+}
 
 // 加载视频
 // 清除加载超时定时器
