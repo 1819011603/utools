@@ -211,175 +211,35 @@ const autoSmartParse = () => {
   candidateJsons.value = []
   if (!input.value.trim()) return
 
-  let text = input.value.trim()
-  const candidates: CandidateJson[] = []
-
-  // 尝试去掉转义符后解析
-  const unescaped = tryUnescape(text)
-  if (unescaped && unescaped !== text) {
-    addCandidate(candidates, unescaped, '去转义')
-  }
+  const text = input.value.trim()
 
   // 尝试直接解析整个文本
   try {
-    const obj = JSON.parse(text)
-    // 如果有 messages 字段，只处理 messages 中的内容，不需要原始 JSON
-    if (obj && typeof obj === 'object' && 'messages' in obj && typeof obj.messages === 'string') {
-      const messagesContent = obj.messages
-      const extracted = extractAllJsonFromText(messagesContent)
-      extracted.forEach(jsonStr => {
-        addCandidate(candidates, jsonStr, 'messages')
-        // 尝试递归解析嵌套的转义 JSON
-        extractNestedEscapedJson(jsonStr, candidates)
-      })
-      
-      // 只处理 messages 提取的结果
-      candidates.sort((a, b) => b.json.length - a.json.length)
-      if (candidates.length > 20) candidates.splice(20)
-      if (candidates.length === 0) {
-        error.value = 'messages 字段中未找到有效的 JSON'
-      } else {
-        candidateJsons.value = candidates
-      }
-      return
-    }
-    
-    // 没有 messages 字段，尝试解析嵌套转义 JSON（如 rawContent）
-    const nestedCandidates: CandidateJson[] = []
-    // 原始 JSON 也作为候选
-    addCandidate(nestedCandidates, text, '原始')
-    extractNestedEscapedJson(JSON.stringify(obj), nestedCandidates)
-    if (nestedCandidates.length > 0) {
-      nestedCandidates.sort((a, b) => b.json.length - a.json.length)
-      if (nestedCandidates.length > 20) nestedCandidates.splice(20)
-      candidateJsons.value = nestedCandidates
-      return
-    }
-
-    // 没有嵌套 JSON，直接格式化当前 JSON
-    let result = obj
+    let obj = JSON.parse(text)
     if (unwrapOuterBrackets.value) {
-      result = tryUnwrap(result)
+      obj = tryUnwrap(obj)
     }
-    input.value = JSON.stringify(result, null, Number(indentSize.value))
-    parsed.value = result
-    expandedPaths.value = new Set(collectPaths(result))
+    input.value = JSON.stringify(obj, null, Number(indentSize.value))
+    parsed.value = obj
+    expandedPaths.value = new Set(collectPaths(obj))
     deletedPaths.value = new Set()
     deletedStack.value = []
     currentExpandLevel.value = maxDepth.value
     saveToHistory()
     return
-  } catch {
-    // 不是有效 JSON，尝试从文本中提取所有 JSON
-    const extracted = extractAllJsonFromText(text)
-    extracted.forEach(jsonStr => {
-      addCandidate(candidates, jsonStr)
-      extractNestedEscapedJson(jsonStr, candidates)
-    })
-  }
+  } catch {}
 
+  // 不是有效 JSON，尝试从文本中提取所有 JSON 片段
+  const candidates: CandidateJson[] = []
+  extractAllJsonFromText(text).forEach(jsonStr => addCandidate(candidates, jsonStr))
   candidates.sort((a, b) => b.json.length - a.json.length)
   if (candidates.length > 20) candidates.splice(20)
 
   if (candidates.length === 0) {
-    // 没有找到任何 JSON，尝试普通解析
     parseJson()
   } else {
-    // 有候选时始终显示列表让用户选择
     candidateJsons.value = candidates
   }
-}
-
-const tryUnescape = (text: string): string | null => {
-  // 检测是否包含转义的 JSON（如 {\"key\":\"value\"} 或 {\\\"key\\\":\\\"value\\\"}）
-  if (!text.includes('\\"') && !text.includes('\\\\')) {
-    return null
-  }
-  
-  try {
-    // 方法1: 尝试作为 JSON 字符串解析（处理 \" 转义）
-    // 如果文本是 {"key":"value"}，包裹后变成 "{\"key\":\"value\"}"
-    const wrapped = `"${text}"`
-    try {
-      const parsed = JSON.parse(wrapped)
-      if (typeof parsed === 'string') {
-        // 验证解析结果是否为有效 JSON
-        JSON.parse(parsed)
-        return parsed
-      }
-    } catch {}
-    
-    // 方法2: 直接替换转义符（处理 \\" 这种格式）
-    let unescaped = text
-    // 先处理双重转义 \\" -> \"，然后 \" -> "
-    while (unescaped.includes('\\\\"') || unescaped.includes('\\"')) {
-      const prev = unescaped
-      unescaped = unescaped
-        .replace(/\\\\"/g, '\\"')
-        .replace(/\\"/g, '"')
-      if (prev === unescaped) break
-    }
-    // 处理反斜杠
-    unescaped = unescaped.replace(/\\\\/g, '\\')
-    
-    // 验证去转义后是否为有效 JSON
-    if (unescaped !== text) {
-      JSON.parse(unescaped)
-      return unescaped
-    }
-    
-    return null
-  } catch {
-    return null
-  }
-}
-
-const extractNestedEscapedJson = (jsonStr: string, candidates: CandidateJson[]) => {
-  try {
-    const obj = JSON.parse(jsonStr)
-    
-    // 遍历对象的所有字符串值，查找转义的 JSON 或直接嵌入的 JSON
-    const processValue = (value: any, path: string) => {
-      if (typeof value === 'string') {
-        const trimmed = value.trim()
-
-        // 1) 直接就是 JSON
-        if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
-          try {
-            JSON.parse(trimmed)
-            addCandidate(candidates, trimmed, path || '嵌套')
-            extractNestedEscapedJson(trimmed, candidates)
-          } catch {}
-        }
-
-        // 2) 字符串里包含 JSON 片段（不一定在开头）
-        const embedded = extractAllJsonFromText(trimmed)
-        if (embedded.length > 0) {
-          embedded.forEach(jsonStr => {
-            addCandidate(candidates, jsonStr, path || '嵌套')
-            extractNestedEscapedJson(jsonStr, candidates)
-          })
-        }
-
-        // 3) 转义后的 JSON
-        const unescaped = tryUnescape(trimmed)
-        if (unescaped) {
-          addCandidate(candidates, unescaped, path || '嵌套')
-          extractNestedEscapedJson(unescaped, candidates)
-        }
-      } else if (Array.isArray(value)) {
-        value.forEach((item, index) => {
-          processValue(item, `${path}[${index}]`)
-        })
-      } else if (typeof value === 'object' && value !== null) {
-        Object.entries(value).forEach(([key, val]) => {
-          processValue(val, path ? `${path}.${key}` : key)
-        })
-      }
-    }
-    
-    processValue(obj, '')
-  } catch {}
 }
 
 const addCandidate = (candidates: CandidateJson[], jsonStr: string, source?: string) => {
