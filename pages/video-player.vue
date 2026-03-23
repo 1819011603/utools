@@ -69,6 +69,22 @@
             </p>
           </UFormGroup>
         </div>
+
+        <!-- 跨域代理：按 URL 正则自动 Origin / Referer -->
+        <UFormGroup
+          class="max-w-3xl"
+          label="代理 Header 规则 (JSON)"
+          help="站点数组：每项一个网站 origin + 多个匹配当前请求 URL 的正则（patterns）。也支持用 links 代替 patterns。手工 Origin/Referer 优先；规则不依赖「使用跨域代理」。该开关仅控制无规则且无 Origin 时是否走公共代理。"
+        >
+          <UTextarea
+            v-model="proxyRulesJson"
+            :rows="5"
+            :placeholder="DEFAULT_PROXY_RULES_JSON"
+            class="w-full font-mono text-sm"
+            @blur="saveState"
+          />
+          <p v-if="proxyRulesError" class="text-xs text-red-500 mt-1">{{ proxyRulesError }}</p>
+        </UFormGroup>
         
         <!-- 片头片尾跳过设置 -->
         <div class="flex gap-4 flex-wrap items-end">
@@ -705,6 +721,7 @@ interface SavedState {
   requestOrigin: string
   requestReferer: string
   manifestOnly: boolean
+  proxyRulesJson: string
   hlsConfig: typeof hlsConfig.value
 }
 
@@ -738,6 +755,7 @@ const saveState = () => {
       requestOrigin: requestOrigin.value,
       requestReferer: requestReferer.value,
       manifestOnly: manifestOnly.value,
+      proxyRulesJson: proxyRulesJson.value,
       hlsConfig: { ...hlsConfig.value }
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
@@ -771,15 +789,194 @@ const useProxy = ref(true)
 const requestOrigin = ref('')    // 自定义 Origin 请求头
 const requestReferer = ref('')   // 自定义 Referer 请求头（空则自动为 origin + /）
 const manifestOnly = ref(false)   // 仅代理 manifest，分片直连 CDN（更快）
-// 实际生效的 Referer：用户填了就用用户的，否则 origin 非空时自动补 /
-const effectiveReferer = computed(() => {
-  const r = requestReferer.value.trim()
-  if (r) return r
-  const o = requestOrigin.value.trim()
+// 默认：一个站点对应多条 URL 匹配规则（正则），格式化缩进便于页面反显
+const DEFAULT_PROXY_RULES_SITES: { origin: string; patterns: string[] }[] = [
+  {
+    origin: 'https://www.4kvm.org',
+    // 同一站点可写多条；需要时复制一行改成其它子域/路径正则即可
+    patterns: ['\\.4kvm\\.me'],
+  },
+  {
+    "origin": "https://www.ncat22.com",
+    "patterns": [
+      "index\\.m3u8"
+    ]
+  }
+]
+const DEFAULT_PROXY_RULES_JSON = JSON.stringify(DEFAULT_PROXY_RULES_SITES, null, 2)
+
+/** 对象/数组规则在页面用 2 空格缩进反显 */
+const tryPrettifyProxyRulesJson = (s: string): string => {
+  try {
+    const j = JSON.parse(s)
+    if (j !== null && typeof j === 'object') {
+      return JSON.stringify(j, null, 2)
+    }
+  } catch {
+    return s
+  }
+  return s
+}
+
+const normalizeStoredProxyRulesJson = (raw: unknown): string => {
+  if (typeof raw !== 'string' || !raw.trim()) return DEFAULT_PROXY_RULES_JSON
+  try {
+    const j = JSON.parse(raw)
+    if (Array.isArray(j) && j.length === 0) return DEFAULT_PROXY_RULES_JSON
+    if (j && typeof j === 'object' && !Array.isArray(j) && Object.keys(j).length === 0) {
+      return DEFAULT_PROXY_RULES_JSON
+    }
+  } catch {
+    return DEFAULT_PROXY_RULES_JSON
+  }
+  return tryPrettifyProxyRulesJson(raw.trim())
+}
+
+const proxyRulesJson = ref(DEFAULT_PROXY_RULES_JSON)
+const proxyRulesError = ref('')
+const proxyRulesCompiled = shallowRef<{ regex: RegExp; origin: string }[]>([])
+
+/** 去掉 g/y，避免 RegExp.test 反复调用时 lastIndex 导致偶发匹配失败 */
+const compileRegexForUrlMatch = (pattern: string): RegExp => {
+  const r = new RegExp(pattern)
+  const flags = r.flags.replace(/g/g, '').replace(/y/g, '')
+  return new RegExp(r.source, flags)
+}
+
+const normalizeUrlForRuleMatch = (u: string): string => {
+  const t = u.trim()
+  if (t.startsWith('//')) return 'https:' + t
+  return t
+}
+
+/** 从 patterns / links 字段收集正则字符串列表 */
+const collectPatternStrings = (rec: Record<string, unknown>): string[] => {
+  const pick = (v: unknown): string[] => {
+    if (Array.isArray(v)) {
+      return v.filter((x): x is string => typeof x === 'string').map(s => s.trim()).filter(Boolean)
+    }
+    if (typeof v === 'string' && v.trim()) return [v.trim()]
+    return []
+  }
+  const fromP = pick(rec.patterns)
+  if (fromP.length) return fromP
+  return pick(rec.links)
+}
+
+const recompileProxyRules = () => {
+  proxyRulesError.value = ''
+  const text = proxyRulesJson.value.trim()
+  if (!text) {
+    proxyRulesCompiled.value = []
+    return
+  }
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    proxyRulesError.value = 'JSON 解析失败'
+    proxyRulesCompiled.value = []
+    return
+  }
+  const out: { regex: RegExp; origin: string }[] = []
+
+  // 主格式：[{ "origin": "https://站点", "patterns": ["正则1", "正则2"] }]（links 同义）
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      if (!item || typeof item !== 'object') continue
+      const rec = item as Record<string, unknown>
+      const origin = typeof rec.origin === 'string' ? rec.origin.trim() : ''
+      if (!origin) continue
+
+      let parts = collectPatternStrings(rec)
+      // 兼容旧项：单条 { "origin", "pattern" }
+      if (!parts.length && typeof rec.pattern === 'string' && rec.pattern.trim()) {
+        parts = [rec.pattern.trim()]
+      }
+      if (!parts.length) continue
+
+      const combined = parts.join('|')
+      try {
+        out.push({ regex: compileRegexForUrlMatch(combined), origin })
+      } catch {
+        proxyRulesError.value = `正则无效（Origin: ${origin.slice(0, 40)}）: ${combined.length > 60 ? combined.slice(0, 60) + '…' : combined}`
+        proxyRulesCompiled.value = []
+        return
+      }
+    }
+    proxyRulesCompiled.value = out
+    return
+  }
+
+  // 兼容旧版：{ "https://站点": "正则" } 或 { "https://站点": ["正则1","正则2"] }
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    for (const [originKey, val] of Object.entries(raw as Record<string, unknown>)) {
+      const origin = originKey.trim()
+      if (!origin) continue
+      let pattern = ''
+      if (Array.isArray(val)) {
+        const parts = val
+          .filter((x): x is string => typeof x === 'string')
+          .map(s => s.trim())
+          .filter(Boolean)
+        if (!parts.length) continue
+        pattern = parts.join('|')
+      } else if (typeof val === 'string') {
+        pattern = val.trim()
+      } else {
+        continue
+      }
+      if (!pattern) continue
+      try {
+        out.push({ regex: compileRegexForUrlMatch(pattern), origin })
+      } catch {
+        proxyRulesError.value = `正则无效（Origin: ${origin.slice(0, 40)}）: ${pattern.length > 60 ? pattern.slice(0, 60) + '…' : pattern}`
+        proxyRulesCompiled.value = []
+        return
+      }
+    }
+    proxyRulesCompiled.value = out
+    return
+  }
+
+  proxyRulesError.value = '须为站点数组：[{ "origin": "…", "patterns": ["…"] }]，或旧版 Origin 为键的对象'
+  proxyRulesCompiled.value = []
+}
+
+watch(proxyRulesJson, () => recompileProxyRules(), { immediate: true })
+
+/** 按请求 URL 匹配规则得到 Origin（不依赖「使用跨域代理」开关；手工 Origin 优先） */
+const matchRuleOriginForUrl = (resourceUrl: string): string | null => {
+  if (!resourceUrl.trim()) return null
+  const u = normalizeUrlForRuleMatch(resourceUrl)
+  if (u.startsWith('blob:') || u.startsWith('/api/proxy')) return null
+  for (const { regex, origin } of proxyRulesCompiled.value) {
+    try {
+      if (regex.test(u)) return origin
+    } catch {
+      /* ignore */
+    }
+  }
+  return null
+}
+
+const getEffectiveOriginForRequest = (resourceUrl: string): string => {
+  const manual = requestOrigin.value.trim()
+  if (manual) return manual
+  return matchRuleOriginForUrl(resourceUrl) ?? ''
+}
+
+const getEffectiveRefererForRequest = (resourceUrl: string): string => {
+  const manualR = requestReferer.value.trim()
+  if (manualR) return manualR
+  const o = getEffectiveOriginForRequest(resourceUrl)
   return o ? o.replace(/\/$/, '') + '/' : ''
-})
+}
+
+// 当前主视频 URL 下展示用的 Referer（含规则命中）
+const effectiveReferer = computed(() => getEffectiveRefererForRequest(videoUrl.value || ''))
 const refererHelp = computed(() => {
-  const o = requestOrigin.value.trim()
+  const o = getEffectiveOriginForRequest(videoUrl.value || '')
   const defaultVal = o ? o.replace(/\/$/, '') + '/' : 'Origin + /'
   return '注入请求头 Referer，留空时自动填 ' + defaultVal
 })
@@ -930,8 +1127,8 @@ const getProxyUrl = (url: string): string => {
   // 已经是本地代理 URL，直接透传，避免二次包装
   if (url.includes('/api/proxy?')) return url
 
-  const o = requestOrigin.value.trim()
-  const r = effectiveReferer.value
+  const o = getEffectiveOriginForRequest(url)
+  const r = getEffectiveRefererForRequest(url)
   if (o || r) {
     // Manifest-Only 模式：分片（非 m3u8）直连 CDN，速度与无代理相同
     // 服务端只改写了子 playlist URL，分片 URL 保持原始直链，此处直接透传
@@ -1490,7 +1687,8 @@ const triggerAdaptivePrefetch = (lastFragSn: number) => {
   // 全程代理模式（!manifestOnly）时禁用预取：
   // 预取请求和 hls.js 分片请求会竞争同一个 Nitro 服务线程，反而拖慢实际播放。
   // manifestOnly=true 时分片直连 CDN，不经过服务端，无竞争，可正常预取。
-  if ((requestOrigin.value.trim() || effectiveReferer.value) && !manifestOnly.value) return
+  const master = videoUrl.value || ''
+  if ((getEffectiveOriginForRequest(master) || getEffectiveRefererForRequest(master)) && !manifestOnly.value) return
 
   const video = videoEl.value
   const bufferSecs = video.buffered.length > 0
@@ -2497,6 +2695,7 @@ onMounted(async () => {
     requestOrigin.value = savedState.requestOrigin ?? ''
     requestReferer.value = savedState.requestReferer ?? ''
     manifestOnly.value = savedState.manifestOnly ?? true
+    proxyRulesJson.value = normalizeStoredProxyRulesJson(savedState.proxyRulesJson)
     if (savedState.hlsConfig) {
       hlsConfig.value = { ...hlsConfig.value, ...savedState.hlsConfig }
     }
