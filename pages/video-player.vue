@@ -767,10 +767,10 @@ const isHls = ref(false)
 const isLocalFile = ref(false)
 const errorMessage = ref('')
 const isLoading = ref(false)
-const useProxy = ref(false)
+const useProxy = ref(true)
 const requestOrigin = ref('')    // 自定义 Origin 请求头
 const requestReferer = ref('')   // 自定义 Referer 请求头（空则自动为 origin + /）
-const manifestOnly = ref(true)   // 仅代理 manifest，分片直连 CDN（更快）
+const manifestOnly = ref(false)   // 仅代理 manifest，分片直连 CDN（更快）
 // 实际生效的 Referer：用户填了就用用户的，否则 origin 非空时自动补 /
 const effectiveReferer = computed(() => {
   const r = requestReferer.value.trim()
