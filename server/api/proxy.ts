@@ -7,26 +7,29 @@ import { Readable } from 'node:stream'
  *
  * 参数：
  *   url     目标地址（必填）
- *   origin  注入的 Origin 头（可选）
- *   referer 注入的 Referer 头（可选）
+ *   origin  注入的 Origin 头（可选，noref=1 时忽略）
+ *   referer 注入的 Referer 头（可选，noref=1 时忽略）
+ *   noref=1 伪装下载器：不发送 Origin/Referer，部分 CDN（如 xhscdn）对此类请求放行
  *
  * 对 m3u8 响应做 URL 改写，让 hls.js 解析到的分片 URL 也经过本代理。
  */
 export default defineEventHandler(async (event) => {
   const query = getQuery(event)
   const targetUrl = (query.url as string)?.trim()
-  const origin    = (query.origin  as string)?.trim() ?? ''
-  const referer   = (query.referer as string)?.trim() ?? ''
+  const noref = query.noref === '1'
+  const origin = noref ? '' : ((query.origin as string)?.trim() ?? '')
+  const referer = noref ? '' : ((query.referer as string)?.trim() ?? '')
 
   if (!targetUrl || (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://'))) {
     throw createError({ statusCode: 400, statusMessage: 'Missing or invalid url parameter' })
   }
 
-  // 构建请求头
+  // 构建请求头（noref 时故意不添加 Origin/Referer，模拟 N_m3u8DL-RE 等下载器）
   const reqHeaders: Record<string, string> = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+    Accept: '*/*',
   }
-  if (origin)  reqHeaders['Origin']  = origin
+  if (origin) reqHeaders['Origin'] = origin
   if (referer) reqHeaders['Referer'] = referer
 
   // 透传 Range（支持视频 seek / MP4 拖拽）
@@ -50,10 +53,8 @@ export default defineEventHandler(async (event) => {
   ) {
     const text = await response.text()
     const baseUrl = targetUrl.replace(/\/[^/?#]*(\?.*)?$/, '/')
-    // noseg=1：只改写子 playlist(m3u8) 的 URL，分片 URL 保持原始直链
-    // 让浏览器直连 CDN 取分片，速度与无代理一致
     const noseg = query.noseg === '1'
-    const rewritten = rewriteM3u8(text, baseUrl, origin, referer, noseg)
+    const rewritten = rewriteM3u8(text, baseUrl, origin, referer, noseg, noref)
 
     setResponseHeader(event, 'Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8')
     setResponseHeader(event, 'Access-Control-Allow-Origin', '*')
@@ -81,27 +82,32 @@ export default defineEventHandler(async (event) => {
 
 // ── 工具函数 ──────────────────────────────────────────────────
 
-function rewriteM3u8(content: string, baseUrl: string, origin: string, referer: string, noseg: boolean): string {
+function rewriteM3u8(
+  content: string,
+  baseUrl: string,
+  origin: string,
+  referer: string,
+  noseg: boolean,
+  noref: boolean,
+): string {
   return content
     .split('\n')
     .map(line => {
       const trimmed = line.trim()
       if (!trimmed) return line
 
-      // 改写标签内的 URI="..."（EXT-X-MAP / EXT-X-KEY / EXT-X-MEDIA 等）
       if (trimmed.startsWith('#')) {
         return line.replace(/URI="([^"]+)"/g, (_, uri) => {
           const abs = resolveUrl(baseUrl, uri)
-          // noseg 模式：只代理子 playlist，跳过初始化分片（.mp4/.m4s）
           if (noseg && !abs.includes('.m3u8')) return `URI="${abs}"`
-          return `URI="${buildProxyUrl(abs, origin, referer)}"`
+          // 子 playlist 也传递 noseg，避免改写其内部的分片 URL
+          return `URI="${buildProxyUrl(abs, origin, referer, noref, noseg)}"`
         })
       }
 
       const abs = resolveUrl(baseUrl, trimmed)
-      // noseg 模式：分片直链（.ts / .m4s / 无扩展），只代理子 playlist
       if (noseg && !abs.includes('.m3u8')) return abs
-      return buildProxyUrl(abs, origin, referer)
+      return buildProxyUrl(abs, origin, referer, noref, noseg)
     })
     .join('\n')
 }
@@ -111,9 +117,14 @@ function resolveUrl(base: string, relative: string): string {
   try { return new URL(relative, base).href } catch { return relative }
 }
 
-function buildProxyUrl(url: string, origin: string, referer: string): string {
+function buildProxyUrl(url: string, origin: string, referer: string, noref: boolean, noseg?: boolean): string {
   const params = new URLSearchParams({ url })
-  if (origin)  params.set('origin',  origin)
-  if (referer) params.set('referer', referer)
+  if (noref) {
+    params.set('noref', '1')
+  } else {
+    if (origin) params.set('origin', origin)
+    if (referer) params.set('referer', referer)
+  }
+  if (noseg) params.set('noseg', '1')
   return '/api/proxy?' + params.toString()
 }

@@ -68,6 +68,16 @@
               不勾选 = 全程代理，更兼容但较慢
             </p>
           </UFormGroup>
+          <UFormGroup label=" " class="pt-1">
+            <UCheckbox
+              v-model="disguiseAsDownloader"
+              label="伪装下载器（不发送 Origin/Referer）"
+              @change="saveState"
+            />
+            <p class="text-xs text-gray-400 mt-1">
+              部分 CDN（如 xhscdn）对无 Origin/Referer 的请求放行，403 时可尝试
+            </p>
+          </UFormGroup>
         </div>
         
         <!-- 片头片尾跳过设置 -->
@@ -705,6 +715,7 @@ interface SavedState {
   requestOrigin: string
   requestReferer: string
   manifestOnly: boolean
+  disguiseAsDownloader: boolean
   hlsConfig: typeof hlsConfig.value
 }
 
@@ -738,6 +749,7 @@ const saveState = () => {
       requestOrigin: requestOrigin.value,
       requestReferer: requestReferer.value,
       manifestOnly: manifestOnly.value,
+      disguiseAsDownloader: disguiseAsDownloader.value,
       hlsConfig: { ...hlsConfig.value }
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
@@ -771,6 +783,7 @@ const useProxy = ref(false)
 const requestOrigin = ref('')    // 自定义 Origin 请求头
 const requestReferer = ref('')   // 自定义 Referer 请求头（空则自动为 origin + /）
 const manifestOnly = ref(true)   // 仅代理 manifest，分片直连 CDN（更快）
+const disguiseAsDownloader = ref(true)  // 不发送 Origin/Referer，模拟 N_m3u8DL-RE 等下载器
 // 实际生效的 Referer：用户填了就用用户的，否则 origin 非空时自动补 /
 const effectiveReferer = computed(() => {
   const r = requestReferer.value.trim()
@@ -927,24 +940,26 @@ const isHlsUrl = (url: string): boolean => {
 // Origin/Referer 是浏览器禁止 JS 修改的 forbidden headers，
 // 必须走服务端代理（/api/proxy）注入，fetch/XHR 直接设置会被浏览器忽略。
 const getProxyUrl = (url: string): string => {
-  // 已经是本地代理 URL，直接透传，避免二次包装
   if (url.includes('/api/proxy?')) return url
+
+  // 伪装下载器：不发送 Origin/Referer，全程走代理（禁用 noseg）
+  if (disguiseAsDownloader.value) {
+    const params = new URLSearchParams({ url, noref: '1' })
+    return '/api/proxy?' + params.toString()
+  }
 
   const o = requestOrigin.value.trim()
   const r = effectiveReferer.value
   if (o || r) {
-    // Manifest-Only 模式：分片（非 m3u8）直连 CDN，速度与无代理相同
-    // 服务端只改写了子 playlist URL，分片 URL 保持原始直链，此处直接透传
     if (manifestOnly.value && !isHlsUrl(url)) return url
 
     const params = new URLSearchParams({ url })
-    if (o) params.set('origin',  o)
+    if (o) params.set('origin', o)
     if (r) params.set('referer', r)
-    if (manifestOnly.value) params.set('noseg', '1') // 告知服务端不改写分片 URL
+    if (manifestOnly.value) params.set('noseg', '1')
     return '/api/proxy?' + params.toString()
   }
 
-  // 普通 CORS 代理
   if (useProxy.value) return corsProxies[0] + encodeURIComponent(url)
   return url
 }
@@ -1490,6 +1505,7 @@ const triggerAdaptivePrefetch = (lastFragSn: number) => {
   // 全程代理模式（!manifestOnly）时禁用预取：
   // 预取请求和 hls.js 分片请求会竞争同一个 Nitro 服务线程，反而拖慢实际播放。
   // manifestOnly=true 时分片直连 CDN，不经过服务端，无竞争，可正常预取。
+  if (disguiseAsDownloader.value) return
   if ((requestOrigin.value.trim() || effectiveReferer.value) && !manifestOnly.value) return
 
   const video = videoEl.value
@@ -2497,6 +2513,7 @@ onMounted(async () => {
     requestOrigin.value = savedState.requestOrigin ?? ''
     requestReferer.value = savedState.requestReferer ?? ''
     manifestOnly.value = savedState.manifestOnly ?? true
+    disguiseAsDownloader.value = savedState.disguiseAsDownloader ?? false
     if (savedState.hlsConfig) {
       hlsConfig.value = { ...hlsConfig.value, ...savedState.hlsConfig }
     }
