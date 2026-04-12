@@ -866,9 +866,9 @@ let hls: HlsType | null = null
 const hlsStats = ref<{ buffered: number; level: string } | null>(null)
 const hlsConfig = ref({
   // 缓冲时间设置（精简配置）
-  maxBufferLength: 30,        // 预加载时长（秒）
-  maxMaxBufferLength: 60,     // 最大缓冲时长（秒）
-  backBufferLength: 30,       // 后台缓冲（秒）
+  maxBufferLength: 3600,        // 预加载时长（秒）
+  maxMaxBufferLength: 3600,     // 最大缓冲时长（秒）
+  backBufferLength: 3600,       // 后台缓冲（秒）
   // 内存设置
   maxBufferSizeMB: 600,        // 缓冲大小（MB）
   // 下载速度设置
@@ -1381,13 +1381,10 @@ const clearPlaylist = () => {
 
 // 根据缓冲健康度决定并发预取数：缓冲越少 → 线程越多
 const getAdaptivePrefetchCount = (bufferSecs: number): number => {
-  if (bufferSecs < 3) return 6  // 正常：2 线程
-  if (bufferSecs < 10) return 1  // 正常：2 线程
+  if (bufferSecs < 6) return 1  // 正常：2 线程
   if (bufferSecs < 35) return 4  // 正常：1 线程
-  if (bufferSecs < 60) return 1  // 正常：1 线程
-
-
-  return 0                        // 充足：暂停预取，节省带宽
+  if (bufferSecs < 60) return 2  // 正常：1 线程
+  return 1                        // 充足：暂停预取，节省带宽
 }
 
 // 创建自定义 HLS 分片加载器（fLoader）
