@@ -1,4 +1,17 @@
 import { Readable } from 'node:stream'
+import { Agent, fetch as undiciFetch } from 'undici'
+
+// 兼容老旧/中国 CDN 的 TLS 设置：放宽证书校验，强制 IPv4，延长超时。
+// 国内站（如 jisuzyv 这类聚合站）经常因为 cert chain / SNI / cipher 不兼容
+// 让 Node 默认 fetch 报 "fetch failed"。
+const tolerantAgent = new Agent({
+  connect: {
+    rejectUnauthorized: false,
+    timeout: 15000,
+  },
+  bodyTimeout: 30000,
+  headersTimeout: 30000,
+})
 
 /**
  * 服务端视频代理
@@ -38,9 +51,17 @@ export default defineEventHandler(async (event) => {
 
   let response: Response
   try {
-    response = await fetch(targetUrl, { headers: reqHeaders })
+    response = await undiciFetch(targetUrl, {
+      headers: reqHeaders,
+      dispatcher: tolerantAgent,
+    }) as unknown as Response
   } catch (e) {
-    throw createError({ statusCode: 502, statusMessage: 'Proxy fetch failed: ' + (e as Error).message })
+    // undici 把真实原因放在 cause 上（如 ECONNRESET / EPROTO / UND_ERR_SOCKET）
+    const err = e as Error & { cause?: { code?: string; message?: string } }
+    const cause = err.cause?.code || err.cause?.message || ''
+    const detail = cause ? `${err.message} (${cause})` : err.message
+    console.error('[proxy] fetch failed:', targetUrl, '|', detail, e)
+    throw createError({ statusCode: 502, statusMessage: 'Proxy fetch failed: ' + detail })
   }
 
   const contentType = response.headers.get('content-type') ?? ''

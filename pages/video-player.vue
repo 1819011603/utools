@@ -1067,38 +1067,116 @@ const pickAudioPlaylistUrl = (manifest: any, baseUrl: string, preferredGroupId?:
   return resolveUrl(baseUrl, picked.uri)
 }
 
-// 递归拿到媒体播放列表分片（video 或 audio）
-const getM3u8MediaSegments = async (m3u8Url: string, signal?: AbortSignal): Promise<string[]> => {
-  const { manifest, baseUrl } = await fetchM3u8Manifest(m3u8Url, signal)
-  const best = pickBestVariant(manifest)
-  if (best?.uri) {
-    return getM3u8MediaSegments(resolveUrl(baseUrl, best.uri), signal)
-  }
-  return extractMediaSegmentUrls(manifest, baseUrl)
+// 分片元数据（含加密信息）
+interface HlsSegment {
+  url: string
+  sn: number             // 媒体序列号，用于推导 AES IV
+  keyUri?: string        // 密钥地址（undefined = 未加密）
+  keyIv?: Uint8Array | null  // 显式 IV（null = 用 sn 推导）
 }
 
-// 下载计划：同时解析视频轨和独立音频轨（若存在）
-const getM3u8DownloadPlan = async (m3u8Url: string, signal?: AbortSignal): Promise<{ videoSegments: string[]; audioSegments: string[] }> => {
+// 提取分片列表（含加密元数据）
+const extractMediaSegmentsWithMeta = (manifest: any, baseUrl: string): HlsSegment[] => {
+  const segments = manifest.segments as Array<any> | undefined
+  if (!Array.isArray(segments) || segments.length === 0) {
+    throw new Error('M3U8 解析失败，未找到分片')
+  }
+  const mediaSequence: number = manifest.mediaSequence ?? 0
+  const result: HlsSegment[] = []
+  const addedMap = new Set<string>()
+
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i]
+    const sn = mediaSequence + i
+    const mapUri = seg?.map?.uri
+    if (mapUri) {
+      const mapUrl = resolveUrl(baseUrl, mapUri)
+      if (!addedMap.has(mapUrl)) {
+        result.push({ url: mapUrl, sn: 0 })
+        addedMap.add(mapUrl)
+      }
+    }
+    if (!seg?.uri) continue
+
+    const isEncrypted = seg.key?.method === 'AES-128'
+    let keyIv: Uint8Array | null = null
+    if (isEncrypted && seg.key?.iv) {
+      // m3u8-parser 可能返回数组或十六进制字符串
+      const ivSrc = seg.key.iv
+      const ivHex = Array.isArray(ivSrc)
+        ? (ivSrc as number[]).map(b => b.toString(16).padStart(2, '0')).join('')
+        : String(ivSrc).replace(/^0x/i, '').padStart(32, '0')
+      keyIv = new Uint8Array(ivHex.match(/.{2}/g)!.map((b: string) => parseInt(b, 16)))
+    }
+
+    result.push({
+      url: resolveUrl(baseUrl, seg.uri),
+      sn,
+      keyUri: isEncrypted && seg.key?.uri ? resolveUrl(baseUrl, seg.key.uri) : undefined,
+      keyIv: isEncrypted ? keyIv : null,
+    })
+  }
+  return result
+}
+
+// 递归解析到媒体播放列表，返回带加密信息的分片列表
+const getM3u8SegmentsWithMeta = async (m3u8Url: string, signal?: AbortSignal): Promise<HlsSegment[]> => {
   const { manifest, baseUrl } = await fetchM3u8Manifest(m3u8Url, signal)
   const best = pickBestVariant(manifest)
+  if (best?.uri) return getM3u8SegmentsWithMeta(resolveUrl(baseUrl, best.uri), signal)
+  return extractMediaSegmentsWithMeta(manifest, baseUrl)
+}
 
-  // 直接是媒体列表（通常音视频复用）
+// 下载计划：同时解析视频轨和独立音频轨（若存在），携带加密元数据
+const getM3u8DownloadPlan = async (
+  m3u8Url: string,
+  signal?: AbortSignal
+): Promise<{ videoSegments: HlsSegment[]; audioSegments: HlsSegment[] }> => {
+  const { manifest, baseUrl } = await fetchM3u8Manifest(m3u8Url, signal)
+  const best = pickBestVariant(manifest)
   if (!best?.uri) {
-    return {
-      videoSegments: extractMediaSegmentUrls(manifest, baseUrl),
-      audioSegments: []
-    }
+    return { videoSegments: extractMediaSegmentsWithMeta(manifest, baseUrl), audioSegments: [] }
   }
-
   const videoPlaylistUrl = resolveUrl(baseUrl, best.uri)
   const audioPlaylistUrl = pickAudioPlaylistUrl(manifest, baseUrl, best?.attributes?.AUDIO)
-
   const [videoSegments, audioSegments] = await Promise.all([
-    getM3u8MediaSegments(videoPlaylistUrl, signal),
-    audioPlaylistUrl ? getM3u8MediaSegments(audioPlaylistUrl, signal) : Promise.resolve([])
+    getM3u8SegmentsWithMeta(videoPlaylistUrl, signal),
+    audioPlaylistUrl ? getM3u8SegmentsWithMeta(audioPlaylistUrl, signal) : Promise.resolve([])
   ])
-
   return { videoSegments, audioSegments }
+}
+
+// AES-128 密钥缓存（每次下载任务内复用）
+const hlsKeyCache = new Map<string, CryptoKey>()
+
+const fetchHlsKey = async (keyUri: string, signal?: AbortSignal): Promise<CryptoKey> => {
+  if (hlsKeyCache.has(keyUri)) return hlsKeyCache.get(keyUri)!
+  const res = await fetch(getProxyUrl(keyUri), { signal })
+  if (!res.ok) throw new Error(`获取解密密钥失败: ${res.status}`)
+  const raw = await res.arrayBuffer()
+  const key = await crypto.subtle.importKey('raw', raw, { name: 'AES-CBC' }, false, ['decrypt'])
+  hlsKeyCache.set(keyUri, key)
+  return key
+}
+
+// AES-128-CBC 解密单个分片（未加密直接返回原数据）
+const decryptHlsSegment = async (data: ArrayBuffer, seg: HlsSegment, signal?: AbortSignal): Promise<ArrayBuffer> => {
+  if (!seg.keyUri) return data
+  const key = await fetchHlsKey(seg.keyUri, signal)
+  let iv: ArrayBuffer
+  if (seg.keyIv && seg.keyIv.byteLength === 16) {
+    iv = seg.keyIv.buffer.slice(seg.keyIv.byteOffset, seg.keyIv.byteOffset + 16)
+  } else {
+    // 无显式 IV：用序列号填充 16 字节大端整数
+    const ivBytes = new Uint8Array(16)
+    const sn = seg.sn
+    ivBytes[12] = (sn >>> 24) & 0xff
+    ivBytes[13] = (sn >>> 16) & 0xff
+    ivBytes[14] = (sn >>> 8) & 0xff
+    ivBytes[15] = sn & 0xff
+    iv = ivBytes.buffer
+  }
+  return crypto.subtle.decrypt({ name: 'AES-CBC', iv }, key, data)
 }
 
 // 触发浏览器下载
@@ -1232,9 +1310,11 @@ const downloadVideo = async (targetUrl?: string) => {
       const CONCURRENCY = 6
       let completed = 0
       let pointer = 0
-      const tasks: Array<{ kind: 'video' | 'audio'; idx: number; url: string }> = [
-        ...videoSegments.map((url, idx) => ({ kind: 'video' as const, idx, url })),
-        ...audioSegments.map((url, idx) => ({ kind: 'audio' as const, idx, url }))
+      hlsKeyCache.clear()
+      type DownloadTask = { kind: 'video' | 'audio'; idx: number } & HlsSegment
+      const tasks: DownloadTask[] = [
+        ...videoSegments.map((seg, idx) => ({ kind: 'video' as const, idx, ...seg })),
+        ...audioSegments.map((seg, idx) => ({ kind: 'audio' as const, idx, ...seg }))
       ]
 
       const runWorker = async () => {
@@ -1245,7 +1325,9 @@ const downloadVideo = async (targetUrl?: string) => {
           if (!res.ok) {
             throw new Error(`下载分片失败: ${res.status}`)
           }
-          const chunk = new Uint8Array(await res.arrayBuffer())
+          const raw = await res.arrayBuffer()
+          const decrypted = await decryptHlsSegment(raw, task, downloadAbortController?.signal)
+          const chunk = new Uint8Array(decrypted)
           if (task.kind === 'video') {
             videoChunks[task.idx] = chunk
           } else {
@@ -1258,6 +1340,7 @@ const downloadVideo = async (targetUrl?: string) => {
 
       const workers = Array.from({ length: Math.min(CONCURRENCY, total) }, () => runWorker())
       await Promise.all(workers)
+      hlsKeyCache.clear()
 
       downloadProgress.value = 92
       const mp4Blob = await mergeSegmentsToMp4(videoChunks, audioChunks)
