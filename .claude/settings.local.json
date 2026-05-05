@@ -1,8 +1,26 @@
 {
   "permissions": {
     "allow": [
-      "Bash(node:*)",
-      "Bash(python3 << 'PYEOF'\nwith open\\('/Users/gaotu/curSkillDemo/utools/pages/json-format.vue', 'r'\\) as f:\n    content = f.read\\(\\)\n\nstart_marker = 'const autoSmartParse = \\(\\) => {'\nend_marker = 'const addCandidate = '\n\nstart_idx = content.find\\(start_marker\\)\nend_idx = content.find\\(end_marker\\)\n\nnew_func = '''const autoSmartParse = \\(\\) => {\n  error.value = ''\n  candidateJsons.value = []\n  if \\(!input.value.trim\\(\\)\\) return\n\n  const text = input.value.trim\\(\\)\n\n  // 尝试直接解析整个文本\n  try {\n    let obj = JSON.parse\\(text\\)\n    if \\(unwrapOuterBrackets.value\\) {\n      obj = tryUnwrap\\(obj\\)\n    }\n    input.value = JSON.stringify\\(obj, null, Number\\(indentSize.value\\)\\)\n    parsed.value = obj\n    expandedPaths.value = new Set\\(collectPaths\\(obj\\)\\)\n    deletedPaths.value = new Set\\(\\)\n    deletedStack.value = []\n    currentExpandLevel.value = maxDepth.value\n    saveToHistory\\(\\)\n    return\n  } catch {}\n\n  // 不是有效 JSON，尝试从文本中提取所有 JSON 片段\n  const candidates: CandidateJson[] = []\n  extractAllJsonFromText\\(text\\).forEach\\(jsonStr => addCandidate\\(candidates, jsonStr\\)\\)\n  candidates.sort\\(\\(a, b\\) => b.json.length - a.json.length\\)\n  if \\(candidates.length > 20\\) candidates.splice\\(20\\)\n\n  if \\(candidates.length === 0\\) {\n    parseJson\\(\\)\n  } else {\n    candidateJsons.value = candidates\n  }\n}\n\n'''\n\nnew_content = content[:start_idx] + new_func + content[end_idx:]\n\nwith open\\('/Users/gaotu/curSkillDemo/utools/pages/json-format.vue', 'w'\\) as f:\n    f.write\\(new_content\\)\n\nprint\\(\"Done. New file length:\", len\\(new_content\\)\\)\nPYEOF)"
+      "Bash(*)",
+      "Read(*)",
+      "Write(*)",
+      "Edit(*)",
+      "Glob(*)",
+      "Grep(*)",
+      "WebSearch",
+      "WebFetch(*)"
+    ],
+    "ask": [
+      "Bash(rm *)",
+      "Bash(rm -rf *)",
+      "Bash(del *)",
+      "Bash(rmdir *)",
+      "Bash(rd *)",
+      "Bash(Remove-Item *)",
+      "Bash(git clean *)",
+      "Bash(git rm *)",
+      "Bash(find * -delete)",
+      "Bash(trash *)"
     ]
   }
 }

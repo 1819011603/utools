@@ -283,9 +283,8 @@
             @click.stop
           >
             <!-- 进度条 -->
-            <div 
+            <div
               class="relative h-1.5 bg-white/30 rounded-full cursor-pointer group/progress mb-3"
-              @click="seekTo"
               @mousedown="startSeek"
               @mousemove="updateHoverTime"
               @mouseleave="hoverTime = null"
@@ -1381,10 +1380,10 @@ const clearPlaylist = () => {
 
 // 根据缓冲健康度决定并发预取数：缓冲越少 → 线程越多
 const getAdaptivePrefetchCount = (bufferSecs: number): number => {
-  if (bufferSecs < 6) return 6  // 正常：2 线程
-  if (bufferSecs < 35) return 6  // 正常：1 线程
-  if (bufferSecs < 360) return 4  // 正常：1 线程
-  return 2                        // 充足：暂停预取，节省带宽
+  if (bufferSecs < 5)  return 6  // 紧张：全速预取
+  if (bufferSecs < 20) return 4  // 偏低：加速预取
+  if (bufferSecs < 60) return 2  // 充足：正常预取
+  return 1                        // 富余：慢速预取，节省带宽
 }
 
 // 创建自定义 HLS 分片加载器（fLoader）
@@ -1862,16 +1861,23 @@ const loadHlsVideo = async (url: string) => {
   })
 }
 
+// 计算当前播放位置前方的缓冲秒数
+const getAheadBuffered = (video: HTMLVideoElement): number => {
+  const ct = video.currentTime
+  for (let i = 0; i < video.buffered.length; i++) {
+    if (video.buffered.start(i) <= ct + 0.1 && ct <= video.buffered.end(i)) {
+      return video.buffered.end(i) - ct
+    }
+  }
+  return 0
+}
+
 // 更新 HLS 统计信息
 const updateHlsStats = () => {
   if (!hls || !videoEl.value) return
-  
+
   const video = videoEl.value
-  let buffered = 0
-  
-  if (video.buffered.length > 0) {
-    buffered = video.buffered.end(video.buffered.length - 1) - video.currentTime
-  }
+  const buffered = getAheadBuffered(video)
   
   const currentLevel = hls.currentLevel
   const levels = hls.levels
@@ -2014,60 +2020,31 @@ const skip = (seconds: number) => {
   videoEl.value.currentTime = Math.max(0, Math.min(duration.value, videoEl.value.currentTime + seconds))
 }
 
-// 进度条点击
-const seekTo = (e: MouseEvent) => {
-  if (!progressBar.value || !videoEl.value) return
-  
-  const rect = progressBar.value.getBoundingClientRect()
-  const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-  const targetTime = percent * duration.value
-  
-  console.log('Seek to:', targetTime)
-  isBuffering.value = true
-  videoEl.value.currentTime = targetTime
-}
-
-// 拖动前的播放状态
-let wasPlayingBeforeSeek = false
-
-// 开始拖动进度条
+// 开始拖动进度条（兼容单击和拖拽，避免双重 seek）
 const startSeek = (e: MouseEvent) => {
+  if (!progressBar.value || !videoEl.value || !duration.value) return
+
   isSeeking.value = true
-  wasPlayingBeforeSeek = videoEl.value ? !videoEl.value.paused : false
-  
-  // 拖动时暂停播放（避免 HLS 缓冲冲突）
-  if (wasPlayingBeforeSeek && videoEl.value) {
-    videoEl.value.pause()
-  }
-  
   updateSeekPreview(e)
-  
+
   const onMove = (e: MouseEvent) => {
     updateSeekPreview(e)
   }
-  
+
   const onUp = (e: MouseEvent) => {
     isSeeking.value = false
     seekPreviewTime.value = null
-    
-    // 执行 seek
+
     if (progressBar.value && videoEl.value) {
       const rect = progressBar.value.getBoundingClientRect()
       const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
       videoEl.value.currentTime = percent * duration.value
-      
-      // 恢复播放
-      if (wasPlayingBeforeSeek) {
-        setTimeout(() => {
-          videoEl.value?.play().catch(() => {})
-        }, 100)
-      }
     }
-    
+
     document.removeEventListener('mousemove', onMove)
     document.removeEventListener('mouseup', onUp)
   }
-  
+
   document.addEventListener('mousemove', onMove)
   document.addEventListener('mouseup', onUp)
 }
@@ -2169,9 +2146,10 @@ const onTimeUpdate = () => {
   if (!videoEl.value) return
   currentTime.value = videoEl.value.currentTime
   
-  // 更新缓冲进度
-  if (videoEl.value.buffered.length > 0) {
-    bufferedPercent.value = (videoEl.value.buffered.end(videoEl.value.buffered.length - 1) / duration.value) * 100
+  // 更新缓冲进度（取包含当前播放位置的区间末尾）
+  if (videoEl.value.buffered.length > 0 && duration.value > 0) {
+    const aheadEnd = videoEl.value.currentTime + getAheadBuffered(videoEl.value)
+    bufferedPercent.value = (aheadEnd / duration.value) * 100
   }
   
   // 自动跳过片尾
@@ -2340,23 +2318,33 @@ const onCanPlayThrough = () => {
   isBuffering.value = false
 }
 
-// 开始 seek
+let seekBufferingTimer: ReturnType<typeof setTimeout> | null = null
+
+// 开始 seek：延迟显示 loading，避免已缓冲区域的快速 seek 闪烁转圈
 const onSeeking = () => {
-  console.log('开始跳转...')
-  isBuffering.value = true
+  if (seekBufferingTimer) clearTimeout(seekBufferingTimer)
+  seekBufferingTimer = setTimeout(() => {
+    seekBufferingTimer = null
+    isBuffering.value = true
+  }, 150)
 }
 
 // seek 完成
 const onSeeked = () => {
-  console.log('跳转完成')
-  // seek 后播放位置改变，预取的分片大概率无效，直接清空节省内存
-  segPrefetchCache.clear()
-  segPrefetching.clear()
-  prefetchInfo.value.cached = 0
-  prefetchInfo.value.pending = 0
-  setTimeout(() => {
-    isBuffering.value = false
-  }, 200)
+  // 取消还未触发的 buffering 显示（说明 seek 在缓冲区内完成，无需 loading）
+  if (seekBufferingTimer) {
+    clearTimeout(seekBufferingTimer)
+    seekBufferingTimer = null
+  }
+  // 只有 seek 到缓冲区外才清空预取缓存；缓冲区内完成则保留
+  const inBuffer = videoEl.value ? getAheadBuffered(videoEl.value) > 0 : false
+  if (!inBuffer) {
+    segPrefetchCache.clear()
+    segPrefetching.clear()
+    prefetchInfo.value.cached = 0
+    prefetchInfo.value.pending = 0
+  }
+  isBuffering.value = false
 }
 
 // 开始播放
@@ -2564,6 +2552,7 @@ onUnmounted(() => {
   if (playIconTimer) clearTimeout(playIconTimer)
   if (progressSaveTimer) clearTimeout(progressSaveTimer)
   if (delayedPlayTimer) clearTimeout(delayedPlayTimer)
+  if (seekBufferingTimer) clearTimeout(seekBufferingTimer)
   
   // 清理本地文件 URL
   localFileUrls.forEach(url => URL.revokeObjectURL(url))
