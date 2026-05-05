@@ -1381,9 +1381,9 @@ const clearPlaylist = () => {
 // 根据缓冲健康度决定并发预取数：缓冲越少 → 线程越多
 const getAdaptivePrefetchCount = (bufferSecs: number): number => {
   if (bufferSecs < 5)  return 6  // 紧张：全速预取
-  if (bufferSecs < 20) return 4  // 偏低：加速预取
-  if (bufferSecs < 60) return 2  // 充足：正常预取
-  return 1                        // 富余：慢速预取，节省带宽
+  if (bufferSecs < 20) return 5  // 偏低：加速预取
+  if (bufferSecs < 60) return 4  // 充足：正常预取
+  return 2                        // 富余：慢速预取，节省带宽
 }
 
 // 创建自定义 HLS 分片加载器（fLoader）
