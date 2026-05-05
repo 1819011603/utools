@@ -1,20 +1,6 @@
-import { Readable } from 'node:stream'
-import { Agent, fetch as undiciFetch } from 'undici'
-
-// 兼容老旧/中国 CDN 的 TLS 设置：放宽证书校验，强制 IPv4，延长超时。
-// 国内站（如 jisuzyv 这类聚合站）经常因为 cert chain / SNI / cipher 不兼容
-// 让 Node 默认 fetch 报 "fetch failed"。
-const tolerantAgent = new Agent({
-  connect: {
-    rejectUnauthorized: false,
-    timeout: 15000,
-  },
-  bodyTimeout: 30000,
-  headersTimeout: 30000,
-})
-
 /**
- * 服务端视频代理
+ * 服务端视频代理（Node + Cloudflare Workers 双环境兼容）
+ *
  * 用途：浏览器禁止 JS 设置 Origin / Referer（forbidden headers），
  *       必须通过服务端请求来注入这两个头。
  *
@@ -22,10 +8,42 @@ const tolerantAgent = new Agent({
  *   url     目标地址（必填）
  *   origin  注入的 Origin 头（可选，noref=1 时忽略）
  *   referer 注入的 Referer 头（可选，noref=1 时忽略）
- *   noref=1 伪装下载器：不发送 Origin/Referer，部分 CDN（如 xhscdn）对此类请求放行
+ *   noref=1 伪装下载器：不发送 Origin/Referer
+ *   noseg=1 m3u8 内的分片 URL 不改写（让分片直连 CDN）
  *
- * 对 m3u8 响应做 URL 改写，让 hls.js 解析到的分片 URL 也经过本代理。
+ * 实现细节：
+ *   - 不静态 import 任何 node:* 或 Node 专属包，避免 CF 构建/运行报错
+ *   - 在 Node 上动态加载 undici Agent，放宽 TLS 校验（兼容老旧/中国 CDN）
+ *   - 在 CF/Bun/Deno 上自动降级走原生 fetch
+ *   - 二进制响应通过 Web ReadableStream（response.body）流式转发
  */
+
+// 动态获取 undici Dispatcher（仅在 Node 可用）。
+// 用变量包裹 specifier + @vite-ignore 防止 Vite/Nitro 在 CF 构建时静态解析。
+let _dispatcher: any = undefined
+let _dispatcherChecked = false
+async function getNodeDispatcher(): Promise<any> {
+  if (_dispatcherChecked) return _dispatcher
+  _dispatcherChecked = true
+  // CF Workers 没有 process；只在 Node 进程里尝试加载 undici
+  // @ts-ignore globalThis.process 在 CF 上不存在
+  if (typeof globalThis.process === 'undefined' || !globalThis.process?.versions?.node) return undefined
+  try {
+    const spec = 'undici'
+    const undici = await import(/* @vite-ignore */ spec)
+    if (undici?.Agent) {
+      _dispatcher = new undici.Agent({
+        connect: { rejectUnauthorized: false, timeout: 15000 },
+        bodyTimeout: 30000,
+        headersTimeout: 30000,
+      })
+    }
+  } catch {
+    // 加载失败就降级为原生 fetch
+  }
+  return _dispatcher
+}
+
 export default defineEventHandler(async (event) => {
   const query = getQuery(event)
   const targetUrl = (query.url as string)?.trim()
@@ -37,7 +55,6 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 400, statusMessage: 'Missing or invalid url parameter' })
   }
 
-  // 构建请求头（noref 时故意不添加 Origin/Referer，模拟 N_m3u8DL-RE 等下载器）
   const reqHeaders: Record<string, string> = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
     Accept: '*/*',
@@ -49,18 +66,18 @@ export default defineEventHandler(async (event) => {
   const rangeHeader = getRequestHeader(event, 'range')
   if (rangeHeader) reqHeaders['Range'] = rangeHeader
 
+  const dispatcher = await getNodeDispatcher()
+  const fetchOpts: RequestInit & { dispatcher?: any } = { headers: reqHeaders }
+  if (dispatcher) fetchOpts.dispatcher = dispatcher
+
   let response: Response
   try {
-    response = await undiciFetch(targetUrl, {
-      headers: reqHeaders,
-      dispatcher: tolerantAgent,
-    }) as unknown as Response
+    response = await fetch(targetUrl, fetchOpts as RequestInit)
   } catch (e) {
-    // undici 把真实原因放在 cause 上（如 ECONNRESET / EPROTO / UND_ERR_SOCKET）
     const err = e as Error & { cause?: { code?: string; message?: string } }
     const cause = err.cause?.code || err.cause?.message || ''
     const detail = cause ? `${err.message} (${cause})` : err.message
-    console.error('[proxy] fetch failed:', targetUrl, '|', detail, e)
+    console.error('[proxy] fetch failed:', targetUrl, '|', detail)
     throw createError({ statusCode: 502, statusMessage: 'Proxy fetch failed: ' + detail })
   }
 
@@ -82,23 +99,20 @@ export default defineEventHandler(async (event) => {
     return rewritten
   }
 
-  // ── 二进制（分片 / MP4）：流式转发 ──
-  // 关键：用 Readable.fromWeb() 把 Web ReadableStream 转成 Node.js Readable，
-  // 再交给 sendStream 流式写入响应，避免等待整个分片下载完才开始发送。
-  // CDN → Node.js → 浏览器 三段同时进行，而非先缓冲再转发。
+  // ── 二进制（分片 / MP4）：透传 Web ReadableStream ──
   const contentLength = response.headers.get('content-length')
-  const contentRange  = response.headers.get('content-range')
-  const acceptRanges  = response.headers.get('accept-ranges')
+  const contentRange = response.headers.get('content-range')
+  const acceptRanges = response.headers.get('accept-ranges')
 
-  if (contentType)    setResponseHeader(event, 'Content-Type', contentType)
-  if (contentLength)  setResponseHeader(event, 'Content-Length', contentLength)
-  if (contentRange)   setResponseHeader(event, 'Content-Range', contentRange)
-  if (acceptRanges)   setResponseHeader(event, 'Accept-Ranges', acceptRanges)
+  if (contentType) setResponseHeader(event, 'Content-Type', contentType)
+  if (contentLength) setResponseHeader(event, 'Content-Length', contentLength)
+  if (contentRange) setResponseHeader(event, 'Content-Range', contentRange)
+  if (acceptRanges) setResponseHeader(event, 'Accept-Ranges', acceptRanges)
   setResponseHeader(event, 'Access-Control-Allow-Origin', '*')
   setResponseStatus(event, response.status)
 
-  const nodeStream = Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0])
-  return sendStream(event, nodeStream)
+  // h3 v1+ 支持直接返回 Web ReadableStream，Node 和 CF 都 OK
+  return response.body
 })
 
 // ── 工具函数 ──────────────────────────────────────────────────
@@ -121,7 +135,6 @@ function rewriteM3u8(
         return line.replace(/URI="([^"]+)"/g, (_, uri) => {
           const abs = resolveUrl(baseUrl, uri)
           if (noseg && !abs.includes('.m3u8')) return `URI="${abs}"`
-          // 子 playlist 也传递 noseg，避免改写其内部的分片 URL
           return `URI="${buildProxyUrl(abs, origin, referer, noref, noseg)}"`
         })
       }
