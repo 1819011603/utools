@@ -1503,18 +1503,11 @@ const clearPlaylist = () => {
 
 // ========== 自适应并行预取 ==========
 
-// seek 完成时间戳：seek 后短时间内禁用预取，避免和 hls.js 抢连接池
-let lastSeekedAt = 0
-const SEEK_RECOVERY_MS = 4000
-
-// 根据缓冲健康度决定并发预取数
-// 缓冲不足时返回 0，让 hls.js 独占带宽和连接池（浏览器每 host 限 6 连接）
+// 根据缓冲健康度决定并发预取数（线程数 = 浏览器同 host 限 6 连接里留给预取的份额）
 const getAdaptivePrefetchCount = (bufferSecs: number): number => {
-  if (Date.now() - lastSeekedAt < SEEK_RECOVERY_MS) return 1  // seek 冷启动期：留 1 个轻度预取
-  if (bufferSecs < 30)  return 2  // 追赶中：少量预取协助
-  if (bufferSecs < 60)  return 3  // 偏低：保守预取
-  if (bufferSecs < 300) return 4  // 充足：正常预取
-  return 1                        // 富余：慢速预取，节省带宽
+  if (bufferSecs < 60)  return 3  // 缓冲 < 1 分钟：积极预取
+  if (bufferSecs < 300) return 2  // 1–5 分钟：稳定预取
+  return 1                        // > 5 分钟：节省带宽
 }
 
 // 创建自定义 HLS 分片加载器（fLoader）
@@ -1631,27 +1624,15 @@ const createHlsFragLoader = () => {
   }
 }
 
-// 全程代理模式（分片也走代理）：预取需要降速，避免和 hls.js 抢代理
-const isProxyAllSegments = () => {
-  if (disguiseAsDownloader.value) return true
-  if ((requestOrigin.value.trim() || effectiveReferer.value) && !manifestOnly.value) return true
-  return false
-}
-
 // 触发自适应预取（每次 FRAG_BUFFERED 后调用）
 const triggerAdaptivePrefetch = (lastFragSn: number) => {
   if (!hls || !videoEl.value) return
 
   const video = videoEl.value
-  const bufferSecs = video.buffered.length > 0
-    ? Math.max(0, video.buffered.end(video.buffered.length - 1) - video.currentTime)
-    : 0
-  // 分片走代理时压低并发，避免和 hls.js 竞争代理；直连 CDN 时按缓冲健康度决定
-  const count = isProxyAllSegments()
-    ? Math.min(2, getAdaptivePrefetchCount(bufferSecs))
-    : getAdaptivePrefetchCount(bufferSecs)
+  // 用 getAheadBuffered 拿"当前播放位置往后"的缓冲秒数，避免多缓冲段时取错
+  const bufferSecs = getAheadBuffered(video)
+  const count = getAdaptivePrefetchCount(bufferSecs)
 
-  // 更新状态显示（始终更新，让用户能看到缓冲变化）
   prefetchInfo.value = {
     bufferSecs: Math.round(bufferSecs * 10) / 10,
     threads: count,
@@ -1742,14 +1723,9 @@ const evictPrefetchCache = () => {
 const startOnePrefetch = () => {
   if (!hls || !videoEl.value) return
   const video = videoEl.value
-  const bufferSecs = video.buffered.length > 0
-    ? Math.max(0, video.buffered.end(video.buffered.length - 1) - video.currentTime)
-    : 0
-  const count = isProxyAllSegments()
-    ? Math.min(2, getAdaptivePrefetchCount(bufferSecs))
-    : getAdaptivePrefetchCount(bufferSecs)
+  const bufferSecs = getAheadBuffered(video)
+  const count = getAdaptivePrefetchCount(bufferSecs)
 
-  // 更新状态
   prefetchInfo.value.bufferSecs = Math.round(bufferSecs * 10) / 10
   prefetchInfo.value.threads = count
   prefetchInfo.value.cached = segPrefetchCache.size
@@ -2493,10 +2469,7 @@ const onSeeked = () => {
     clearTimeout(seekBufferingTimer)
     seekBufferingTimer = null
   }
-  // 标记 seek 时刻：触发 SEEK_RECOVERY_MS 内的预取冷却，让 hls.js 优先抢回新位置的分片
-  lastSeekedAt = Date.now()
-  // 不论是否在缓冲区内，都要终止旧的预取请求：
-  // 它们瞄准的位置和当前播放点已经错位，让它们继续跑会浪费带宽并阻塞新位置的请求
+  // 终止旧位置的预取请求，腾出连接池给新位置的分片
   abortAllPrefetches()
 
   // 只有 seek 到缓冲区外才清空已完成的缓存；缓冲区内则保留（可能马上要复用）
