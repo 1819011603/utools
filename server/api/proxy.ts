@@ -36,6 +36,8 @@ async function getNodeDispatcher(): Promise<any> {
         connect: { rejectUnauthorized: false, timeout: 15000 },
         bodyTimeout: 30000,
         headersTimeout: 30000,
+        connections: 64,             // 每 origin 最大连接数（默认 10，太低会让 hls.js + 预取互相堵）
+        pipelining: 1,
       })
     }
   } catch {

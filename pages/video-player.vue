@@ -859,8 +859,18 @@ let hasReceivedData = false  // 是否收到有效数据
 interface PrefetchEntry { buf: ArrayBuffer; ts: number }       // 带时间戳，用于 TTL 过期
 const segPrefetchCache = new Map<string, PrefetchEntry>()      // 已预取完成的缓存
 const segPrefetching = new Map<string, Promise<ArrayBuffer>>() // 正在预取中
+const segPrefetchAborts = new Map<string, AbortController>()   // 正在预取的 AbortController，seek 时取消
 const prefetchInfo = ref({ bufferSecs: 0, threads: 0, cached: 0, pending: 0 })
 const PREFETCH_TTL_MS = 24 * 60 * 60 * 1000  // 缓存过期时间：1 天
+
+// 取消所有正在预取的 fetch（seek 后位置改变，旧的预取无意义）
+const abortAllPrefetches = () => {
+  for (const ctrl of segPrefetchAborts.values()) {
+    try { ctrl.abort() } catch {}
+  }
+  segPrefetchAborts.clear()
+  segPrefetching.clear()
+}
 
 // 取缓存：自动剔除过期项，命中即返回 ArrayBuffer，未命中或过期返回 null
 const getPrefetchedBuf = (url: string): ArrayBuffer | null => {
@@ -1493,12 +1503,17 @@ const clearPlaylist = () => {
 
 // ========== 自适应并行预取 ==========
 
-// 根据缓冲健康度决定并发预取数：缓冲越少 → 线程越多
+// seek 完成时间戳：seek 后短时间内禁用预取，避免和 hls.js 抢连接池
+let lastSeekedAt = 0
+const SEEK_RECOVERY_MS = 4000
+
+// 根据缓冲健康度决定并发预取数
+// 缓冲不足时返回 0，让 hls.js 独占带宽和连接池（浏览器每 host 限 6 连接）
 const getAdaptivePrefetchCount = (bufferSecs: number): number => {
-  if (bufferSecs < 5)  return 6  // 紧张：全速预取
-  if (bufferSecs < 20) return 5  // 偏低：加速预取
-  if (bufferSecs < 60) return 4  // 充足：正常预取
-  if (bufferSecs < 360) return 2  // 充足：正常预取
+  if (Date.now() - lastSeekedAt < SEEK_RECOVERY_MS) return 1  // seek 冷启动期：留 1 个轻度预取
+  if (bufferSecs < 30)  return 2  // 追赶中：少量预取协助
+  if (bufferSecs < 60)  return 3  // 偏低：保守预取
+  if (bufferSecs < 300) return 4  // 充足：正常预取
   return 1                        // 富余：慢速预取，节省带宽
 }
 
@@ -1542,6 +1557,9 @@ const createHlsFragLoader = () => {
       this.stats.buffering.end   = 0
 
       const succeed = (data: ArrayBuffer) => {
+        // seek/换源后 hls.js 会 abort 旧 loader；此时再回调 onSuccess
+        // 会污染 hls.js 的内部状态，让播放卡住几十秒。必须在这里短路。
+        if (this.stats.aborted) return
         const t1 = performance.now()
         this.stats.loaded = data.byteLength
         this.stats.total  = data.byteLength
@@ -1552,6 +1570,7 @@ const createHlsFragLoader = () => {
       }
 
       const fail = (e: Error) => {
+        if (this.stats.aborted) return
         this.stats.loading.end = performance.now()
         callbacks.onError({ code: 0, text: e.message }, context, null, this.stats)
       }
@@ -1570,14 +1589,17 @@ const createHlsFragLoader = () => {
       if (segPrefetching.has(url)) {
         segPrefetching.get(url)!
           .then(buf => {
+            if (this.stats.aborted) return
             if (buf.byteLength > 0) {
-              // 预取完成的数据已在 segPrefetchCache，直接命中
               succeed(buf)
             } else {
               this.doFetch(url, config, succeed, fail)
             }
           })
-          .catch(() => this.doFetch(url, config, succeed, fail))
+          .catch(() => {
+            if (this.stats.aborted) return
+            this.doFetch(url, config, succeed, fail)
+          })
         return
       }
 
@@ -1661,19 +1683,22 @@ const triggerAdaptivePrefetch = (lastFragSn: number) => {
     const url: string = frag.url
     if (!url || getPrefetchedBuf(url) !== null || segPrefetching.has(url)) continue
 
-    const promise = fetch(getProxyUrl(url))
+    const ctrl = new AbortController()
+    segPrefetchAborts.set(url, ctrl)
+    const promise = fetch(getProxyUrl(url), { signal: ctrl.signal })
       .then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(buf => {
+        segPrefetchAborts.delete(url)
         segPrefetchCache.set(url, { buf, ts: Date.now() })
         segPrefetching.delete(url)
         prefetchInfo.value.cached = segPrefetchCache.size
         prefetchInfo.value.pending = segPrefetching.size
         evictPrefetchCache()
-        // 完成1个 → 补充1个，维持并发数（不递归全量触发，避免请求爆炸）
         startOnePrefetch()
         return buf
       })
       .catch(() => {
+        segPrefetchAborts.delete(url)
         segPrefetching.delete(url)
         prefetchInfo.value.pending = segPrefetching.size
         return new ArrayBuffer(0)
@@ -1743,9 +1768,12 @@ const startOnePrefetch = () => {
     const url: string = frag.url
     if (!url || getPrefetchedBuf(url) !== null || segPrefetching.has(url)) continue
 
-    const promise = fetch(getProxyUrl(url))
+    const ctrl = new AbortController()
+    segPrefetchAborts.set(url, ctrl)
+    const promise = fetch(getProxyUrl(url), { signal: ctrl.signal })
       .then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(buf => {
+        segPrefetchAborts.delete(url)
         segPrefetchCache.set(url, { buf, ts: Date.now() })
         segPrefetching.delete(url)
         prefetchInfo.value.cached = segPrefetchCache.size
@@ -1755,6 +1783,7 @@ const startOnePrefetch = () => {
         return buf
       })
       .catch(() => {
+        segPrefetchAborts.delete(url)
         segPrefetching.delete(url)
         prefetchInfo.value.pending = segPrefetching.size
         return new ArrayBuffer(0)
@@ -2061,10 +2090,10 @@ const destroyHls = () => {
     hls = null
   }
   hlsStats.value = null
-  // 清空预取缓存与周期清理定时器
+  // 清空预取缓存、取消正在跑的预取请求、停止清理定时器
   stopPrefetchCleanup()
+  abortAllPrefetches()
   segPrefetchCache.clear()
-  segPrefetching.clear()
   prefetchInfo.value = { bufferSecs: 0, threads: 0, cached: 0, pending: 0 }
   cancelDownload()
 }
@@ -2460,19 +2489,23 @@ const onSeeking = () => {
 
 // seek 完成
 const onSeeked = () => {
-  // 取消还未触发的 buffering 显示（说明 seek 在缓冲区内完成，无需 loading）
   if (seekBufferingTimer) {
     clearTimeout(seekBufferingTimer)
     seekBufferingTimer = null
   }
-  // 只有 seek 到缓冲区外才清空预取缓存；缓冲区内完成则保留
+  // 标记 seek 时刻：触发 SEEK_RECOVERY_MS 内的预取冷却，让 hls.js 优先抢回新位置的分片
+  lastSeekedAt = Date.now()
+  // 不论是否在缓冲区内，都要终止旧的预取请求：
+  // 它们瞄准的位置和当前播放点已经错位，让它们继续跑会浪费带宽并阻塞新位置的请求
+  abortAllPrefetches()
+
+  // 只有 seek 到缓冲区外才清空已完成的缓存；缓冲区内则保留（可能马上要复用）
   const inBuffer = videoEl.value ? getAheadBuffered(videoEl.value) > 0 : false
   if (!inBuffer) {
     segPrefetchCache.clear()
-    segPrefetching.clear()
     prefetchInfo.value.cached = 0
-    prefetchInfo.value.pending = 0
   }
+  prefetchInfo.value.pending = 0
   isBuffering.value = false
 }
 
