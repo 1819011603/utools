@@ -76,10 +76,10 @@
             />
           </UFormGroup>
           <datalist id="vp-origin-history">
-            <option v-for="o in originHistory" :key="o" :value="o" />
+            <option v-for="o in originSuggestions" :key="o" :value="o" />
           </datalist>
           <datalist id="vp-referer-history">
-            <option v-for="r in refererHistory" :key="r" :value="r" />
+            <option v-for="r in refererSuggestions" :key="r" :value="r" />
           </datalist>
           <UFormGroup label=" " class="pt-1">
             <UCheckbox
@@ -919,6 +919,20 @@ const rememberHeaders = () => {
   rememberOne(originHistory, ORIGIN_HISTORY_KEY, requestOrigin.value)
   rememberOne(refererHistory, REFERER_HISTORY_KEY, requestReferer.value)
 }
+// 下拉建议：当前视频域名置顶 + 历史（自动策略下用户很少手填，历史常为空，故用当前域名兜底保证有可选项）
+const currentVideoOrigin = computed(() => {
+  const u = (videoUrl.value || videoUrlInput.value || '').trim()
+  if (!u) return ''
+  try { return new URL(u.startsWith('//') ? 'https:' + u : u).origin } catch { return '' }
+})
+const originSuggestions = computed(() => {
+  const host = currentVideoOrigin.value
+  return host ? [host, ...originHistory.value.filter(x => x !== host)] : originHistory.value
+})
+const refererSuggestions = computed(() => {
+  const ref = currentVideoOrigin.value ? currentVideoOrigin.value + '/' : ''
+  return ref ? [ref, ...refererHistory.value.filter(x => x !== ref)] : refererHistory.value
+})
 const autoFullscreen = ref(true)  // 自动全屏
 const autoBestRate = ref(true)    // 自动最佳倍速（默认开）：在 [1, 所选倍速] 内按带宽自动取值
 const savedProgress = ref<Record<string, number>>({})  // 保存的播放进度
@@ -1267,9 +1281,9 @@ const ruleControlsReachability = (r: SiteRule | null): boolean =>
 const applyReachabilityStep = (step: number) => {
   let host = ''
   try { host = new URL(videoUrl.value.startsWith('//') ? 'https:' + videoUrl.value : videoUrl.value).origin } catch {}
-  if (step <= 0) {                     // 直连：最快，CORS 开放站点直接用
+  if (step <= 0) {                     // 直连：最快，CORS 开放站点直接用（manifestOnly 也要关，否则会去代理 manifest）
     useProxy.value = false; disguiseAsDownloader.value = false
-    requestOrigin.value = ''; requestReferer.value = ''; manifestOnly.value = true
+    requestOrigin.value = ''; requestReferer.value = ''; manifestOnly.value = false
   } else if (step === 1) {             // 代理+伪装：服务端补 CORS、不发 Origin/Referer
     useProxy.value = false; disguiseAsDownloader.value = true
     requestOrigin.value = ''; requestReferer.value = ''
@@ -1316,10 +1330,13 @@ const strategyLabel = computed(() => {
 })
 
 // 用户改动任一连接设置 → 转手动（引擎不再覆盖可达性；并发/预取仍全自动）
+// 必须重载视频：连接策略只在加载时生效（manifest 是否带 noseg 决定分片直连/代理），
+// 不重载则 hls.js 仍在用上次策略解析出的分片 URL（改「仅代理 Manifest」看似不生效）。
 const onManualProxyChange = () => {
   manualStrategyOverride.value = true
   rememberHeaders()   // 记住本次 Origin/Referer 供下拉复用
   saveState()
+  if (videoUrl.value) loadVideo()
 }
 
 // 交回引擎全自动
@@ -1959,10 +1976,10 @@ const onCanPlay = () => {
   }
 }
 
-// 起播预缓冲：缓冲够 AUTOPLAY_BUFFER_TARGET 秒即起播（尽快进入），
-// 剩下的缓冲交给多连接并行预取在播放中补齐；慢站最多等 AUTOPLAY_MAX_WAIT_MS 兜底。非 HLS 固定 3s。
-const AUTOPLAY_BUFFER_TARGET = 4     // 起播只需少量缓冲，快速进入
-const AUTOPLAY_MAX_WAIT_MS = 5000    // 兜底最多等 5s
+// 起播预缓冲：缓冲够 AUTOPLAY_BUFFER_TARGET 秒即起播，剩下的交给并行预取播放中补齐；
+// 慢站最多等 AUTOPLAY_MAX_WAIT_MS 兜底避免卡死。非 HLS 固定等 2s。
+const AUTOPLAY_BUFFER_TARGET = 6     // 起播缓冲阈值：够 6s 再播，避免刚起播就卡顿
+const AUTOPLAY_MAX_WAIT_MS = 8000    // 兜底最多等 8s（慢网到不了 6s 也先播，避免一直等）
 
 const scheduleAutoPlay = () => {
   // 清除之前的定时器
@@ -1979,8 +1996,8 @@ const scheduleAutoPlay = () => {
     if (!video) { delayedPlayTimer = null; return }
     const ahead = getAheadBuffered(video)
     const waited = performance.now() - startTs
-    // 起播目标随倍速略放大（封顶 ×2），但保持小值以快速起播
-    const target = AUTOPLAY_BUFFER_TARGET * Math.min(2, Math.max(1, desiredRate.value))
+    // 固定 6s 起播阈值（不再按倍速放大，用户要的是明确的"缓冲够 6s 就播"）
+    const target = AUTOPLAY_BUFFER_TARGET
     const ready = !isHls.value
       ? waited >= 2000
       : ahead >= target || waited >= AUTOPLAY_MAX_WAIT_MS
