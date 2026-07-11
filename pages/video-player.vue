@@ -621,9 +621,15 @@
         </div>
 
         <!-- 高级设置 -->
-        <div class="flex flex-wrap gap-4">
-          <UCheckbox v-model="hlsConfig.enableWorker" label="启用 Web Worker" />
-          <UCheckbox v-model="hlsConfig.lowLatencyMode" label="低延迟模式（直播）" />
+        <div class="flex flex-wrap gap-x-8 gap-y-3">
+          <div class="space-y-1">
+            <UCheckbox v-model="hlsConfig.enableWorker" label="启用 Web Worker" />
+            <p class="text-xs text-gray-500 dark:text-gray-400 pl-6">分片解析放到后台线程，播放更流畅、界面不卡顿（建议开启）</p>
+          </div>
+          <div class="space-y-1">
+            <UCheckbox v-model="hlsConfig.lowLatencyMode" label="低延迟模式（直播）" />
+            <p class="text-xs text-gray-500 dark:text-gray-400 pl-6">仅对 LL-HLS 直播源有效，压低直播延迟；点播请保持关闭</p>
+          </div>
         </div>
 
         <!-- 实时状态 -->
@@ -1017,7 +1023,7 @@ const hlsConfig = ref({
 
 // 预取缓存 + 自适应预取（并发上限受站点规则约束）
 const segmentCache = useSegmentCache({ getMaxBufferSizeMB: () => hlsConfig.value.maxBufferSizeMB })
-const { segPrefetchCache, prefetchInfo, abortAllPrefetches, startPrefetchCleanup, stopPrefetchCleanup } = segmentCache
+const { prefetchInfo, useCacheForVideo, abortAllPrefetches, startPrefetchCleanup, stopPrefetchCleanup } = segmentCache
 const { getAheadBuffered, createHlsFragLoader, triggerAdaptivePrefetch, startOnePrefetch, strategy, resetStrategy, tick: prefetchTick, primePrefetch } = useHlsPrefetch({
   getHls: () => hls,
   getVideoEl: () => videoEl.value,
@@ -1388,6 +1394,8 @@ const loadVideo = async () => {
   startLoadTimeout()
   
   const url = videoUrl.value.trim()
+  // 按视频切换缓存：同一视频（重播/点回去）保留内存缓存，换了视频才清空旧的
+  useCacheForVideo(url)
   applyStrategy(url)  // 自动决定直连/代理/防盗链 + 站点规则并发
   isHls.value = isHlsUrl(url)
 
@@ -1633,11 +1641,12 @@ const destroyHls = () => {
     hls = null
   }
   hlsStats.value = null
-  // 清空预取缓存、取消正在跑的预取请求、停止清理定时器/心跳、重置策略实测（换流/换 CDN 重新测）
+  // 取消正在跑的预取请求、停止清理定时器/心跳、重置策略实测（换流/换 CDN 重新测）。
+  // 注意：不清空 segPrefetchCache——它是模块级单例，需跨换流/导航存活，让「点回去」命中内存缓存；
+  // 键按分片 URL 隔离，不同视频不冲突，内存交给 TTL+LRU 兜底。
   stopHlsTick()
   stopPrefetchCleanup()
   abortAllPrefetches()
-  segPrefetchCache.clear()
   prefetchInfo.value = { bufferSecs: 0, threads: 0, cached: 0, pending: 0 }
   resetStrategy()
   cancelDownload()
@@ -2068,12 +2077,8 @@ const onSeeked = () => {
   // 终止旧位置的预取请求，腾出连接池给新位置的分片
   abortAllPrefetches()
 
-  // 只有 seek 到缓冲区外才清空已完成的缓存；缓冲区内则保留（可能马上要复用）
-  const inBuffer = videoEl.value ? getAheadBuffered(videoEl.value) > 0 : false
-  if (!inBuffer) {
-    segPrefetchCache.clear()
-    prefetchInfo.value.cached = 0
-  }
+  // 不清空已完成缓存：seek 回跳/来回拖动时直接命中内存，不重新下载。
+  // 内存由 TTL(1天)+LRU(maxBufferSizeMB) 兜底，无需在 seek 时手动清。
   prefetchInfo.value.pending = 0
   isBuffering.value = false
   // 立刻在新位置并行预取（不等 1s 心跳），尽快把 seek 目标分片拉下来

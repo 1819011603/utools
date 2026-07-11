@@ -98,6 +98,8 @@ export default defineEventHandler(async (event) => {
 
     setResponseHeader(event, 'Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8')
     setResponseHeader(event, 'Access-Control-Allow-Origin', '*')
+    // manifest 可能变化（尤其直播），不缓存，避免拿到旧分片列表
+    setResponseHeader(event, 'Cache-Control', 'no-cache')
     return rewritten
   }
 
@@ -105,11 +107,25 @@ export default defineEventHandler(async (event) => {
   const contentLength = response.headers.get('content-length')
   const contentRange = response.headers.get('content-range')
   const acceptRanges = response.headers.get('accept-ranges')
+  const etag = response.headers.get('etag')
+  const lastModified = response.headers.get('last-modified')
 
   if (contentType) setResponseHeader(event, 'Content-Type', contentType)
   if (contentLength) setResponseHeader(event, 'Content-Length', contentLength)
   if (contentRange) setResponseHeader(event, 'Content-Range', contentRange)
   if (acceptRanges) setResponseHeader(event, 'Accept-Ranges', acceptRanges)
+  // 分片是不可变内容（同 URL 永远同字节）：只对「完整 200」让浏览器磁盘缓存 1 天，
+  // 刷新后大部分分片直接命中磁盘缓存，避免回源慢站。
+  // 关键：206 分块响应绝不缓存——同一 URL 不同 Range 若被 HTTP 缓存混用会拿到错乱字节，
+  // 导致分块拼出的分片损坏、播不了（Range 分块并行下载踩过的坑）。
+  if (response.status === 200) {
+    setResponseHeader(event, 'Cache-Control', 'public, max-age=86400')
+    // 透传源站校验头，作为缓存过期后的二次校验兜底
+    if (etag) setResponseHeader(event, 'ETag', etag)
+    if (lastModified) setResponseHeader(event, 'Last-Modified', lastModified)
+  } else {
+    setResponseHeader(event, 'Cache-Control', 'no-store')
+  }
   setResponseHeader(event, 'Access-Control-Allow-Origin', '*')
   setResponseStatus(event, response.status)
 

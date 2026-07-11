@@ -31,6 +31,16 @@ export interface StrategySnapshot {
 const MAX_CONN = 6          // 浏览器同 host 连接上限（HTTP/1.1）
 const SAFETY = 1.3          // 带宽安全系数
 
+// ── 单分片 Range 分块并行下载（慢链急救）──
+const SLOW_MS = 8000              // 单分片整段下载超过此值算「慢」
+const URGENT_BUF = 6              // 前向缓冲低于此值 = 濒临卡顿：分块拉满 + 暂停预取
+const MIN_RANGE_TOTAL = 1_000_000 // 分片 < 1MB 不值得分块（开销 > 收益）
+// 每 host 分块能力，探测一次即缓存，避免每片重探：
+//   'direct'=直连支持 Range 且能读总长  'proxy'=需走代理才读得到总长
+//   'none'=不支持 Range / 读不到总长    'nogain'=能分块但无加速收益（服务器卡总带宽）
+const hostRangeCap = new Map<string, 'direct' | 'proxy' | 'none' | 'nogain'>()
+const hostOf = (url: string): string => { try { return new URL(url, location.href).host } catch { return '' } }
+
 export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   const { getProxyUrl, cache, getConcurrencyCap } = opts
   const getPlaybackRate = opts.getPlaybackRate ?? (() => 1)
@@ -158,6 +168,76 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   // 不限制预取"触达距离"：始终让 count 个连接并行下载最近的 count 个未缓存分片。
   // （近处慢时远处也照下，保持并行聚合吞吐；否则退化成串行，太慢。）
 
+  // ── 单分片 Range 分块并行下载（慢链急救）──────────────────────────────
+  // 触发：最近 3 片整段下载都 > SLOW_MS（这条连接单片就是慢），或前向缓冲濒临卡顿。
+  const recentDurations: number[] = []   // 最近几片整段下载耗时(ms)，判「这条链路单片是否慢」
+  const recordDuration = (ms: number) => { recentDurations.push(ms); if (recentDurations.length > 3) recentDurations.shift() }
+  const isSlowLink = () => recentDurations.length >= 3 && recentDurations.every(d => d > SLOW_MS)
+  let rescueCount = 0   // >0 = 有分块急救在跑：预取让出连接给当前分片
+
+  // 探测某个 base 是否支持 Range 且能读到总长：返回 总字节数 / -1(支持Range但读不到总长) / -2(不支持Range)
+  const probeTotal = async (base: string, signal: AbortSignal): Promise<number> => {
+    // no-store：Range 请求绝不走 HTTP 缓存，避免不同 Range 拿到缓存里错乱的字节
+    const r = await fetch(base, { signal, headers: { Range: 'bytes=0-0' }, referrerPolicy: 'no-referrer', cache: 'no-store' })
+    if (r.status !== 206) return -2
+    const cr = r.headers.get('Content-Range')          // 形如 "bytes 0-0/123456"
+    const m = cr && /\/(\d+)\s*$/.exec(cr)
+    return m ? parseInt(m[1], 10) : -1
+  }
+
+  // 分块并行下载单个分片：探测能力(206+可读总长) → 选可用 base(直连/代理) → 等分并行 → 拼接。
+  // 不支持 / 无收益 / 太小 → 返回 null，调用方退化为整段下载（绝不返回残片，避免上次"取了播不了"）。
+  const rangeFetch = async (url: string, signal: AbortSignal, chunks: number): Promise<ArrayBuffer | null> => {
+    const host = hostOf(url)
+    const cap = hostRangeCap.get(host)
+    if (cap === 'none' || cap === 'nogain') return null
+
+    const direct = getProxyUrl(url)   // 当前模式 URL（直连=原始CDN；代理模式=已带 /api/proxy）
+    // 代理是同源，Content-Range 一定读得到；直连读不到时用它兜底（用户："代理能走也行"）
+    const viaProxy = direct.includes('/api/proxy?') ? direct : '/api/proxy?url=' + encodeURIComponent(url)
+
+    // 选一个能读到总长的 base（按缓存直取；未知则先探直连，读不到再探代理）
+    let base = direct, total = -2
+    if (cap === 'direct') { base = direct; total = await probeTotal(direct, signal) }
+    else if (cap === 'proxy') { base = viaProxy; total = await probeTotal(viaProxy, signal) }
+    else {
+      total = await probeTotal(direct, signal)
+      if (total > 0) { base = direct; hostRangeCap.set(host, 'direct') }
+      else if (total === -1 && viaProxy !== direct) {           // 直连支持 Range 但跨域没暴露总长 → 试代理
+        const t2 = await probeTotal(viaProxy, signal)
+        if (t2 > 0) { base = viaProxy; total = t2; hostRangeCap.set(host, 'proxy') }
+        else { hostRangeCap.set(host, 'none'); return null }
+      } else { hostRangeCap.set(host, 'none'); return null }    // 不支持 Range
+    }
+    if (total < MIN_RANGE_TOTAL) return null                     // 太小 / 异常，不值得分块
+
+    // 等分并行（块数 = min(目标并发, 连接上限)，每块 total/n，几乎同时结束）
+    const n = Math.max(2, Math.min(chunks, MAX_CONN))
+    const size = Math.ceil(total / n)
+    const ranges: Array<[number, number]> = []
+    for (let s = 0; s < total; s += size) ranges.push([s, Math.min(s + size - 1, total - 1)])
+
+    const t0 = performance.now()
+    const parts = await Promise.all(ranges.map(([s, e]) =>
+      fetch(base, { signal, headers: { Range: `bytes=${s}-${e}` }, referrerPolicy: 'no-referrer', cache: 'no-store' }).then(r => {
+        if (r.status !== 206) throw new Error(`chunk HTTP ${r.status}`)
+        return r.arrayBuffer()
+      })
+    ))
+    const wall = performance.now() - t0
+
+    let outLen = 0; for (const p of parts) outLen += p.byteLength
+    if (outLen < total) throw new Error('range truncated')      // 拼出来不够总长 → 失败重来，绝不返回残片
+    const out = new Uint8Array(outLen)
+    let off = 0; for (const p of parts) { out.set(new Uint8Array(p), off); off += p.byteLength }
+
+    // 无收益检测：聚合速度 ≈ 单连接速度 → 服务器卡的是总带宽，分块白占连接 → 标记该 host 不再分块
+    const aggBps = wall > 0 ? (outLen * 8) / (wall / 1000) : 0
+    if (perConnBps > 0 && aggBps > 0 && aggBps < perConnBps * 1.3) hostRangeCap.set(host, 'nogain')
+
+    return out.buffer
+  }
+
   // 创建自定义 HLS 分片加载器（fLoader）
   // 优先从预取缓存返回数据，cache miss 时走 fetch 正常加载
   const createHlsFragLoader = () => {
@@ -271,15 +351,40 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
         const MAX_RETRY = 2   // cache-miss 时最多重试 2 次，避免偶发 502 直接触发 hls.js fatal
         const fStart = performance.now()
 
-        const tracked = fetch(getProxyUrl(url), { signal: this.ctrl.signal, referrerPolicy: 'no-referrer' })
-          .then(r => {
-            clearTimeout(timer)
-            if (!r.ok) throw new Error(`HTTP ${r.status}`)
-            this.stats.loading.first = performance.now()   // 首字节时间
-            return r.arrayBuffer()
-          })
+        // 慢链急救：仅当这条链路确认慢（近 3 片整段下载都 > SLOW_MS）才对当前分片用 Range 分块并行猛拉。
+        // 缓冲越紧张分块越多（<URGENT_BUF 拉满 MAX_CONN 块，否则 3 块留连接给预取）。rangeFetch 内部自带
+        // 能力探测 + 不支持则退化整段（返回 null），失败也退化，绝不返回残片。
+        const video = opts.getVideoEl()
+        const buf0 = video ? getAheadBuffered(video) : 0
+        const useRescue = isSlowLink()
+        const chunkN = buf0 < URGENT_BUF ? MAX_CONN : 3
+
+        let viaRescue = false
+        const loadOnce = async (): Promise<ArrayBuffer> => {
+          if (useRescue) {
+            rescueCount++
+            try {
+              const rb = await rangeFetch(url, this.ctrl!.signal, chunkN)
+              if (rb) { viaRescue = true; this.stats.loading.first = performance.now(); return rb }
+            } catch (e: any) {
+              if (e?.name === 'AbortError') throw e   // seek/换源中止：向上传播，不要退化重下
+              // 分块失败（某块出错/拼接不足）→ 退化整段，别让分片直接失败
+            } finally { rescueCount-- }
+          }
+          const r = await fetch(getProxyUrl(url), { signal: this.ctrl!.signal, referrerPolicy: 'no-referrer' })
+          if (!r.ok) throw new Error(`HTTP ${r.status}`)
+          this.stats.loading.first = performance.now()   // 首字节时间
+          return r.arrayBuffer()
+        }
+
+        const tracked = loadOnce()
           .then(buf => {
-            sampleSpeed(buf.byteLength, performance.now() - fStart)
+            clearTimeout(timer)
+            const dur = performance.now() - fStart
+            if (!viaRescue) {                                    // 分块是多连接聚合速度，不喂单连接测速/慢链判定
+              sampleSpeed(buf.byteLength, dur)
+              recordDuration(dur)
+            }
             segPrefetchCache.set(url, { buf, ts: Date.now() })   // 存缓存，后续命中不再下载
             segPrefetching.delete(url)
             prefetchInfo.value.cached = segPrefetchCache.size
@@ -355,6 +460,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
 
   // 触发自适应预取（每次 FRAG_BUFFERED 后调用）
   const triggerAdaptivePrefetch = (lastFragSn: number) => {
+    if (rescueCount > 0) return   // 分块急救进行中：让出连接给当前分片，暂不预取远处
     const hls = opts.getHls()
     const video = opts.getVideoEl()
     if (!hls || !video) return
@@ -401,7 +507,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
       if (started >= canStart) break
       if (frag.start < ct - 1) continue   // 跳过播放头之前的旧分片（seek 后 lastFragSn 可能是旧位置）
       const url: string = frag.url
-      if (!url || getPrefetchedBuf(url) !== null || segPrefetching.has(url)) continue
+      if (!url || getPrefetchedBuf(url) !== null || segPrefetching.has(url)) continue   // 已缓存/下载中 → 不重复下载
       spawnPrefetch(url, frag.duration ?? 0, startOnePrefetch)
       started++
     }
@@ -414,6 +520,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
 
   // 完成1个分片后补充1个，基于当前播放进度定位下一个未下载分片
   const startOnePrefetch = () => {
+    if (rescueCount > 0) return   // 分块急救进行中：让出连接给当前分片
     const hls = opts.getHls()
     const video = opts.getVideoEl()
     if (!hls || !video) return
@@ -436,7 +543,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     for (const frag of frags) {
       if (frag.start < currentTime) continue
       const url: string = frag.url
-      if (!url || getPrefetchedBuf(url) !== null || segPrefetching.has(url)) continue
+      if (!url || getPrefetchedBuf(url) !== null || segPrefetching.has(url)) continue   // 已缓存/下载中 → 不重复下载
       spawnPrefetch(url, frag.duration ?? 0, startOnePrefetch)
       prefetchInfo.value.pending = segPrefetching.size
       break  // 只补1个
@@ -465,8 +572,8 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     }
   }
 
-  // 起播/seek 预热：缓冲充足时并行预取后续分片；缓冲低（起播/seek 瞬间）则不抢连接，
-  // 让 hls.js 对"当前急需分片"走 Range 分块并行下载（getAdaptivePrefetchCount 低缓冲返回 0）。
+  // 起播/seek 预热：并行预取后续分片。缓冲濒临卡顿时，fragLoader 会对"当前急需分片"启用
+  // Range 分块并行猛拉，并通过 rescueCount 暂停这里的预取，把连接全让给当前分片。
   const primePrefetch = () => {
     const video = opts.getVideoEl()
     const count = getAdaptivePrefetchCount(video ? getAheadBuffered(video) : 0)
