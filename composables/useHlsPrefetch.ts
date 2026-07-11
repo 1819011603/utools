@@ -57,20 +57,26 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   // ── 可持续倍速：直接看缓冲的增长/消失速度（最直接、最跟手）──
   // 以倍速 R 播放、前向缓冲每墙钟秒变化 Δ 秒，则每墙钟秒实际"下载"了 (R+Δ) 秒视频，
   // 即当前可持续倍速 = R + Δ。Δ<0（缓冲在掉）说明追不上，可持续倍速 < 当前倍速。
-  let growthEwma = 0        // 缓冲增长率（秒/秒），快速 EWMA
+  // 缓冲按「分片到达」呈突发式增长：短窗内测增长率会在 大正/大负 间剧烈跳变。
+  // 因此这里刻意测长窗（≥10s，抹平单个分片到达的突发）+ 双层慢 EWMA，换取稳定的可持续倍速估计。
+  // 注意：抗卡顿闭环用的是原始 bufferSecs（见 stepControl），不受此平滑影响，仍然跟手。
+  let growthEwma = 0        // 缓冲增长率（秒/秒），慢 EWMA
   let lastGrowthAhead = -1  // 上次采样的前向缓冲
   let lastGrowthT = 0       // 上次采样墙钟时间
-  const resetGrowth = () => { growthEwma = 0; lastGrowthAhead = -1; lastGrowthT = 0 }
+  let fluentEwma = 0        // 平滑后的可持续倍速（对外上报），再抹一层瞬时抖动
+  const resetGrowth = () => { growthEwma = 0; lastGrowthAhead = -1; lastGrowthT = 0; fluentEwma = 0 }
   const updateGrowth = (ahead: number) => {
     const now = performance.now()
     if (lastGrowthAhead < 0) { lastGrowthAhead = ahead; lastGrowthT = now; return }
     const dt = (now - lastGrowthT) / 1000
-    if (dt < 0.5) return
+    if (dt < 10) return                      // ≥10s 窗口：抹平分片突发到达的抖动
     const rate = (ahead - lastGrowthAhead) / dt
     lastGrowthAhead = ahead
     lastGrowthT = now
     if (Math.abs(rate) > 10) return          // seek 等跳变，跳过不污染
-    growthEwma = growthEwma ? growthEwma * 0.5 + rate * 0.5 : rate  // 0.5 权重：跟手
+    growthEwma = growthEwma ? growthEwma * 0.7 + rate * 0.3 : rate
+    const instant = Math.max(1, getPlaybackRate() + growthEwma - 0.15)
+    fluentEwma = fluentEwma ? fluentEwma * 0.8 + instant * 0.2 : instant
   }
 
   const strategy = ref<StrategySnapshot>({ perConnKBps: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0 })
@@ -104,10 +110,11 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
 
   // 刷新对外策略快照（供 UI 展示与倍速可行性判断）
   const refreshStrategy = (targetConn: number) => {
-    // 可持续倍速 = 当前倍速 + 缓冲增长率，留 0.15x 安全余量；至少 1x
-    const sustainable = lastGrowthAhead < 0
-      ? 0
-      : Math.max(1, Math.round((getPlaybackRate() + growthEwma - 0.15) * 10) / 10)
+    // 可持续倍速：取平滑后的 fluentEwma，对齐到 0.25 台阶（与自动调速台阶一致，隐去更细的抖动）。
+    // 冷启动（首个 ≥10s 窗口尚无数据）先按「当前选择的倍速」展示，而非 0。
+    const sustainable = lastGrowthAhead < 0 || fluentEwma <= 0
+      ? Math.max(1, Math.round(getPlaybackRate() / 0.25) * 0.25)
+      : Math.max(1, Math.round(fluentEwma / 0.25) * 0.25)
     strategy.value = {
       perConnKBps: Math.round(perConnBps / 8 / 1024),
       segMbps: Math.round((segBitrate / 1e6) * 10) / 10,

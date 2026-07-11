@@ -1025,22 +1025,35 @@ watch(playbackRate, (rate) => {
 })
 
 // 计算并应用「实际生效倍速」：
-//  - 自动最佳倍速开启：在 [1, 用户选择倍速] 内，取 ≤ 带宽可流畅上限(×0.85 余量) 的最大档；撑不住则 1x。
-//  - 关闭：完全用用户选择倍速（可 <1 手动慢放）。
+//  - 自动最佳倍速开启：在 [1, 用户选择倍速] 内朝「带宽可持续上限」逼近，但每次最多迈一个
+//    0.25x 台阶（升/降都是），且两次调整间隔必须 ≥10s，避免频繁抖动来回调。
+//  - 关闭：完全用用户选择倍速（可 <1 手动慢放），立即生效。
+const RATE_STEP = 0.25            // 自动调速每步最大幅度
+const RATE_COOLDOWN_MS = 10000    // 两次自动调速的最小间隔
+let lastAutoRateAt = 0            // 上次自动调速时刻（performance.now）
 const applyEffectiveRate = () => {
-  let eff: number
   if (autoBestRate.value && isHls.value) {
-    // maxFluentRate = 当前可持续倍速（已含安全余量）；生效 = min(所选, 可持续)，取档位内最大且 ≥1
+    // 目标倍速 = min(所选, 可持续)，≥1，对齐到 0.25 台阶
     const max = strategy.value.maxFluentRate
-    const ceil = max > 0 ? Math.min(desiredRate.value, max) : desiredRate.value  // 无数据时先按所选
-    const usable = playbackRates.filter(r => r >= 1 && r <= ceil)
-    eff = usable.length ? Math.max(...usable) : 1        // ≥1、≤所选、≤可持续
+    const rawCeil = max > 0 ? Math.min(desiredRate.value, max) : desiredRate.value
+    const target = Math.max(1, Math.round(rawCeil / RATE_STEP) * RATE_STEP)
+    const cur = playbackRate.value
+    if (Math.abs(target - cur) < 1e-6) return           // 已到位
+    const now = performance.now()
+    if (now - lastAutoRateAt < RATE_COOLDOWN_MS) return // 冷却中：本次不动
+    // 朝目标迈一个 0.25 台阶（升降对称）
+    const next = target > cur
+      ? Math.min(target, cur + RATE_STEP)
+      : Math.max(target, cur - RATE_STEP)
+    lastAutoRateAt = now
+    playbackRate.value = next
+    if (videoEl.value) videoEl.value.playbackRate = next
   } else {
-    eff = desiredRate.value                              // 手动：完全听用户
-  }
-  if (eff !== playbackRate.value) {
-    playbackRate.value = eff
-    if (videoEl.value) videoEl.value.playbackRate = eff
+    const eff = desiredRate.value                       // 手动：完全听用户，立即生效
+    if (eff !== playbackRate.value) {
+      playbackRate.value = eff
+      if (videoEl.value) videoEl.value.playbackRate = eff
+    }
   }
 }
 // 带宽实测变化 或 开关切换 时，重新评估生效倍速
@@ -1762,6 +1775,7 @@ const toggleMute = () => {
 // 倍速控制：用户选择的是「目标倍速」（上限），实际生效由 applyEffectiveRate 决定
 const setPlaybackRate = (rate: number) => {
   desiredRate.value = rate
+  lastAutoRateAt = 0        // 用户主动改目标：允许立即迈一步（仍是 0.25 台阶，之后继续按 10s 节奏逼近）
   applyEffectiveRate()
   showSpeedMenu.value = false
 }
