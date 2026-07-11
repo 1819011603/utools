@@ -36,50 +36,67 @@
             解析并播放
           </UButton>
           <UCheckbox v-model="autoFullscreen" label="加载后自动全屏" />
-          <UCheckbox v-model="useProxy" label="使用跨域代理" />
+          <UCheckbox v-model="autoBestRate" label="自动最佳倍速（≥1x，按带宽提速不卡）" @change="saveState" />
         </div>
 
-        <!-- Origin / Referer 防盗链设置 -->
-        <div class="flex gap-4 flex-wrap items-end">
-          <UFormGroup label="Origin" help="注入请求头 Origin，用于绕过防盗链">
+        <!-- 连接策略：全自动（直连→代理→防盗链自动升级），可展开手动覆盖 -->
+        <div class="flex gap-2 flex-wrap items-center text-sm">
+          <UBadge :color="manualStrategyOverride ? 'amber' : 'sky'" variant="soft" size="xs">
+            连接策略：{{ strategyLabel }}
+          </UBadge>
+          <span class="text-xs text-gray-400">
+            {{ manualStrategyOverride ? '你已手动调整，改任一项即生效；点“恢复自动”交回引擎' : '直连/代理/防盗链由播放器自动选择，改任一项即转手动' }}
+          </span>
+          <button v-if="manualStrategyOverride" class="text-xs text-violet-500 hover:text-violet-700" @click="resetToAuto">
+            恢复自动
+          </button>
+          <button class="text-xs text-violet-500 hover:text-violet-700" @click="showAdvancedProxy = !showAdvancedProxy">
+            {{ showAdvancedProxy ? '收起' : '展开设置…' }}
+          </button>
+        </div>
+
+        <!-- 连接设置：自动时反映引擎当前选择；改任一项即转手动 -->
+        <div v-if="showAdvancedProxy" class="flex gap-4 flex-wrap items-end p-3 rounded-lg bg-gray-50 dark:bg-gray-800">
+          <UFormGroup label="Origin" help="注入请求头 Origin，用于绕过防盗链（可下拉选历史）">
             <UInput
               v-model="requestOrigin"
+              list="vp-origin-history"
               placeholder="https://example.com"
               class="w-52"
-              @change="saveState"
+              @change="onManualProxyChange"
             />
           </UFormGroup>
           <UFormGroup label="Referer" :help="refererHelp">
             <UInput
               v-model="requestReferer"
+              list="vp-referer-history"
               :placeholder="effectiveReferer || 'https://example.com/'"
               class="w-64"
-              @change="saveState"
+              @change="onManualProxyChange"
             />
           </UFormGroup>
+          <datalist id="vp-origin-history">
+            <option v-for="o in originHistory" :key="o" :value="o" />
+          </datalist>
+          <datalist id="vp-referer-history">
+            <option v-for="r in refererHistory" :key="r" :value="r" />
+          </datalist>
           <UFormGroup label=" " class="pt-1">
             <UCheckbox
               v-model="manifestOnly"
-              label="仅代理 Manifest（推荐）"
-              @change="saveState"
+              label="仅代理 Manifest"
+              @change="onManualProxyChange"
             />
-            <p class="text-xs text-gray-400 mt-1">
-              分片直连 CDN，速度与无代理相同<br>
-              不勾选 = 全程代理，更兼容但较慢
-            </p>
           </UFormGroup>
           <UFormGroup label=" " class="pt-1">
             <UCheckbox
               v-model="disguiseAsDownloader"
               label="伪装下载器（不发送 Origin/Referer）"
-              @change="saveState"
+              @change="onManualProxyChange"
             />
-            <p class="text-xs text-gray-400 mt-1">
-              部分 CDN（如 xhscdn）对无 Origin/Referer 的请求放行，403 时可尝试
-            </p>
           </UFormGroup>
         </div>
-        
+
         <!-- 片头片尾跳过设置 -->
         <div class="flex gap-4 flex-wrap items-end">
           <UFormGroup label="跳过片头" help="视频开始时自动跳过的时间">
@@ -173,6 +190,79 @@
           >
             {{ example.name }}
           </UButton>
+        </div>
+      </div>
+    </UCard>
+
+    <!-- 站点规则 -->
+    <UCard>
+      <template #header>
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <UIcon name="i-heroicons-adjustments-horizontal" class="w-5 h-5 text-sky-500" />
+            <span class="font-semibold">站点规则</span>
+            <UBadge v-if="activeRule" color="green" variant="soft" size="xs">
+              已套用：{{ activeRule.name }}
+            </UBadge>
+          </div>
+          <div class="flex gap-2">
+            <UButton size="xs" variant="soft" icon="i-heroicons-plus" @click="addSiteRule">添加规则</UButton>
+            <UButton size="xs" color="primary" variant="soft" icon="i-heroicons-check" @click="applyRulesAndReload">保存并应用</UButton>
+          </div>
+        </div>
+      </template>
+
+      <div class="space-y-4">
+        <p class="text-xs text-gray-500 dark:text-gray-400">
+          按视频域名自动套用一套代理/防盗链/并发配置，解决部分站点播放慢或 403 的问题。
+          匹配用 <code>host 子串</code> 或 <code>/正则/</code>；用户规则优先于内置规则。
+        </p>
+
+        <!-- 用户自定义规则 -->
+        <div v-if="userSiteRules.length" class="space-y-3">
+          <div
+            v-for="rule in userSiteRules"
+            :key="rule.id"
+            class="p-3 rounded-lg border border-gray-200 dark:border-gray-700 space-y-2"
+          >
+            <div class="flex gap-2 items-end flex-wrap">
+              <UFormGroup label="规则名" class="w-40">
+                <UInput v-model="rule.name" size="xs" @change="applyRulesAndReload" />
+              </UFormGroup>
+              <UFormGroup label="匹配 (host 或 /正则/)" class="flex-1 min-w-48">
+                <UInput v-model="rule.pattern" size="xs" placeholder="jisuzyv.com" @change="applyRulesAndReload" />
+              </UFormGroup>
+              <UButton size="xs" color="red" variant="ghost" icon="i-heroicons-trash" @click="removeSiteRule(rule.id)" />
+            </div>
+            <div class="flex gap-4 flex-wrap items-center text-xs">
+              <UCheckbox v-model="rule.useProxy" label="跨域代理" @change="applyRulesAndReload" />
+              <UCheckbox v-model="rule.manifestOnly" label="仅代理 Manifest" @change="applyRulesAndReload" />
+              <UCheckbox v-model="rule.disguiseAsDownloader" label="伪装下载器" @change="applyRulesAndReload" />
+              <div class="flex items-center gap-1">
+                <span class="text-gray-500">预取并发</span>
+                <UInput v-model.number="rule.playbackConcurrency" type="number" :min="1" :max="3" size="xs" class="w-16" @change="applyRulesAndReload" />
+              </div>
+              <div class="flex items-center gap-1">
+                <span class="text-gray-500">下载并发</span>
+                <UInput v-model.number="rule.downloadConcurrency" type="number" :min="1" :max="16" size="xs" class="w-16" @change="applyRulesAndReload" />
+              </div>
+            </div>
+            <div class="flex gap-2 flex-wrap">
+              <UInput v-model="rule.origin" size="xs" placeholder="Origin（可选）" class="flex-1 min-w-40" @change="applyRulesAndReload" />
+              <UInput v-model="rule.referer" size="xs" placeholder="Referer（可选）" class="flex-1 min-w-40" @change="applyRulesAndReload" />
+            </div>
+          </div>
+        </div>
+        <p v-else class="text-sm text-gray-400">暂无自定义规则，点击「添加规则」新建。</p>
+
+        <!-- 内置规则（只读参考） -->
+        <div class="pt-2 border-t border-gray-200 dark:border-gray-700">
+          <span class="text-xs text-gray-500">内置规则：</span>
+          <div class="flex flex-wrap gap-2 mt-1">
+            <UBadge v-for="r in builtinRules" :key="r.id" color="gray" variant="soft" size="xs">
+              {{ r.name }} · {{ r.pattern }}
+            </UBadge>
+          </div>
         </div>
       </div>
     </UCard>
@@ -410,14 +500,15 @@
               <div class="flex items-center gap-2 shrink-0">
                 <!-- 倍速 -->
                 <div class="relative" ref="speedMenuRef">
-                  <button 
+                  <button
                     class="text-white hover:text-violet-400 transition-colors px-2 py-1 rounded text-sm font-medium"
                     @click="showSpeedMenu = !showSpeedMenu"
+                    :title="autoBestRate && playbackRate !== desiredRate ? `目标 ${desiredRate}x，带宽受限实际 ${playbackRate}x` : ''"
                   >
-                    {{ playbackRate }}x
+                    {{ playbackRate }}x<span v-if="autoBestRate && playbackRate !== desiredRate" class="text-white/50">/{{ desiredRate }}</span>
                   </button>
                   <Transition name="fade">
-                    <div 
+                    <div
                       v-if="showSpeedMenu"
                       class="absolute bottom-full right-0 mb-2 bg-black/90 rounded-lg overflow-hidden min-w-[80px]"
                     >
@@ -425,7 +516,7 @@
                         v-for="rate in playbackRates"
                         :key="rate"
                         class="block w-full px-4 py-2 text-sm text-white hover:bg-violet-500/50 transition-colors text-center"
-                        :class="{ 'bg-violet-500': playbackRate === rate }"
+                        :class="{ 'bg-violet-500': desiredRate === rate }"
                         @click="setPlaybackRate(rate)"
                       >
                         {{ rate }}x
@@ -566,7 +657,7 @@
           <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm border-t border-gray-200 dark:border-gray-700 pt-2">
             <div>
               <span class="text-gray-500">预取线程：</span>
-              <span class="font-medium" :class="prefetchInfo.threads === 3 ? 'text-red-500' : prefetchInfo.threads === 2 ? 'text-amber-500' : 'text-green-500'">
+              <span class="font-medium" :class="prefetchInfo.threads >= 5 ? 'text-red-500' : prefetchInfo.threads >= 3 ? 'text-amber-500' : 'text-green-500'">
                 {{ prefetchInfo.threads }} 线程
               </span>
             </div>
@@ -581,6 +672,27 @@
             <div>
               <span class="text-gray-500">预取中：</span>
               <span class="font-medium">{{ prefetchInfo.pending }} 分片</span>
+            </div>
+          </div>
+          <!-- 实测策略引擎 -->
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm border-t border-gray-200 dark:border-gray-700 pt-2">
+            <div>
+              <span class="text-gray-500">单连接速度：</span>
+              <span class="font-medium">{{ strategy.perConnKBps }} KB/s</span>
+            </div>
+            <div>
+              <span class="text-gray-500">视频码率：</span>
+              <span class="font-medium">{{ strategy.segMbps }} Mbps</span>
+            </div>
+            <div>
+              <span class="text-gray-500">目标并发：</span>
+              <span class="font-medium">{{ strategy.targetConn }}</span>
+            </div>
+            <div>
+              <span class="text-gray-500">最高流畅倍速：</span>
+              <span class="font-medium" :class="strategy.maxFluentRate < playbackRate ? 'text-red-500' : 'text-green-500'">
+                {{ strategy.maxFluentRate }}x
+              </span>
             </div>
           </div>
         </div>
@@ -688,7 +800,7 @@
 <script setup lang="ts">
 import type HlsType from 'hls.js'
 import { onClickOutside } from '@vueuse/core'
-import { Parser as M3u8Parser } from 'm3u8-parser'
+import type { SiteRule } from '~/composables/videoSiteRules'
 
 // 动态导入 hls.js（避免 SSR 问题）
 let Hls: typeof HlsType | null = null
@@ -709,6 +821,7 @@ interface SavedState {
   playbackRate: number
   useProxy: boolean
   autoFullscreen: boolean
+  autoBestRate: boolean  // 自动最佳倍速
   skipIntro: number  // 跳过片头时间（秒）
   skipOutro: number  // 跳过片尾时间（秒）
   requestOrigin: string
@@ -740,9 +853,10 @@ const saveState = () => {
       currentIndex: currentIndex.value,
       progress: savedProgress.value,
       volume: volume.value,
-      playbackRate: playbackRate.value,
+      playbackRate: desiredRate.value,  // 存用户选择的目标倍速（非自动下调后的实际值）
       useProxy: useProxy.value,
       autoFullscreen: autoFullscreen.value,
+      autoBestRate: autoBestRate.value,
       skipIntro: skipIntro.value,
       skipOutro: skipOutro.value,
       requestOrigin: requestOrigin.value,
@@ -783,19 +897,35 @@ const requestOrigin = ref('')    // 自定义 Origin 请求头
 const requestReferer = ref('')   // 自定义 Referer 请求头（空则自动为 origin + /）
 const manifestOnly = ref(true)   // 仅代理 manifest，分片直连 CDN（更快）
 const disguiseAsDownloader = ref(true)  // 不发送 Origin/Referer，模拟 N_m3u8DL-RE 等下载器
-// 实际生效的 Referer：用户填了就用用户的，否则 origin 非空时自动补 /
-const effectiveReferer = computed(() => {
-  const r = requestReferer.value.trim()
-  if (r) return r
-  const o = requestOrigin.value.trim()
-  return o ? o.replace(/\/$/, '') + '/' : ''
+// 代理 URL 生成（Origin/Referer 注入、manifestOnly、伪装下载器、CORS 代理）
+const { isHlsUrl, effectiveReferer, refererHelp, getProxyUrl } = useVideoProxy({
+  requestOrigin, requestReferer, manifestOnly, disguiseAsDownloader, useProxy,
 })
-const refererHelp = computed(() => {
-  const o = requestOrigin.value.trim()
-  const defaultVal = o ? o.replace(/\/$/, '') + '/' : 'Origin + /'
-  return '注入请求头 Referer，留空时自动填 ' + defaultVal
-})
+// 站点规则：用户自定义规则 + 当前 URL 命中的规则（供代理/预取/下载并发读取）
+const userSiteRules = ref<SiteRule[]>([])
+const activeRule = ref<SiteRule | null>(null)
+
+// Origin/Referer 历史（localStorage 永久保存，供输入框下拉选择）
+const ORIGIN_HISTORY_KEY = 'video-player-origin-history'
+const REFERER_HISTORY_KEY = 'video-player-referer-history'
+const originHistory = ref<string[]>([])
+const refererHistory = ref<string[]>([])
+const loadHeaderHistory = () => {
+  try { originHistory.value = JSON.parse(localStorage.getItem(ORIGIN_HISTORY_KEY) || '[]') } catch {}
+  try { refererHistory.value = JSON.parse(localStorage.getItem(REFERER_HISTORY_KEY) || '[]') } catch {}
+}
+const rememberOne = (listRef: Ref<string[]>, key: string, value: string) => {
+  const v = value.trim()
+  if (!v) return
+  listRef.value = [v, ...listRef.value.filter(x => x !== v)].slice(0, 30)  // 去重、置顶、上限 30
+  try { localStorage.setItem(key, JSON.stringify(listRef.value)) } catch {}
+}
+const rememberHeaders = () => {
+  rememberOne(originHistory, ORIGIN_HISTORY_KEY, requestOrigin.value)
+  rememberOne(refererHistory, REFERER_HISTORY_KEY, requestReferer.value)
+}
 const autoFullscreen = ref(true)  // 自动全屏
+const autoBestRate = ref(true)    // 自动最佳倍速（默认开）：在 [1, 所选倍速] 内按带宽自动取值
 const savedProgress = ref<Record<string, number>>({})  // 保存的播放进度
 const videoKey = ref(0)  // 用于强制重新创建 video 元素
 const skipIntro = ref(0)  // 跳过片头时间（秒）
@@ -808,12 +938,6 @@ const currentIndex = ref(0)
 const hasPrev = computed(() => currentIndex.value > 0)
 const hasNext = computed(() => currentIndex.value < playlist.value.length - 1)
 
-// CORS 代理列表
-const corsProxies = [
-  'https://corsproxy.io/?',
-  'https://api.allorigins.win/raw?url=',
-]
-
 // 播放器状态
 const videoEl = ref<HTMLVideoElement>()
 const playerContainer = ref<HTMLDivElement>()
@@ -824,20 +948,14 @@ const currentTime = ref(0)
 const duration = ref(0)
 const volume = ref(1)
 const isMuted = ref(false)
-const playbackRate = ref(1)
+const playbackRate = ref(1)      // 实际生效倍速（自动最佳倍速时可能被下调）
+const desiredRate = ref(1)       // 用户选择的目标倍速（上限），自动模式在 [1, desiredRate] 内取值
 const isFullscreen = ref(false)
 const showControls = ref(true)
 const showPlayIcon = ref(false)
 const showSpeedMenu = ref(false)
-const isDownloading = ref(false)
-const downloadProgress = ref(0)   // 下载进度 0-100
-let downloadAbortController: AbortController | null = null
-let ffmpegInstance: any | null = null
-let ffmpegUtil: {
-  fetchFile: (input: Blob) => Promise<Uint8Array>
-  toBlobURL: (url: string, mimeType: string) => Promise<string>
-} | null = null
-let ffmpegLoadTask: Promise<void> | null = null
+const showAdvancedProxy = ref(false)  // 手动覆盖连接策略（默认隐藏，全自动）
+const manualStrategyOverride = ref(false)  // 开启后用手动代理设置，关闭自动阶梯
 
 // 进度条
 const progressPercent = computed(() => duration.value ? (currentTime.value / duration.value) * 100 : 0)
@@ -855,55 +973,23 @@ const LOAD_TIMEOUT = 15000
 let loadTimeoutTimer: ReturnType<typeof setTimeout> | null = null  // 加载超时定时器
 let hasReceivedData = false  // 是否收到有效数据
 
-// 自适应并行预取系统
-interface PrefetchEntry { buf: ArrayBuffer; ts: number }       // 带时间戳，用于 TTL 过期
-const segPrefetchCache = new Map<string, PrefetchEntry>()      // 已预取完成的缓存
-const segPrefetching = new Map<string, Promise<ArrayBuffer>>() // 正在预取中
-const segPrefetchAborts = new Map<string, AbortController>()   // 正在预取的 AbortController，seek 时取消
-const prefetchInfo = ref({ bufferSecs: 0, threads: 0, cached: 0, pending: 0 })
-const PREFETCH_TTL_MS = 24 * 60 * 60 * 1000  // 缓存过期时间：1 天
-
-// 取消所有正在预取的 fetch（seek 后位置改变，旧的预取无意义）
-const abortAllPrefetches = () => {
-  for (const ctrl of segPrefetchAborts.values()) {
-    try { ctrl.abort() } catch {}
-  }
-  segPrefetchAborts.clear()
-  segPrefetching.clear()
-}
-
-// 取缓存：自动剔除过期项，命中即返回 ArrayBuffer，未命中或过期返回 null
-const getPrefetchedBuf = (url: string): ArrayBuffer | null => {
-  const entry = segPrefetchCache.get(url)
-  if (!entry) return null
-  if (Date.now() - entry.ts > PREFETCH_TTL_MS) {
-    segPrefetchCache.delete(url)
-    return null
-  }
-  return entry.buf
-}
-
-// 周期清理已过期的缓存项（每 5 分钟扫一次）
-let prefetchCleanupTimer: ReturnType<typeof setInterval> | null = null
-const startPrefetchCleanup = () => {
-  if (prefetchCleanupTimer) return
-  prefetchCleanupTimer = setInterval(() => {
-    const now = Date.now()
-    for (const [url, entry] of segPrefetchCache) {
-      if (now - entry.ts > PREFETCH_TTL_MS) segPrefetchCache.delete(url)
-    }
-    prefetchInfo.value.cached = segPrefetchCache.size
-  }, 5 * 60 * 1000)
-}
-const stopPrefetchCleanup = () => {
-  if (prefetchCleanupTimer) {
-    clearInterval(prefetchCleanupTimer)
-    prefetchCleanupTimer = null
-  }
-}
+// 自适应并行预取系统（缓存与预取逻辑抽到 useSegmentCache / useHlsPrefetch，
+// 因依赖 hlsConfig，实例化放在 hlsConfig 声明之后）
 
 // HLS
 let hls: HlsType | null = null
+// 实时心跳定时器：每秒刷新缓冲读数 + 跑闭环预取控制（不依赖 FRAG_BUFFERED，卡顿时也持续工作）
+let hlsTickTimer: ReturnType<typeof setInterval> | null = null
+const startHlsTick = () => {
+  if (hlsTickTimer) return
+  hlsTickTimer = setInterval(() => {
+    prefetchTick()
+    updateHlsStats()
+  }, 1000)
+}
+const stopHlsTick = () => {
+  if (hlsTickTimer) { clearInterval(hlsTickTimer); hlsTickTimer = null }
+}
 const hlsStats = ref<{ buffered: number; level: string } | null>(null)
 const hlsConfig = ref({
   // 缓冲时间设置（精简配置）
@@ -919,6 +1005,51 @@ const hlsConfig = ref({
   enableWorker: true,         // 启用 Web Worker
   lowLatencyMode: false,      // 低延迟模式
 })
+
+// 预取缓存 + 自适应预取（并发上限受站点规则约束）
+const segmentCache = useSegmentCache({ getMaxBufferSizeMB: () => hlsConfig.value.maxBufferSizeMB })
+const { segPrefetchCache, prefetchInfo, abortAllPrefetches, startPrefetchCleanup, stopPrefetchCleanup } = segmentCache
+const { getAheadBuffered, createHlsFragLoader, triggerAdaptivePrefetch, startOnePrefetch, strategy, resetStrategy, tick: prefetchTick, primePrefetch } = useHlsPrefetch({
+  getHls: () => hls,
+  getVideoEl: () => videoEl.value,
+  getProxyUrl,
+  cache: segmentCache,
+  // 站点规则 playbackConcurrency 作并发下限（默认 1）；引擎按实测+倍速动态往上算
+  getConcurrencyCap: () => activeRule.value?.playbackConcurrency ?? 1,
+  getPlaybackRate: () => playbackRate.value,
+})
+
+// 倍速变化：立即顶格补取；若超出当前带宽可流畅倍速，提示（不拦截）
+watch(playbackRate, (rate) => {
+  if (isHls.value) startOnePrefetch()
+  if (autoBestRate.value) return  // 自动模式下不弹提示（本就按带宽取值）
+  const max = strategy.value.maxFluentRate
+  if (max > 0 && rate > max + 0.05) {
+    useToast().add({ title: `当前带宽最高流畅约 ${max}x，${rate}x 可能卡顿`, color: 'amber', timeout: 3000 })
+  }
+})
+
+// 计算并应用「实际生效倍速」：
+//  - 自动最佳倍速开启：在 [1, 用户选择倍速] 内，取 ≤ 带宽可流畅上限(×0.85 余量) 的最大档；撑不住则 1x。
+//  - 关闭：完全用用户选择倍速（可 <1 手动慢放）。
+const applyEffectiveRate = () => {
+  let eff: number
+  if (autoBestRate.value && isHls.value) {
+    // maxFluentRate = 当前可持续倍速（已含安全余量）；生效 = min(所选, 可持续)，取档位内最大且 ≥1
+    const max = strategy.value.maxFluentRate
+    const ceil = max > 0 ? Math.min(desiredRate.value, max) : desiredRate.value  // 无数据时先按所选
+    const usable = playbackRates.filter(r => r >= 1 && r <= ceil)
+    eff = usable.length ? Math.max(...usable) : 1        // ≥1、≤所选、≤可持续
+  } else {
+    eff = desiredRate.value                              // 手动：完全听用户
+  }
+  if (eff !== playbackRate.value) {
+    playbackRate.value = eff
+    if (videoEl.value) videoEl.value.playbackRate = eff
+  }
+}
+// 带宽实测变化 或 开关切换 时，重新评估生效倍速
+watch([strategy, autoBestRate], () => applyEffectiveRate())
 
 // MP4 预加载策略
 const preloadStrategy = ref('auto')
@@ -972,39 +1103,6 @@ const formatTime = (seconds: number): string => {
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
 }
 
-// 检测是否为 HLS
-const isHlsUrl = (url: string): boolean => {
-  return url.includes('.m3u8') || url.includes('m3u8')
-}
-
-// 获取代理 URL
-// Origin/Referer 是浏览器禁止 JS 修改的 forbidden headers，
-// 必须走服务端代理（/api/proxy）注入，fetch/XHR 直接设置会被浏览器忽略。
-const getProxyUrl = (url: string): string => {
-  if (url.includes('/api/proxy?')) return url
-
-  // 伪装下载器：不发送 Origin/Referer，全程走代理（禁用 noseg）
-  if (disguiseAsDownloader.value) {
-    const params = new URLSearchParams({ url, noref: '1' })
-    return '/api/proxy?' + params.toString()
-  }
-
-  const o = requestOrigin.value.trim()
-  const r = effectiveReferer.value
-  if (o || r) {
-    if (manifestOnly.value && !isHlsUrl(url)) return url
-
-    const params = new URLSearchParams({ url })
-    if (o) params.set('origin', o)
-    if (r) params.set('referer', r)
-    if (manifestOnly.value) params.set('noseg', '1')
-    return '/api/proxy?' + params.toString()
-  }
-
-  if (useProxy.value) return corsProxies[0] + encodeURIComponent(url)
-  return url
-}
-
 // 从 URL 获取视频名称
 const getVideoName = (url: string, index: number): string => {
   try {
@@ -1025,405 +1123,18 @@ const canDownload = computed(() =>
   isVideoLoaded.value && !isLocalFile.value && videoUrl.value && (videoUrl.value.startsWith('http') || videoUrl.value.startsWith('//'))
 )
 
-// 解析 URL（相对路径转绝对路径）
-const resolveUrl = (base: string, relative: string): string => {
-  if (relative.startsWith('http://') || relative.startsWith('https://')) return relative
-  try {
-    return new URL(relative, base).href
-  } catch {
-    return relative
-  }
-}
-
-const fetchM3u8Manifest = async (m3u8Url: string, signal?: AbortSignal): Promise<{ manifest: any; baseUrl: string }> => {
-  const proxyUrl = m3u8Url.startsWith('/api/proxy') ? m3u8Url : getProxyUrl(m3u8Url)
-  const res = await fetch(proxyUrl, { signal })
-  if (!res.ok) throw new Error(`获取 M3U8 失败: ${res.status}`)
-  const text = await res.text()
-
-  const actualUrl = res.url || proxyUrl
-  let baseUrl: string
-  try {
-    const u = new URL(actualUrl, window.location.href)
-    baseUrl = u.origin + u.pathname.replace(/\/[^/]*$/, '/')
-  } catch {
-    baseUrl = actualUrl.replace(/\/[^/]*$/, '/')
-  }
-
-  const parser = new M3u8Parser()
-  parser.push(text)
-  parser.end()
-  return { manifest: parser.manifest as any, baseUrl }
-}
-
-const pickBestVariant = (manifest: any): any | null => {
-  if (!Array.isArray(manifest?.playlists) || manifest.playlists.length === 0) return null
-  return [...manifest.playlists].sort((a: any, b: any) => {
-    const ab = a?.attributes?.BANDWIDTH ?? 0
-    const bb = b?.attributes?.BANDWIDTH ?? 0
-    return bb - ab
-  })[0]
-}
-
-const extractMediaSegmentUrls = (manifest: any, baseUrl: string): string[] => {
-  const segments = manifest.segments as Array<any> | undefined
-  if (!Array.isArray(segments) || segments.length === 0) {
-    throw new Error('M3U8 解析失败，未找到分片')
-  }
-
-  const urls: string[] = []
-  const addedMap = new Set<string>()
-  for (const seg of segments) {
-    const mapUri = seg?.map?.uri
-    if (mapUri) {
-      const mapUrl = resolveUrl(baseUrl, mapUri)
-      if (!addedMap.has(mapUrl)) {
-        urls.push(mapUrl)
-        addedMap.add(mapUrl)
-      }
-    }
-    if (seg?.uri) {
-      urls.push(resolveUrl(baseUrl, seg.uri))
-    }
-  }
-  return urls
-}
-
-const pickAudioPlaylistUrl = (manifest: any, baseUrl: string, preferredGroupId?: string): string | null => {
-  const audioGroups = manifest?.mediaGroups?.AUDIO
-  if (!audioGroups || typeof audioGroups !== 'object') return null
-
-  const candidateGroupId = preferredGroupId && audioGroups[preferredGroupId]
-    ? preferredGroupId
-    : Object.keys(audioGroups)[0]
-  if (!candidateGroupId) return null
-
-  const group = audioGroups[candidateGroupId]
-  if (!group || typeof group !== 'object') return null
-
-  const renditions = Object.values(group) as any[]
-  const picked = renditions.find(r => r?.default && r?.uri)
-    || renditions.find(r => r?.autoselect && r?.uri)
-    || renditions.find(r => r?.uri)
-  if (!picked?.uri) return null
-  return resolveUrl(baseUrl, picked.uri)
-}
-
-// 分片元数据（含加密信息）
-interface HlsSegment {
-  url: string
-  sn: number             // 媒体序列号，用于推导 AES IV
-  keyUri?: string        // 密钥地址（undefined = 未加密）
-  keyIv?: Uint8Array | null  // 显式 IV（null = 用 sn 推导）
-}
-
-// 提取分片列表（含加密元数据）
-const extractMediaSegmentsWithMeta = (manifest: any, baseUrl: string): HlsSegment[] => {
-  const segments = manifest.segments as Array<any> | undefined
-  if (!Array.isArray(segments) || segments.length === 0) {
-    throw new Error('M3U8 解析失败，未找到分片')
-  }
-  const mediaSequence: number = manifest.mediaSequence ?? 0
-  const result: HlsSegment[] = []
-  const addedMap = new Set<string>()
-
-  for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i]
-    const sn = mediaSequence + i
-    const mapUri = seg?.map?.uri
-    if (mapUri) {
-      const mapUrl = resolveUrl(baseUrl, mapUri)
-      if (!addedMap.has(mapUrl)) {
-        result.push({ url: mapUrl, sn: 0 })
-        addedMap.add(mapUrl)
-      }
-    }
-    if (!seg?.uri) continue
-
-    const isEncrypted = seg.key?.method === 'AES-128'
-    let keyIv: Uint8Array | null = null
-    if (isEncrypted && seg.key?.iv) {
-      // m3u8-parser 可能返回数组或十六进制字符串
-      const ivSrc = seg.key.iv
-      const ivHex = Array.isArray(ivSrc)
-        ? (ivSrc as number[]).map(b => b.toString(16).padStart(2, '0')).join('')
-        : String(ivSrc).replace(/^0x/i, '').padStart(32, '0')
-      keyIv = new Uint8Array(ivHex.match(/.{2}/g)!.map((b: string) => parseInt(b, 16)))
-    }
-
-    result.push({
-      url: resolveUrl(baseUrl, seg.uri),
-      sn,
-      keyUri: isEncrypted && seg.key?.uri ? resolveUrl(baseUrl, seg.key.uri) : undefined,
-      keyIv: isEncrypted ? keyIv : null,
-    })
-  }
-  return result
-}
-
-// 递归解析到媒体播放列表，返回带加密信息的分片列表
-const getM3u8SegmentsWithMeta = async (m3u8Url: string, signal?: AbortSignal): Promise<HlsSegment[]> => {
-  const { manifest, baseUrl } = await fetchM3u8Manifest(m3u8Url, signal)
-  const best = pickBestVariant(manifest)
-  if (best?.uri) return getM3u8SegmentsWithMeta(resolveUrl(baseUrl, best.uri), signal)
-  return extractMediaSegmentsWithMeta(manifest, baseUrl)
-}
-
-// 下载计划：同时解析视频轨和独立音频轨（若存在），携带加密元数据
-const getM3u8DownloadPlan = async (
-  m3u8Url: string,
-  signal?: AbortSignal
-): Promise<{ videoSegments: HlsSegment[]; audioSegments: HlsSegment[] }> => {
-  const { manifest, baseUrl } = await fetchM3u8Manifest(m3u8Url, signal)
-  const best = pickBestVariant(manifest)
-  if (!best?.uri) {
-    return { videoSegments: extractMediaSegmentsWithMeta(manifest, baseUrl), audioSegments: [] }
-  }
-  const videoPlaylistUrl = resolveUrl(baseUrl, best.uri)
-  const audioPlaylistUrl = pickAudioPlaylistUrl(manifest, baseUrl, best?.attributes?.AUDIO)
-  const [videoSegments, audioSegments] = await Promise.all([
-    getM3u8SegmentsWithMeta(videoPlaylistUrl, signal),
-    audioPlaylistUrl ? getM3u8SegmentsWithMeta(audioPlaylistUrl, signal) : Promise.resolve([])
-  ])
-  return { videoSegments, audioSegments }
-}
-
-// AES-128 密钥缓存（每次下载任务内复用）
-const hlsKeyCache = new Map<string, CryptoKey>()
-
-const fetchHlsKey = async (keyUri: string, signal?: AbortSignal): Promise<CryptoKey> => {
-  if (hlsKeyCache.has(keyUri)) return hlsKeyCache.get(keyUri)!
-  const res = await fetch(getProxyUrl(keyUri), { signal })
-  if (!res.ok) throw new Error(`获取解密密钥失败: ${res.status}`)
-  const raw = await res.arrayBuffer()
-  const key = await crypto.subtle.importKey('raw', raw, { name: 'AES-CBC' }, false, ['decrypt'])
-  hlsKeyCache.set(keyUri, key)
-  return key
-}
-
-// AES-128-CBC 解密单个分片（未加密直接返回原数据）
-const decryptHlsSegment = async (data: ArrayBuffer, seg: HlsSegment, signal?: AbortSignal): Promise<ArrayBuffer> => {
-  if (!seg.keyUri) return data
-  const key = await fetchHlsKey(seg.keyUri, signal)
-  let iv: ArrayBuffer
-  if (seg.keyIv && seg.keyIv.byteLength === 16) {
-    iv = seg.keyIv.buffer.slice(seg.keyIv.byteOffset, seg.keyIv.byteOffset + 16)
-  } else {
-    // 无显式 IV：用序列号填充 16 字节大端整数
-    const ivBytes = new Uint8Array(16)
-    const sn = seg.sn
-    ivBytes[12] = (sn >>> 24) & 0xff
-    ivBytes[13] = (sn >>> 16) & 0xff
-    ivBytes[14] = (sn >>> 8) & 0xff
-    ivBytes[15] = sn & 0xff
-    iv = ivBytes.buffer
-  }
-  return crypto.subtle.decrypt({ name: 'AES-CBC', iv }, key, data)
-}
-
-// 触发浏览器下载
-const triggerDownload = (blob: Blob, filename: string) => {
-  const a = document.createElement('a')
-  a.href = URL.createObjectURL(blob)
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(a.href)
-}
-
-const ensureFfmpegReady = async () => {
-  if (ffmpegInstance && ffmpegUtil) return
-  if (!ffmpegLoadTask) {
-    ffmpegLoadTask = (async () => {
-      const [{ FFmpeg }, utilModule] = await Promise.all([
-        import('@ffmpeg/ffmpeg'),
-        import('@ffmpeg/util')
-      ])
-      const ffmpeg = new FFmpeg()
-      ffmpeg.on('progress', ({ progress }: { progress: number }) => {
-        // 下载阶段占 0-90，转码阶段占 90-100
-        const transcodeProgress = 90 + Math.round(Math.max(0, Math.min(1, progress)) * 10)
-        if (transcodeProgress > downloadProgress.value) {
-          downloadProgress.value = transcodeProgress
-        }
-      })
-      const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.10/dist/esm'
-      const coreURL = await utilModule.toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript')
-      const wasmURL = await utilModule.toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm')
-      await ffmpeg.load({
-        coreURL,
-        wasmURL
-      })
-      ffmpegInstance = ffmpeg
-      ffmpegUtil = { fetchFile: utilModule.fetchFile, toBlobURL: utilModule.toBlobURL }
-    })()
-  }
-  try {
-    await ffmpegLoadTask
-  } catch (e) {
-    ffmpegLoadTask = null
-    ffmpegInstance = null
-    ffmpegUtil = null
-    throw e
-  }
-}
-
-const concatChunks = (chunks: Uint8Array[]): Uint8Array => {
-  const totalBytes = chunks.reduce((sum, seg) => sum + seg.byteLength, 0)
-  const merged = new Uint8Array(totalBytes)
-  let cursor = 0
-  for (const seg of chunks) {
-    merged.set(seg, cursor)
-    cursor += seg.byteLength
-  }
-  return merged
-}
-
-const mergeSegmentsToMp4 = async (videoSegments: Uint8Array[], audioSegments: Uint8Array[] = []): Promise<Blob> => {
-  await ensureFfmpegReady()
-  if (!ffmpegInstance || !ffmpegUtil) throw new Error('FFmpeg 初始化失败')
-
-  if (!videoSegments.length) {
-    throw new Error('未获取到视频分片')
-  }
-
-  const videoMerged = concatChunks(videoSegments)
-  await ffmpegInstance.writeFile('video.ts', await ffmpegUtil.fetchFile(new Blob([videoMerged], { type: 'video/mp2t' })))
-
-  if (audioSegments.length > 0) {
-    const audioMerged = concatChunks(audioSegments)
-    await ffmpegInstance.writeFile('audio.ts', await ffmpegUtil.fetchFile(new Blob([audioMerged], { type: 'audio/mp2t' })))
-    await ffmpegInstance.exec([
-      '-y',
-      '-i', 'video.ts',
-      '-i', 'audio.ts',
-      '-map', '0:v:0',
-      '-map', '1:a:0',
-      '-c:v', 'copy',
-      '-c:a', 'aac',
-      '-movflags', '+faststart',
-      'output.mp4'
-    ])
-  } else {
-    await ffmpegInstance.exec([
-      '-y',
-      '-i', 'video.ts',
-      '-c', 'copy',
-      '-movflags', '+faststart',
-      'output.mp4'
-    ])
-  }
-
-  const outData = await ffmpegInstance.readFile('output.mp4') as Uint8Array
-
-  try { await ffmpegInstance.deleteFile('video.ts') } catch {}
-  try { await ffmpegInstance.deleteFile('audio.ts') } catch {}
-  try { await ffmpegInstance.deleteFile('output.mp4') } catch {}
-
-  return new Blob([outData], { type: 'video/mp4' })
-}
-
-// 下载视频（可选指定 URL，否则用当前播放的）
-const downloadVideo = async (targetUrl?: string) => {
-  const url = (targetUrl || videoUrl.value)?.trim()
-  if (!url || (!url.startsWith('http') && !url.startsWith('//'))) {
-    errorMessage.value = '无可下载的视频地址'
-    return
-  }
-
-  const normalizedUrl = url.startsWith('//') ? 'https:' + url : url
-  isDownloading.value = true
-  downloadProgress.value = 0
-  errorMessage.value = ''
-  downloadAbortController = new AbortController()
-
-  try {
-    const idx = playlist.value.indexOf(url)
-    const filename = getVideoName(normalizedUrl, idx >= 0 ? idx : currentIndex.value) || `video_${Date.now()}`
-    const isHlsVideo = isHlsUrl(normalizedUrl)
-
-    if (isHlsVideo) {
-      const { videoSegments, audioSegments } = await getM3u8DownloadPlan(normalizedUrl, downloadAbortController.signal)
-      const total = videoSegments.length + audioSegments.length
-      if (total === 0) {
-        throw new Error('M3U8 分片为空，无法下载')
-      }
-      const videoChunks: Uint8Array[] = new Array(videoSegments.length)
-      const audioChunks: Uint8Array[] = new Array(audioSegments.length)
-      const CONCURRENCY = 6
-      let completed = 0
-      let pointer = 0
-      hlsKeyCache.clear()
-      type DownloadTask = { kind: 'video' | 'audio'; idx: number } & HlsSegment
-      const tasks: DownloadTask[] = [
-        ...videoSegments.map((seg, idx) => ({ kind: 'video' as const, idx, ...seg })),
-        ...audioSegments.map((seg, idx) => ({ kind: 'audio' as const, idx, ...seg }))
-      ]
-
-      const runWorker = async () => {
-        while (pointer < total) {
-          const current = pointer++
-          const task = tasks[current]
-          const res = await fetch(getProxyUrl(task.url), { signal: downloadAbortController?.signal })
-          if (!res.ok) {
-            throw new Error(`下载分片失败: ${res.status}`)
-          }
-          const raw = await res.arrayBuffer()
-          const decrypted = await decryptHlsSegment(raw, task, downloadAbortController?.signal)
-          const chunk = new Uint8Array(decrypted)
-          if (task.kind === 'video') {
-            videoChunks[task.idx] = chunk
-          } else {
-            audioChunks[task.idx] = chunk
-          }
-          completed++
-          downloadProgress.value = Math.min(90, Math.round((completed / total) * 90))
-        }
-      }
-
-      const workers = Array.from({ length: Math.min(CONCURRENCY, total) }, () => runWorker())
-      await Promise.all(workers)
-      hlsKeyCache.clear()
-
-      downloadProgress.value = 92
-      const mp4Blob = await mergeSegmentsToMp4(videoChunks, audioChunks)
-      const outName = filename.replace(/\.[^.]+$/, '') + '.mp4'
-      triggerDownload(mp4Blob, outName)
-      downloadProgress.value = 100
-      useToast().add({ title: '下载完成: ' + outName, color: 'green', timeout: 3000 })
-    } else {
-      const res = await fetch(getProxyUrl(normalizedUrl), { signal: downloadAbortController.signal })
-      if (!res.ok) throw new Error(`下载失败: ${res.status}`)
-      const blob = await res.blob()
-      downloadProgress.value = 100
-      const outName = filename.includes('.mp4') ? filename : filename + '.mp4'
-      triggerDownload(blob, outName)
-      useToast().add({ title: '下载完成: ' + outName, color: 'green', timeout: 3000 })
-    }
-  } catch (e: any) {
-    if (e?.name === 'AbortError') {
-      useToast().add({ title: '下载已取消', color: 'amber', timeout: 2000 })
-      return
-    }
-    console.error('下载失败:', e)
-    let msg = e instanceof Error ? e.message : String(e)
-    if (!useProxy.value && (msg.includes('fetch') || msg.includes('CORS') || msg.includes('403'))) {
-      msg += '，可尝试开启「使用跨域代理」'
-    }
-    errorMessage.value = '下载失败: ' + msg
-  } finally {
-    isDownloading.value = false
-    downloadProgress.value = 0
-    downloadAbortController = null
-  }
-}
-
-// 取消下载
-const cancelDownload = () => {
-  downloadAbortController?.abort()
-  downloadAbortController = null
-  isDownloading.value = false
-  downloadProgress.value = 0
-}
+// 视频下载（HLS 分片并发+AES解密+ffmpeg合并 / MP4 直下），逻辑抽到 useVideoDownload
+const { isDownloading, downloadProgress, downloadVideo, cancelDownload } = useVideoDownload({
+  getProxyUrl,
+  isHlsUrl,
+  getVideoName,
+  videoUrl,
+  playlist,
+  currentIndex,
+  errorMessage,
+  useProxy,
+  getDownloadConcurrency: () => activeRule.value?.downloadConcurrency ?? 6,
+})
 
 // 解析多行输入并加载
 const parseAndLoad = async () => {
@@ -1501,276 +1212,6 @@ const clearPlaylist = () => {
   videoUrlInput.value = ''
 }
 
-// ========== 自适应并行预取 ==========
-
-// 根据缓冲健康度决定并发预取数（线程数 = 浏览器同 host 限 6 连接里留给预取的份额）
-const getAdaptivePrefetchCount = (bufferSecs: number): number => {
-  if (bufferSecs < 60)  return 3  // 缓冲 < 1 分钟：积极预取
-  if (bufferSecs < 300) return 2  // 1–5 分钟：稳定预取
-  return 1                        // > 5 分钟：节省带宽
-}
-
-// 创建自定义 HLS 分片加载器（fLoader）
-// 优先从预取缓存返回数据，cache miss 时走 fetch 正常加载
-const createHlsFragLoader = () => {
-  return class PrefetchFragLoader {
-    context: any
-    // hls.js 在创建 loader 实例后立刻执行 frag.stats = loader.stats，
-    // 时机早于 load() 调用。若此处不提前初始化，frag.stats 会是 undefined，
-    // AbrController 的 setInterval 轮询时读 frag.stats.loading 直接崩溃。
-    stats: any = {
-      aborted: false, loaded: 0, total: 0,
-      retry: 0, chunkCount: 0, bwEstimate: 0,
-      loading:   { start: 0, first: 0, end: 0 },
-      parsing:   { start: 0, end: 0 },
-      buffering: { start: 0, first: 0, end: 0 },
-    }
-    private ctrl: AbortController | null = null
-
-    load(context: any, config: any, callbacks: any): void {
-      this.context = context
-      const url: string = context.url
-      const t0 = performance.now()
-
-      // 重置 stats 字段（必须原地修改，不能替换整个对象）
-      // frag.stats 持有的是同一个对象引用，替换会导致 frag.stats 仍指向旧的 undefined
-      this.stats.aborted = false
-      this.stats.loaded = 0
-      this.stats.total = 0
-      this.stats.retry = 0
-      this.stats.chunkCount = 0
-      this.stats.bwEstimate = 0
-      this.stats.loading.start = t0
-      this.stats.loading.first = 0
-      this.stats.loading.end   = 0
-      this.stats.parsing.start = 0
-      this.stats.parsing.end   = 0
-      this.stats.buffering.start = 0
-      this.stats.buffering.first = 0
-      this.stats.buffering.end   = 0
-
-      const succeed = (data: ArrayBuffer) => {
-        // seek/换源后 hls.js 会 abort 旧 loader；此时再回调 onSuccess
-        // 会污染 hls.js 的内部状态，让播放卡住几十秒。必须在这里短路。
-        if (this.stats.aborted) return
-        const t1 = performance.now()
-        this.stats.loaded = data.byteLength
-        this.stats.total  = data.byteLength
-        this.stats.chunkCount = 1
-        if (!this.stats.loading.first) this.stats.loading.first = t0 + 1
-        this.stats.loading.end = t1
-        callbacks.onSuccess({ data, url }, this.stats, context)
-      }
-
-      const fail = (e: Error) => {
-        if (this.stats.aborted) return
-        this.stats.loading.end = performance.now()
-        callbacks.onError({ code: 0, text: e.message }, context, null, this.stats)
-      }
-
-      // 1. 命中预取缓存（且未过期）→ 即时返回，并刷新 LRU 顺序与访问时间
-      const cachedBuf = getPrefetchedBuf(url)
-      if (cachedBuf) {
-        segPrefetchCache.delete(url)
-        segPrefetchCache.set(url, { buf: cachedBuf, ts: Date.now() })
-        prefetchInfo.value.cached = segPrefetchCache.size
-        succeed(cachedBuf)
-        return
-      }
-
-      // 2. 正在预取中 → 等待 Promise，完成后也存入缓存
-      if (segPrefetching.has(url)) {
-        segPrefetching.get(url)!
-          .then(buf => {
-            if (this.stats.aborted) return
-            if (buf.byteLength > 0) {
-              succeed(buf)
-            } else {
-              this.doFetch(url, config, succeed, fail)
-            }
-          })
-          .catch(() => {
-            if (this.stats.aborted) return
-            this.doFetch(url, config, succeed, fail)
-          })
-        return
-      }
-
-      // 3. 普通加载
-      this.doFetch(url, config, succeed, fail)
-    }
-
-    private doFetch(url: string, config: any, succeed: (b: ArrayBuffer) => void, fail: (e: Error) => void) {
-      this.ctrl = new AbortController()
-      const timeout = config?.timeout ?? 30000
-      const timer = setTimeout(() => this.ctrl?.abort(), timeout)
-      fetch(getProxyUrl(url), { signal: this.ctrl.signal })
-        .then(r => {
-          clearTimeout(timer)
-          if (!r.ok) throw new Error(`HTTP ${r.status}`)
-          // 标记首字节时间，供 AbrController 带宽估算使用
-          this.stats.loading.first = performance.now()
-          return r.arrayBuffer()
-        })
-        .then(succeed)
-        .catch(e => { clearTimeout(timer); if (e?.name !== 'AbortError') fail(e instanceof Error ? e : new Error(String(e))) })
-    }
-
-    abort(): void {
-      this.ctrl?.abort()
-      if (this.stats) this.stats.aborted = true
-    }
-    destroy(): void { this.abort() }
-  }
-}
-
-// 触发自适应预取（每次 FRAG_BUFFERED 后调用）
-const triggerAdaptivePrefetch = (lastFragSn: number) => {
-  if (!hls || !videoEl.value) return
-
-  const video = videoEl.value
-  // 用 getAheadBuffered 拿"当前播放位置往后"的缓冲秒数，避免多缓冲段时取错
-  const bufferSecs = getAheadBuffered(video)
-  const count = getAdaptivePrefetchCount(bufferSecs)
-
-  prefetchInfo.value = {
-    bufferSecs: Math.round(bufferSecs * 10) / 10,
-    threads: count,
-    cached: segPrefetchCache.size,
-    pending: segPrefetching.size,
-  }
-
-  if (count === 0) return
-
-  // 取当前画质的分片列表
-  const level = hls.currentLevel >= 0 ? hls.currentLevel : 0
-  const levelDetails = (hls as any).levels?.[level]?.details
-  if (!levelDetails) return
-
-  const frags: any[] = levelDetails.fragments
-  const startIdx = frags.findIndex((f: any) => f.sn === lastFragSn) + 1
-  if (startIdx <= 0) return
-
-  // 计算还能发起几个新请求（不超过并发上限）
-  const canStart = Math.max(0, count - segPrefetching.size)
-  if (canStart === 0) return
-
-  // 候选窗口：从 startIdx 往后扫描，最多看 count*3 个，足以跳过已缓存/下载中的
-  const candidates = frags.slice(startIdx, startIdx + count * 3)
-
-  let started = 0
-  for (const frag of candidates) {
-    if (started >= canStart) break
-    const url: string = frag.url
-    if (!url || getPrefetchedBuf(url) !== null || segPrefetching.has(url)) continue
-
-    const ctrl = new AbortController()
-    segPrefetchAborts.set(url, ctrl)
-    const promise = fetch(getProxyUrl(url), { signal: ctrl.signal })
-      .then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error(`HTTP ${r.status}`)))
-      .then(buf => {
-        segPrefetchAborts.delete(url)
-        segPrefetchCache.set(url, { buf, ts: Date.now() })
-        segPrefetching.delete(url)
-        prefetchInfo.value.cached = segPrefetchCache.size
-        prefetchInfo.value.pending = segPrefetching.size
-        evictPrefetchCache()
-        startOnePrefetch()
-        return buf
-      })
-      .catch(() => {
-        segPrefetchAborts.delete(url)
-        segPrefetching.delete(url)
-        prefetchInfo.value.pending = segPrefetching.size
-        return new ArrayBuffer(0)
-      })
-
-    segPrefetching.set(url, promise)
-    started++
-  }
-
-  prefetchInfo.value.pending = segPrefetching.size
-
-  // 按内存上限 LRU 淘汰（在新分片加入后检查）
-  evictPrefetchCache()
-}
-
-// ========== end 自适应并行预取 ==========
-
-// LRU 淘汰：先剔除已过期项，再按 hlsConfig.maxBufferSizeMB 控制总大小
-const evictPrefetchCache = () => {
-  const now = Date.now()
-  // 先清过期
-  for (const [url, entry] of segPrefetchCache) {
-    if (now - entry.ts > PREFETCH_TTL_MS) segPrefetchCache.delete(url)
-  }
-  const limitBytes = hlsConfig.value.maxBufferSizeMB * 1024 * 1024
-  let totalBytes = 0
-  for (const entry of segPrefetchCache.values()) totalBytes += entry.buf.byteLength
-  if (totalBytes <= limitBytes) {
-    prefetchInfo.value.cached = segPrefetchCache.size
-    return
-  }
-  for (const [key, entry] of segPrefetchCache) {
-    if (totalBytes <= limitBytes) break
-    totalBytes -= entry.buf.byteLength
-    segPrefetchCache.delete(key)
-  }
-  prefetchInfo.value.cached = segPrefetchCache.size
-}
-
-// 完成1个分片后补充1个，基于当前播放进度定位下一个未下载分片
-const startOnePrefetch = () => {
-  if (!hls || !videoEl.value) return
-  const video = videoEl.value
-  const bufferSecs = getAheadBuffered(video)
-  const count = getAdaptivePrefetchCount(bufferSecs)
-
-  prefetchInfo.value.bufferSecs = Math.round(bufferSecs * 10) / 10
-  prefetchInfo.value.threads = count
-  prefetchInfo.value.cached = segPrefetchCache.size
-  prefetchInfo.value.pending = segPrefetching.size
-
-  if (count === 0 || segPrefetching.size >= count) return
-
-  const level = hls.currentLevel >= 0 ? hls.currentLevel : 0
-  const frags: any[] = (hls as any).levels?.[level]?.details?.fragments ?? []
-  if (!frags.length) return
-
-  // 从当前播放时间往后找第一个未缓存、未下载中的分片
-  const currentTime = video.currentTime
-  for (const frag of frags) {
-    if (frag.start < currentTime) continue
-    const url: string = frag.url
-    if (!url || getPrefetchedBuf(url) !== null || segPrefetching.has(url)) continue
-
-    const ctrl = new AbortController()
-    segPrefetchAborts.set(url, ctrl)
-    const promise = fetch(getProxyUrl(url), { signal: ctrl.signal })
-      .then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error(`HTTP ${r.status}`)))
-      .then(buf => {
-        segPrefetchAborts.delete(url)
-        segPrefetchCache.set(url, { buf, ts: Date.now() })
-        segPrefetching.delete(url)
-        prefetchInfo.value.cached = segPrefetchCache.size
-        prefetchInfo.value.pending = segPrefetching.size
-        evictPrefetchCache()
-        startOnePrefetch()
-        return buf
-      })
-      .catch(() => {
-        segPrefetchAborts.delete(url)
-        segPrefetching.delete(url)
-        prefetchInfo.value.pending = segPrefetching.size
-        return new ArrayBuffer(0)
-      })
-
-    segPrefetching.set(url, promise)
-    prefetchInfo.value.pending = segPrefetching.size
-    break  // 只补1个
-  }
-}
-
 // 加载视频
 // 清除加载超时定时器
 const clearLoadTimeout = () => {
@@ -1803,9 +1244,105 @@ const markDataReceived = () => {
   clearLoadTimeout()
 }
 
+// ── 自动可达性策略阶梯（用户无需指定代理/防盗链，引擎自己试）──
+// step 0 直连 → 1 代理+伪装(不发头) → 2 代理+注入 Origin/Referer(防盗链)
+const autoStrategyStep = ref(0)
+const MAX_STRATEGY_STEP = 2
+let lastStrategyUrl = ''
+
+// 规则是否显式接管可达性（任一代理相关字段有值）；有则用规则，跳过自动阶梯
+const ruleControlsReachability = (r: SiteRule | null): boolean =>
+  !!r && (r.useProxy !== undefined || r.manifestOnly !== undefined ||
+    r.disguiseAsDownloader !== undefined || r.origin !== undefined || r.referer !== undefined)
+
+// 应用阶梯第 step 级配置（写回 ref，getProxyUrl 随即生效）
+const applyReachabilityStep = (step: number) => {
+  let host = ''
+  try { host = new URL(videoUrl.value.startsWith('//') ? 'https:' + videoUrl.value : videoUrl.value).origin } catch {}
+  if (step <= 0) {                     // 直连：最快，CORS 开放站点直接用
+    useProxy.value = false; disguiseAsDownloader.value = false
+    requestOrigin.value = ''; requestReferer.value = ''; manifestOnly.value = true
+  } else if (step === 1) {             // 代理+伪装：服务端补 CORS、不发 Origin/Referer
+    useProxy.value = false; disguiseAsDownloader.value = true
+    requestOrigin.value = ''; requestReferer.value = ''
+  } else {                             // 代理+注入 Origin/Referer：防盗链站点，全程代理
+    useProxy.value = false; disguiseAsDownloader.value = false
+    requestOrigin.value = host; requestReferer.value = host ? host + '/' : ''; manifestOnly.value = false
+  }
+}
+
+// 决定本次加载策略：换新地址重置阶梯；规则接管则用规则，否则走自动阶梯
+const applyStrategy = (url: string) => {
+  const rule = matchSiteRule(url, userSiteRules.value)
+  activeRule.value = rule
+  if (url !== lastStrategyUrl) { autoStrategyStep.value = 0; lastStrategyUrl = url }
+  if (manualStrategyOverride.value) return  // 手动模式：保留用户当前代理设置，不自动改
+  if (ruleControlsReachability(rule)) {
+    if (rule!.useProxy !== undefined) useProxy.value = rule!.useProxy
+    if (rule!.manifestOnly !== undefined) manifestOnly.value = rule!.manifestOnly
+    if (rule!.disguiseAsDownloader !== undefined) disguiseAsDownloader.value = rule!.disguiseAsDownloader
+    if (rule!.origin !== undefined) requestOrigin.value = rule!.origin
+    if (rule!.referer !== undefined) requestReferer.value = rule!.referer
+  } else {
+    applyReachabilityStep(autoStrategyStep.value)
+  }
+}
+
+// 当前策略加载失败时，自动升级到下一级并重载（规则接管或已到顶则不再升级）
+const escalateStrategyAndReload = (): boolean => {
+  if (manualStrategyOverride.value) return false
+  if (ruleControlsReachability(activeRule.value)) return false
+  if (autoStrategyStep.value >= MAX_STRATEGY_STEP) return false
+  autoStrategyStep.value++
+  console.log('当前策略加载失败，自动升级可达性 → step', autoStrategyStep.value)
+  errorMessage.value = `直连失败，正在自动尝试${autoStrategyStep.value === 1 ? '代理' : '代理+防盗链'}...`
+  loadVideo()
+  return true
+}
+
+// 当前连接策略的展示文案
+const strategyLabel = computed(() => {
+  if (manualStrategyOverride.value) return '手动'
+  if (ruleControlsReachability(activeRule.value)) return `规则(${activeRule.value?.name})`
+  return ['直连', '代理·伪装', '代理·防盗链'][autoStrategyStep.value] ?? '直连'
+})
+
+// 用户改动任一连接设置 → 转手动（引擎不再覆盖可达性；并发/预取仍全自动）
+const onManualProxyChange = () => {
+  manualStrategyOverride.value = true
+  rememberHeaders()   // 记住本次 Origin/Referer 供下拉复用
+  saveState()
+}
+
+// 交回引擎全自动
+const resetToAuto = () => {
+  manualStrategyOverride.value = false
+  autoStrategyStep.value = 0
+  saveState()
+  if (videoUrl.value) loadVideo()
+}
+
+// 内置规则（只读展示用）
+const builtinRules = BUILTIN_RULES
+
+// 站点规则编辑
+const addSiteRule = () => {
+  userSiteRules.value.push({ id: `u-${Date.now()}`, name: '新规则', pattern: '', manifestOnly: false })
+}
+const removeSiteRule = (id: string) => {
+  userSiteRules.value = userSiteRules.value.filter(r => r.id !== id)
+  saveUserSiteRules(userSiteRules.value)
+}
+// 保存规则并对当前视频重新套用（若正在播放则重载）
+const applyRulesAndReload = () => {
+  saveUserSiteRules(userSiteRules.value)
+  if (videoUrl.value) loadVideo()
+  else useToast().add({ title: '站点规则已保存', color: 'green', timeout: 2000 })
+}
+
 const loadVideo = async () => {
   if (!videoUrl.value.trim()) return
-  
+
   errorMessage.value = ''
   isLoading.value = true
   isBuffering.value = true
@@ -1826,9 +1363,10 @@ const loadVideo = async () => {
   startLoadTimeout()
   
   const url = videoUrl.value.trim()
+  applyStrategy(url)  // 自动决定直连/代理/防盗链 + 站点规则并发
   isHls.value = isHlsUrl(url)
-  
-  console.log('开始加载视频:', url, '是否HLS:', isHls.value, '使用代理:', useProxy.value)
+
+  console.log('开始加载视频:', url, '是否HLS:', isHls.value, '使用代理:', useProxy.value, '站点规则:', activeRule.value?.name ?? '无')
   
   try {
     if (isHls.value) {
@@ -1878,13 +1416,21 @@ const loadHlsVideo = async (url: string) => {
   const finalUrl = getProxyUrl(url)
   console.log('加载 HLS 视频:', finalUrl)
   
-  // 简化的 HLS 配置
+  // HLS 配置
+  // 关键：MSE 缓冲要"小而健康"——append 太多（几百 MB）会触发浏览器 MSE 配额/驱逐，
+  // 产生缓冲空洞导致明明缓冲很多却卡在原地。真正的大量预读放在 JS 预取缓存里
+  // （segPrefetchCache，容量 = maxBufferSizeMB），hls.js 只在 MSE 里留 ~30s，随播随取。
   hls = new Hls({
-    // 基础缓冲配置
-    maxBufferLength: hlsConfig.value.maxBufferLength,
-    maxMaxBufferLength: hlsConfig.value.maxMaxBufferLength,
-    backBufferLength: hlsConfig.value.backBufferLength,
-    maxBufferSize: hlsConfig.value.maxBufferSizeMB * 1024 * 1024,
+    // MSE 缓冲：控制在小范围（Math.min 兼容并迁移旧的超大配置）
+    maxBufferLength: Math.min(30, hlsConfig.value.maxBufferLength),
+    maxMaxBufferLength: Math.min(60, hlsConfig.value.maxMaxBufferLength),
+    backBufferLength: Math.min(30, hlsConfig.value.backBufferLength),
+    maxBufferSize: 60 * 1000 * 1000,   // MSE 最多 ~60MB，其余交给 JS 预取缓存
+    // 缓冲空洞 / 卡顿自动跳跃恢复
+    maxBufferHole: 0.5,
+    highBufferWatchdogPeriod: 1,
+    nudgeOffset: 0.2,
+    nudgeMaxRetry: 8,
     // 加载配置
     fragLoadingTimeOut: hlsConfig.value.fragLoadingTimeOut,
     fragLoadingMaxRetry: hlsConfig.value.fragLoadingMaxRetry,
@@ -1924,7 +1470,13 @@ const loadHlsVideo = async (url: string) => {
     // 延迟 3 秒后自动播放
     scheduleAutoPlay()
   })
-  
+
+  // playlist（分片列表）就绪 → 立刻并行预热前若干分片 + 启动实时心跳
+  hls.on(Hls.Events.LEVEL_LOADED, () => {
+    primePrefetch()
+    startHlsTick()
+  })
+
   // 错误处理
   hls.on(Hls.Events.ERROR, (_, data) => {
     console.warn('HLS 错误:', data.type, data.details, 'fatal:', data.fatal)
@@ -1940,8 +1492,9 @@ const loadHlsVideo = async (url: string) => {
               hls?.startLoad()
             }, 1000)
           } else {
-            // 超过重试次数，停止加载
-            const errMsg = data.details === 'manifestLoadError' 
+            // 超过重试次数：先自动升级可达性策略（直连→代理→防盗链）再重载
+            if (escalateStrategyAndReload()) break
+            const errMsg = data.details === 'manifestLoadError'
               ? '视频链接无效或已过期，请检查链接是否正确'
               : `网络错误: ${data.details}，链接可能已过期`
             errorMessage.value = errMsg
@@ -1992,17 +1545,6 @@ const loadHlsVideo = async (url: string) => {
   hls.on(Hls.Events.LEVEL_SWITCHED, () => {
     updateHlsStats()
   })
-}
-
-// 计算当前播放位置前方的缓冲秒数
-const getAheadBuffered = (video: HTMLVideoElement): number => {
-  const ct = video.currentTime
-  for (let i = 0; i < video.buffered.length; i++) {
-    if (video.buffered.start(i) <= ct + 0.1 && ct <= video.buffered.end(i)) {
-      return video.buffered.end(i) - ct
-    }
-  }
-  return 0
 }
 
 // 更新 HLS 统计信息
@@ -2066,11 +1608,13 @@ const destroyHls = () => {
     hls = null
   }
   hlsStats.value = null
-  // 清空预取缓存、取消正在跑的预取请求、停止清理定时器
+  // 清空预取缓存、取消正在跑的预取请求、停止清理定时器/心跳、重置策略实测（换流/换 CDN 重新测）
+  stopHlsTick()
   stopPrefetchCleanup()
   abortAllPrefetches()
   segPrefetchCache.clear()
   prefetchInfo.value = { bufferSecs: 0, threads: 0, cached: 0, pending: 0 }
+  resetStrategy()
   cancelDownload()
 }
 
@@ -2220,12 +1764,10 @@ const toggleMute = () => {
   videoEl.value.muted = isMuted.value
 }
 
-// 倍速控制
+// 倍速控制：用户选择的是「目标倍速」（上限），实际生效由 applyEffectiveRate 决定
 const setPlaybackRate = (rate: number) => {
-  playbackRate.value = rate
-  if (videoEl.value) {
-    videoEl.value.playbackRate = rate
-  }
+  desiredRate.value = rate
+  applyEffectiveRate()
   showSpeedMenu.value = false
 }
 
@@ -2341,31 +1883,28 @@ const onVideoError = (e: Event) => {
   const error = video?.error
   let msg = '视频加载失败'
   
+  // 网络/源被拒：先自动升级可达性策略（直连→代理→防盗链）再重载
+  if (error && (error.code === MediaError.MEDIA_ERR_NETWORK || error.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED)) {
+    if (escalateStrategyAndReload()) return
+  }
+
   if (error) {
     switch (error.code) {
       case MediaError.MEDIA_ERR_ABORTED:
         msg = '视频加载被中断'
         break
       case MediaError.MEDIA_ERR_NETWORK:
-        if (useProxy.value) {
-          msg = '网络错误（403/防盗链），请关闭代理直接播放，或使用本地文件'
-        } else {
-          msg = '网络错误，可能是跨域问题或链接已过期，请尝试开启"使用跨域代理"或检查链接'
-        }
+        msg = '网络错误：已自动尝试直连/代理/防盗链均失败，链接可能已过期或无法访问'
         break
       case MediaError.MEDIA_ERR_DECODE:
         msg = '视频解码失败'
         break
       case MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED:
-        if (useProxy.value) {
-          msg = '视频源被拒绝（可能有防盗链），请关闭代理直接播放，或拖拽本地文件播放'
-        } else {
-          msg = '不支持的视频格式或链接已过期，请检查链接是否正确'
-        }
+        msg = '视频源被拒绝或格式不支持：已自动尝试各策略仍失败，请检查链接或改用本地文件'
         break
     }
   }
-  
+
   console.error('视频错误:', error)
   errorMessage.value = msg
   isLoading.value = false
@@ -2411,28 +1950,45 @@ const onCanPlay = () => {
   }
 }
 
-// 统一的自动播放函数：延迟 3 秒后播放
+// 起播预缓冲：缓冲够 AUTOPLAY_BUFFER_TARGET 秒即起播（尽快进入），
+// 剩下的缓冲交给多连接并行预取在播放中补齐；慢站最多等 AUTOPLAY_MAX_WAIT_MS 兜底。非 HLS 固定 3s。
+const AUTOPLAY_BUFFER_TARGET = 4     // 起播只需少量缓冲，快速进入
+const AUTOPLAY_MAX_WAIT_MS = 5000    // 兜底最多等 5s
+
 const scheduleAutoPlay = () => {
   // 清除之前的定时器
   if (delayedPlayTimer) {
     clearTimeout(delayedPlayTimer)
     delayedPlayTimer = null
   }
-  
-  console.log('等待 3 秒缓冲后自动播放...')
+
   isBuffering.value = true
-  
-  delayedPlayTimer = setTimeout(() => {
-    delayedPlayTimer = null
-    if (videoEl.value) {
-      console.log('开始自动播放')
-      isBuffering.value = false
-      videoEl.value.play().catch(e => {
-        console.log('自动播放被阻止:', e.message)
-        isBuffering.value = false
-      })
+  const startTs = performance.now()
+
+  const tryPlay = () => {
+    const video = videoEl.value
+    if (!video) { delayedPlayTimer = null; return }
+    const ahead = getAheadBuffered(video)
+    const waited = performance.now() - startTs
+    // 起播目标随倍速略放大（封顶 ×2），但保持小值以快速起播
+    const target = AUTOPLAY_BUFFER_TARGET * Math.min(2, Math.max(1, desiredRate.value))
+    const ready = !isHls.value
+      ? waited >= 2000
+      : ahead >= target || waited >= AUTOPLAY_MAX_WAIT_MS
+    if (!ready) {
+      delayedPlayTimer = setTimeout(tryPlay, 300)
+      return
     }
-  }, 3000)
+    delayedPlayTimer = null
+    console.log(`开始自动播放（预缓冲 ${ahead.toFixed(1)}s，等待 ${(waited / 1000).toFixed(1)}s）`)
+    isBuffering.value = false
+    video.play().catch(e => {
+      console.log('自动播放被阻止:', e.message)
+      isBuffering.value = false
+    })
+  }
+
+  delayedPlayTimer = setTimeout(tryPlay, 500)
 }
 
 const onLoadedData = () => {
@@ -2444,6 +2000,20 @@ const onLoadedData = () => {
 const onWaiting = () => {
   console.log('视频等待缓冲...')
   isBuffering.value = true
+  if (!isHls.value) return
+  // 卡顿即刻反应：立即跑一次预取控制（不等下一个心跳/FRAG_BUFFERED）
+  prefetchTick()
+  // 缓冲空洞跳跃：播放头前方几乎没缓冲、但更后面存在缓冲段（洞），跳过小洞恢复播放
+  const video = videoEl.value
+  if (video && video.buffered.length > 1) {
+    const ct = video.currentTime
+    if (getAheadBuffered(video) < 0.3) {
+      for (let i = 0; i < video.buffered.length; i++) {
+        const s = video.buffered.start(i)
+        if (s > ct && s - ct < 3) { video.currentTime = s + 0.01; break }  // 跳过 <3s 的洞
+      }
+    }
+  }
 }
 
 // 可以流畅播放
@@ -2599,12 +2169,12 @@ const handleKeydown = (e: KeyboardEvent) => {
       break
     case '<':
     case ',':
-      const prevIdx = playbackRates.indexOf(playbackRate.value)
+      const prevIdx = playbackRates.indexOf(desiredRate.value)
       if (prevIdx > 0) setPlaybackRate(playbackRates[prevIdx - 1])
       break
     case '>':
     case '.':
-      const nextIdx = playbackRates.indexOf(playbackRate.value)
+      const nextIdx = playbackRates.indexOf(desiredRate.value)
       if (nextIdx < playbackRates.length - 1) setPlaybackRate(playbackRates[nextIdx + 1])
       break
   }
@@ -2618,7 +2188,11 @@ const handleFullscreenChange = () => {
 onMounted(async () => {
   document.addEventListener('keydown', handleKeydown)
   document.addEventListener('fullscreenchange', handleFullscreenChange)
-  
+
+  // 加载用户自定义站点规则 + Origin/Referer 历史
+  userSiteRules.value = loadUserSiteRules()
+  loadHeaderHistory()
+
   // 加载保存的状态
   const savedState = loadSavedState()
   if (savedState) {
@@ -2626,8 +2200,10 @@ onMounted(async () => {
     savedProgress.value = savedState.progress || {}
     volume.value = savedState.volume ?? 1
     playbackRate.value = savedState.playbackRate ?? 1
+    desiredRate.value = savedState.playbackRate ?? 1
     useProxy.value = savedState.useProxy ?? false
     autoFullscreen.value = savedState.autoFullscreen ?? true
+    autoBestRate.value = savedState.autoBestRate ?? true
     skipIntro.value = savedState.skipIntro ?? 0
     skipOutro.value = savedState.skipOutro ?? 0
     requestOrigin.value = savedState.requestOrigin ?? ''

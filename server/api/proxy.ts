@@ -74,7 +74,7 @@ export default defineEventHandler(async (event) => {
 
   let response: Response
   try {
-    response = await fetch(targetUrl, fetchOpts as RequestInit)
+    response = await fetchWithRetry(targetUrl, fetchOpts as RequestInit)
   } catch (e) {
     const err = e as Error & { cause?: { code?: string; message?: string } }
     const cause = err.cause?.code || err.cause?.message || ''
@@ -118,6 +118,23 @@ export default defineEventHandler(async (event) => {
 })
 
 // ── 工具函数 ──────────────────────────────────────────────────
+
+// 带 1 次重试的 fetch：网络错误或 5xx 时重试一次，与前端分片重试形成两层兜底。
+// 兼容 Node（透传 dispatcher）与 CF（原生 fetch）。
+async function fetchWithRetry(url: string, opts: RequestInit, retries = 1): Promise<Response> {
+  let lastErr: any
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url, opts)
+      if (res.status >= 500 && attempt < retries) continue
+      return res
+    } catch (e) {
+      lastErr = e
+      if (attempt >= retries) throw e
+    }
+  }
+  throw lastErr
+}
 
 function rewriteM3u8(
   content: string,
