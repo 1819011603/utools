@@ -160,7 +160,10 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   // 注意：永远保持并行预取后续分片，绝不因当前分片慢而停掉后面的（否则退化成串行/卡死）。
   const getAdaptivePrefetchCount = (_bufferSecs?: number): number => {
     if (ctrlConn === 0) ctrlConn = computeTargetConcurrency()
-    const target = Math.min(hostConcurrencyCap, Math.max(2, ctrlConn))
+    // 暂停时带宽全空闲 → 顶格并发猛缓存后续分片（下到 JS 预取缓存，恢复播放即命中）。
+    // 播放时按闭环受控值走，钳制在 [2, hostCap]。
+    const paused = opts.getVideoEl()?.paused ?? false
+    const target = paused ? hostConcurrencyCap : Math.min(hostConcurrencyCap, Math.max(2, ctrlConn))
     refreshStrategy(target)
     return target
   }
