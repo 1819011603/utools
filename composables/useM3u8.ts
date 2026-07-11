@@ -27,7 +27,7 @@ export function useM3u8(getProxyUrl: (url: string) => string) {
 
   const fetchM3u8Manifest = async (m3u8Url: string, signal?: AbortSignal): Promise<{ manifest: any; baseUrl: string }> => {
     const proxyUrl = m3u8Url.startsWith('/api/proxy') ? m3u8Url : getProxyUrl(m3u8Url)
-    const res = await fetch(proxyUrl, { signal })
+    const res = await fetch(proxyUrl, { signal, referrerPolicy: 'no-referrer' })
     if (!res.ok) throw new Error(`获取 M3U8 失败: ${res.status}`)
     const text = await res.text()
 
@@ -152,7 +152,7 @@ export function useM3u8(getProxyUrl: (url: string) => string) {
 
   const fetchHlsKey = async (keyUri: string, signal?: AbortSignal): Promise<CryptoKey> => {
     if (hlsKeyCache.has(keyUri)) return hlsKeyCache.get(keyUri)!
-    const res = await fetch(getProxyUrl(keyUri), { signal })
+    const res = await fetch(getProxyUrl(keyUri), { signal, referrerPolicy: 'no-referrer' })
     if (!res.ok) throw new Error(`获取解密密钥失败: ${res.status}`)
     const raw = await res.arrayBuffer()
     const key = await crypto.subtle.importKey('raw', raw, { name: 'AES-CBC' }, false, ['decrypt'])

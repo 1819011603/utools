@@ -88,13 +88,6 @@
               @change="onManualProxyChange"
             />
           </UFormGroup>
-          <UFormGroup label=" " class="pt-1">
-            <UCheckbox
-              v-model="disguiseAsDownloader"
-              label="伪装下载器（不发送 Origin/Referer）"
-              @change="onManualProxyChange"
-            />
-          </UFormGroup>
         </div>
 
         <!-- 片头片尾跳过设置 -->
@@ -898,7 +891,7 @@ const useProxy = ref(false)
 const requestOrigin = ref('')    // 自定义 Origin 请求头
 const requestReferer = ref('')   // 自定义 Referer 请求头（空则自动为 origin + /）
 const manifestOnly = ref(true)   // 仅代理 manifest，分片直连 CDN（更快）
-const disguiseAsDownloader = ref(true)  // 不发送 Origin/Referer，模拟 N_m3u8DL-RE 等下载器
+const disguiseAsDownloader = ref(false)  // 默认直连不注入；自动可达性阶梯或站点规则可置真
 // 代理 URL 生成（Origin/Referer 注入、manifestOnly、伪装下载器、CORS 代理）
 const { isHlsUrl, effectiveReferer, refererHelp, getProxyUrl } = useVideoProxy({
   requestOrigin, requestReferer, manifestOnly, disguiseAsDownloader, useProxy,

@@ -264,7 +264,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
         const MAX_RETRY = 2   // cache-miss 时最多重试 2 次，避免偶发 502 直接触发 hls.js fatal
         const fStart = performance.now()
 
-        const tracked = fetch(getProxyUrl(url), { signal: this.ctrl.signal })
+        const tracked = fetch(getProxyUrl(url), { signal: this.ctrl.signal, referrerPolicy: 'no-referrer' })
           .then(r => {
             clearTimeout(timer)
             if (!r.ok) throw new Error(`HTTP ${r.status}`)
@@ -311,7 +311,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
       const ctrl = new AbortController()
       segPrefetchAborts.set(url, ctrl)
       const aStart = performance.now()
-      return fetch(getProxyUrl(url), { signal: ctrl.signal })
+      return fetch(getProxyUrl(url), { signal: ctrl.signal, referrerPolicy: 'no-referrer' })
         .then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error(`HTTP ${r.status}`)))
         .then(buf => { sampleSpeed(buf.byteLength, performance.now() - aStart); return buf })
         .catch(e => {

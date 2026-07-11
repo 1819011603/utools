@@ -143,7 +143,7 @@ export function useVideoDownload(opts: VideoDownloadOptions) {
     let lastErr: any
     for (let attempt = 0; attempt <= MAX_RETRY; attempt++) {
       try {
-        const res = await fetch(getProxyUrl(task.url), { signal: downloadAbortController?.signal })
+        const res = await fetch(getProxyUrl(task.url), { signal: downloadAbortController?.signal, referrerPolicy: 'no-referrer' })
         if (!res.ok) throw new Error(`下载分片失败: ${res.status}`)
         const raw = await res.arrayBuffer()
         const decrypted = await m3u8.decryptHlsSegment(raw, task, downloadAbortController?.signal)
@@ -230,7 +230,7 @@ export function useVideoDownload(opts: VideoDownloadOptions) {
         downloadProgress.value = 100
         useToast().add({ title: '下载完成: ' + outName, color: 'green', timeout: 3000 })
       } else {
-        const res = await fetch(getProxyUrl(normalizedUrl), { signal: downloadAbortController.signal })
+        const res = await fetch(getProxyUrl(normalizedUrl), { signal: downloadAbortController.signal, referrerPolicy: 'no-referrer' })
         if (!res.ok) throw new Error(`下载失败: ${res.status}`)
         const blob = await res.blob()
         downloadProgress.value = 100
