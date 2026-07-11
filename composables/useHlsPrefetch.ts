@@ -142,9 +142,8 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   }
 
   // 返回当前目标并发（受控值，双重钳制在 [2, hostCap]）。只读，供两个预取入口共用。
-  // 濒临卡顿时返回 0：暂停"预取更远分片"，把连接全部让给当前分片的 Range 分块并行下载。
-  const getAdaptivePrefetchCount = (bufferSecs?: number): number => {
-    if (bufferSecs !== undefined && bufferSecs < URGENT_BUF) { refreshStrategy(0); return 0 }
+  // 注意：永远保持并行预取后续分片，绝不因当前分片慢而停掉后面的（否则退化成串行/卡死）。
+  const getAdaptivePrefetchCount = (_bufferSecs?: number): number => {
     if (ctrlConn === 0) ctrlConn = computeTargetConcurrency()
     const target = Math.min(hostConcurrencyCap, Math.max(2, ctrlConn))
     refreshStrategy(target)
@@ -441,10 +440,12 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     const candidates = frags.slice(startIdx, startIdx + count * 3)
 
     const ct = video.currentTime
+    // 濒临卡顿时跳过"播放头当前分片"——交给 hls.js 用 Range 分块并行猛拉，预取只管后续分片
+    const minStart = bufferSecs < URGENT_BUF ? ct + 0.01 : ct - 1
     let started = 0
     for (const frag of candidates) {
       if (started >= canStart) break
-      if (frag.start < ct - 1) continue   // 跳过播放头之前的旧分片（seek 后 lastFragSn 可能是旧位置）
+      if (frag.start < minStart) continue
       const url: string = frag.url
       if (!url || getPrefetchedBuf(url) !== null || segPrefetching.has(url)) continue
       spawnPrefetch(url, frag.duration ?? 0, startOnePrefetch)
@@ -476,10 +477,12 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     const frags: any[] = (hls as any).levels?.[level]?.details?.fragments ?? []
     if (!frags.length) return
 
-    // 从当前播放时间往后找第一个未缓存、未下载中的分片（不限距离，保持并行）
+    // 从当前播放时间往后找第一个未缓存、未下载中的分片（不限距离，保持并行）。
+    // 濒临卡顿时跳过"播放头当前分片"——交给 hls.js 用 Range 分块并行猛拉，预取只管后续分片。
     const currentTime = video.currentTime
+    const minStart = bufferSecs < URGENT_BUF ? currentTime + 0.01 : currentTime
     for (const frag of frags) {
-      if (frag.start < currentTime) continue
+      if (frag.start < minStart) continue
       const url: string = frag.url
       if (!url || getPrefetchedBuf(url) !== null || segPrefetching.has(url)) continue
       spawnPrefetch(url, frag.duration ?? 0, startOnePrefetch)
