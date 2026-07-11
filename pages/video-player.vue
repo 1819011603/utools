@@ -828,6 +828,7 @@ interface SavedState {
   requestReferer: string
   manifestOnly: boolean
   disguiseAsDownloader: boolean
+  manualStrategyOverride: boolean  // 手动连接策略（持久化，避免刷新后被自动策略覆盖）
   hlsConfig: typeof hlsConfig.value
 }
 
@@ -863,6 +864,7 @@ const saveState = () => {
       requestReferer: requestReferer.value,
       manifestOnly: manifestOnly.value,
       disguiseAsDownloader: disguiseAsDownloader.value,
+      manualStrategyOverride: manualStrategyOverride.value,
       hlsConfig: { ...hlsConfig.value }
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
@@ -2050,6 +2052,8 @@ const onSeeked = () => {
   }
   prefetchInfo.value.pending = 0
   isBuffering.value = false
+  // 立刻在新位置并行预取（不等 1s 心跳），尽快把 seek 目标分片拉下来
+  if (isHls.value) primePrefetch()
 }
 
 // 开始播放
@@ -2210,6 +2214,8 @@ onMounted(async () => {
     requestReferer.value = savedState.requestReferer ?? ''
     manifestOnly.value = savedState.manifestOnly ?? true
     disguiseAsDownloader.value = savedState.disguiseAsDownloader ?? false
+    manualStrategyOverride.value = savedState.manualStrategyOverride ?? false
+    if (manualStrategyOverride.value) showAdvancedProxy.value = true  // 手动过则展开显示当前设置
     if (savedState.hlsConfig) {
       hlsConfig.value = { ...hlsConfig.value, ...savedState.hlsConfig }
     }

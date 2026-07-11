@@ -30,6 +30,8 @@ export interface StrategySnapshot {
 
 const MAX_CONN = 6          // 浏览器同 host 连接上限（HTTP/1.1）
 const SAFETY = 1.3          // 带宽安全系数
+const URGENT_BUF = 6        // 前向缓冲低于此值 = 濒临卡顿：暂停预取，用 Range 分块并行猛拉当前分片
+const RANGE_CHUNK = 768 * 1024  // Range 分块大小（字节）
 
 export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   const { getProxyUrl, cache, getConcurrencyCap } = opts
@@ -140,17 +142,62 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   }
 
   // 返回当前目标并发（受控值，双重钳制在 [2, hostCap]）。只读，供两个预取入口共用。
-  const getAdaptivePrefetchCount = (_bufferSecs?: number): number => {
+  // 濒临卡顿时返回 0：暂停"预取更远分片"，把连接全部让给当前分片的 Range 分块并行下载。
+  const getAdaptivePrefetchCount = (bufferSecs?: number): number => {
+    if (bufferSecs !== undefined && bufferSecs < URGENT_BUF) { refreshStrategy(0); return 0 }
     if (ctrlConn === 0) ctrlConn = computeTargetConcurrency()
     const target = Math.min(hostConcurrencyCap, Math.max(2, ctrlConn))
     refreshStrategy(target)
     return target
   }
 
-  // 预取"触达距离"（秒）：缓冲不足时只预取播放头附近的分片，把带宽/连接集中在紧邻分片上，
-  // 不去抢跑更远的分片（否则共享带宽会拖慢当前急需的那几个）；缓冲越充足才往更远预读。
-  const CRITICAL_LEAD = 20
-  const prefetchReachSec = (bufferSecs: number) => Math.max(CRITICAL_LEAD, bufferSecs * 1.5)
+  // 不限制预取"触达距离"：始终让 count 个连接并行下载最近的 count 个未缓存分片。
+  // （近处慢时远处也照下，保持并行聚合吞吐；否则退化成串行，太慢。）
+
+  // 普通整段下载，返回 ArrayBuffer
+  const plainFetchBuf = async (url: string, signal: AbortSignal): Promise<ArrayBuffer> => {
+    const r = await fetch(getProxyUrl(url), { signal })
+    if (!r.ok) throw new Error(`HTTP ${r.status}`)
+    return r.arrayBuffer()
+  }
+
+  // Range 分块并行下载：把一个大分片拆成多段字节区间并行拉取再拼接，
+  // 用于"濒临卡顿时的当前分片"——单分片本来只能走一条连接，拆块后能用多条连接，几倍提速。
+  // 不支持 Range（非 206）或分片很小则退化为整段下载。
+  const rangeFetch = async (url: string, signal: AbortSignal): Promise<ArrayBuffer> => {
+    const proxied = getProxyUrl(url)
+    const first = await fetch(proxied, { signal, headers: { Range: `bytes=0-${RANGE_CHUNK - 1}` } })
+    if (!first.ok && first.status !== 206) throw new Error(`HTTP ${first.status}`)
+    const firstBuf = await first.arrayBuffer()
+
+    let total = -1
+    const cr = first.headers.get('Content-Range')
+    if (first.status === 206 && cr) {
+      const m = /\/(\d+)\s*$/.exec(cr)
+      if (m) total = parseInt(m[1], 10)
+    }
+    // 不支持 Range / 已一块拿完 → 直接返回
+    if (total < 0 || firstBuf.byteLength >= total) return firstBuf
+
+    // 其余区间并行拉取
+    const ranges: Array<[number, number]> = []
+    for (let start = firstBuf.byteLength; start < total; start += RANGE_CHUNK) {
+      ranges.push([start, Math.min(start + RANGE_CHUNK - 1, total - 1)])
+    }
+    const parts = await Promise.all(ranges.map(([s, e]) =>
+      fetch(proxied, { signal, headers: { Range: `bytes=${s}-${e}` } }).then(r => {
+        if (!r.ok && r.status !== 206) throw new Error(`HTTP ${r.status}`)
+        return r.arrayBuffer()
+      })
+    ))
+    // 按序拼接
+    const outLen = firstBuf.byteLength + parts.reduce((s, p) => s + p.byteLength, 0)
+    const out = new Uint8Array(outLen)
+    out.set(new Uint8Array(firstBuf), 0)
+    let off = firstBuf.byteLength
+    for (const p of parts) { out.set(new Uint8Array(p), off); off += p.byteLength }
+    return out.buffer
+  }
 
   // 创建自定义 HLS 分片加载器（fLoader）
   // 优先从预取缓存返回数据，cache miss 时走 fetch 正常加载
@@ -265,12 +312,16 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
         const MAX_RETRY = 2   // cache-miss 时最多重试 2 次，避免偶发 502 直接触发 hls.js fatal
         const fStart = performance.now()
 
-        const tracked = fetch(getProxyUrl(url), { signal: this.ctrl.signal })
-          .then(r => {
+        // 濒临卡顿（前向缓冲 < URGENT_BUF）时，当前分片用 Range 分块并行猛拉；否则整段下载
+        const video = opts.getVideoEl()
+        const urgent = video ? getAheadBuffered(video) < URGENT_BUF : true
+        const loader = urgent ? rangeFetch(url, this.ctrl.signal) : plainFetchBuf(url, this.ctrl.signal)
+
+        const tracked = loader
+          .then(buf => {
             clearTimeout(timer)
-            if (!r.ok) throw new Error(`HTTP ${r.status}`)
             this.stats.loading.first = performance.now()   // 首字节时间
-            return r.arrayBuffer()
+            return buf
           })
           .then(buf => {
             sampleSpeed(buf.byteLength, performance.now() - fStart)
@@ -388,12 +439,12 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
 
     // 候选窗口：从 startIdx 往后扫描，最多看 count*3 个，足以跳过已缓存/下载中的
     const candidates = frags.slice(startIdx, startIdx + count * 3)
-    const reachEnd = video.currentTime + prefetchReachSec(bufferSecs)  // 触达距离：缓冲不足只预取附近
 
+    const ct = video.currentTime
     let started = 0
     for (const frag of candidates) {
       if (started >= canStart) break
-      if (frag.start > reachEnd) break  // 超出触达距离的远处分片先不下，集中带宽给近处
+      if (frag.start < ct - 1) continue   // 跳过播放头之前的旧分片（seek 后 lastFragSn 可能是旧位置）
       const url: string = frag.url
       if (!url || getPrefetchedBuf(url) !== null || segPrefetching.has(url)) continue
       spawnPrefetch(url, frag.duration ?? 0, startOnePrefetch)
@@ -425,12 +476,10 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     const frags: any[] = (hls as any).levels?.[level]?.details?.fragments ?? []
     if (!frags.length) return
 
-    // 从当前播放时间往后找第一个未缓存、未下载中的分片
+    // 从当前播放时间往后找第一个未缓存、未下载中的分片（不限距离，保持并行）
     const currentTime = video.currentTime
-    const reachEnd = currentTime + prefetchReachSec(bufferSecs)  // 触达距离：缓冲不足只预取附近
     for (const frag of frags) {
       if (frag.start < currentTime) continue
-      if (frag.start > reachEnd) break  // 超出触达距离先不下，集中带宽给近处分片
       const url: string = frag.url
       if (!url || getPrefetchedBuf(url) !== null || segPrefetching.has(url)) continue
       spawnPrefetch(url, frag.duration ?? 0, startOnePrefetch)
@@ -461,10 +510,11 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     }
   }
 
-  // 起播预热：playlist 就绪后立刻并行预取前若干分片，
-  // 让分片 1..N 与 hls.js 加载分片 0 同时进行，避免"首片单连接"拖慢起播。
+  // 起播/seek 预热：缓冲充足时并行预取后续分片；缓冲低（起播/seek 瞬间）则不抢连接，
+  // 让 hls.js 对"当前急需分片"走 Range 分块并行下载（getAdaptivePrefetchCount 低缓冲返回 0）。
   const primePrefetch = () => {
-    const count = getAdaptivePrefetchCount()
+    const video = opts.getVideoEl()
+    const count = getAdaptivePrefetchCount(video ? getAheadBuffered(video) : 0)
     let guard = 0
     while (segPrefetching.size < count && guard++ < count) {
       const before = segPrefetching.size
