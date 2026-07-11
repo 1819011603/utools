@@ -30,8 +30,6 @@ export interface StrategySnapshot {
 
 const MAX_CONN = 6          // 浏览器同 host 连接上限（HTTP/1.1）
 const SAFETY = 1.3          // 带宽安全系数
-const URGENT_BUF = 6        // 前向缓冲低于此值 = 濒临卡顿：暂停预取，用 Range 分块并行猛拉当前分片
-const RANGE_CHUNK = 768 * 1024  // Range 分块大小（字节）
 
 export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   const { getProxyUrl, cache, getConcurrencyCap } = opts
@@ -153,51 +151,6 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   // 不限制预取"触达距离"：始终让 count 个连接并行下载最近的 count 个未缓存分片。
   // （近处慢时远处也照下，保持并行聚合吞吐；否则退化成串行，太慢。）
 
-  // 普通整段下载，返回 ArrayBuffer
-  const plainFetchBuf = async (url: string, signal: AbortSignal): Promise<ArrayBuffer> => {
-    const r = await fetch(getProxyUrl(url), { signal })
-    if (!r.ok) throw new Error(`HTTP ${r.status}`)
-    return r.arrayBuffer()
-  }
-
-  // Range 分块并行下载：把一个大分片拆成多段字节区间并行拉取再拼接，
-  // 用于"濒临卡顿时的当前分片"——单分片本来只能走一条连接，拆块后能用多条连接，几倍提速。
-  // 不支持 Range（非 206）或分片很小则退化为整段下载。
-  const rangeFetch = async (url: string, signal: AbortSignal): Promise<ArrayBuffer> => {
-    const proxied = getProxyUrl(url)
-    const first = await fetch(proxied, { signal, headers: { Range: `bytes=0-${RANGE_CHUNK - 1}` } })
-    if (!first.ok && first.status !== 206) throw new Error(`HTTP ${first.status}`)
-    const firstBuf = await first.arrayBuffer()
-
-    let total = -1
-    const cr = first.headers.get('Content-Range')
-    if (first.status === 206 && cr) {
-      const m = /\/(\d+)\s*$/.exec(cr)
-      if (m) total = parseInt(m[1], 10)
-    }
-    // 不支持 Range / 已一块拿完 → 直接返回
-    if (total < 0 || firstBuf.byteLength >= total) return firstBuf
-
-    // 其余区间并行拉取
-    const ranges: Array<[number, number]> = []
-    for (let start = firstBuf.byteLength; start < total; start += RANGE_CHUNK) {
-      ranges.push([start, Math.min(start + RANGE_CHUNK - 1, total - 1)])
-    }
-    const parts = await Promise.all(ranges.map(([s, e]) =>
-      fetch(proxied, { signal, headers: { Range: `bytes=${s}-${e}` } }).then(r => {
-        if (!r.ok && r.status !== 206) throw new Error(`HTTP ${r.status}`)
-        return r.arrayBuffer()
-      })
-    ))
-    // 按序拼接
-    const outLen = firstBuf.byteLength + parts.reduce((s, p) => s + p.byteLength, 0)
-    const out = new Uint8Array(outLen)
-    out.set(new Uint8Array(firstBuf), 0)
-    let off = firstBuf.byteLength
-    for (const p of parts) { out.set(new Uint8Array(p), off); off += p.byteLength }
-    return out.buffer
-  }
-
   // 创建自定义 HLS 分片加载器（fLoader）
   // 优先从预取缓存返回数据，cache miss 时走 fetch 正常加载
   const createHlsFragLoader = () => {
@@ -311,16 +264,12 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
         const MAX_RETRY = 2   // cache-miss 时最多重试 2 次，避免偶发 502 直接触发 hls.js fatal
         const fStart = performance.now()
 
-        // 濒临卡顿（前向缓冲 < URGENT_BUF）时，当前分片用 Range 分块并行猛拉；否则整段下载
-        const video = opts.getVideoEl()
-        const urgent = video ? getAheadBuffered(video) < URGENT_BUF : true
-        const loader = urgent ? rangeFetch(url, this.ctrl.signal) : plainFetchBuf(url, this.ctrl.signal)
-
-        const tracked = loader
-          .then(buf => {
+        const tracked = fetch(getProxyUrl(url), { signal: this.ctrl.signal })
+          .then(r => {
             clearTimeout(timer)
+            if (!r.ok) throw new Error(`HTTP ${r.status}`)
             this.stats.loading.first = performance.now()   // 首字节时间
-            return buf
+            return r.arrayBuffer()
           })
           .then(buf => {
             sampleSpeed(buf.byteLength, performance.now() - fStart)
@@ -440,12 +389,10 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     const candidates = frags.slice(startIdx, startIdx + count * 3)
 
     const ct = video.currentTime
-    // 濒临卡顿时跳过"播放头当前分片"——交给 hls.js 用 Range 分块并行猛拉，预取只管后续分片
-    const minStart = bufferSecs < URGENT_BUF ? ct + 0.01 : ct - 1
     let started = 0
     for (const frag of candidates) {
       if (started >= canStart) break
-      if (frag.start < minStart) continue
+      if (frag.start < ct - 1) continue   // 跳过播放头之前的旧分片（seek 后 lastFragSn 可能是旧位置）
       const url: string = frag.url
       if (!url || getPrefetchedBuf(url) !== null || segPrefetching.has(url)) continue
       spawnPrefetch(url, frag.duration ?? 0, startOnePrefetch)
@@ -477,12 +424,10 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     const frags: any[] = (hls as any).levels?.[level]?.details?.fragments ?? []
     if (!frags.length) return
 
-    // 从当前播放时间往后找第一个未缓存、未下载中的分片（不限距离，保持并行）。
-    // 濒临卡顿时跳过"播放头当前分片"——交给 hls.js 用 Range 分块并行猛拉，预取只管后续分片。
+    // 从当前播放时间往后找第一个未缓存、未下载中的分片（不限距离，保持并行）
     const currentTime = video.currentTime
-    const minStart = bufferSecs < URGENT_BUF ? currentTime + 0.01 : currentTime
     for (const frag of frags) {
-      if (frag.start < minStart) continue
+      if (frag.start < currentTime) continue
       const url: string = frag.url
       if (!url || getPrefetchedBuf(url) !== null || segPrefetching.has(url)) continue
       spawnPrefetch(url, frag.duration ?? 0, startOnePrefetch)

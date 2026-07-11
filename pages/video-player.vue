@@ -613,13 +613,13 @@
               <span class="text-sm text-gray-500">秒</span>
             </div>
           </UFormGroup>
-          <UFormGroup label="缓冲内存" help="缓冲区占用的最大内存">
+          <UFormGroup label="缓冲内存" help="预取缓存内存上限（JS 侧，非 MSE）">
             <div class="flex items-center gap-2">
-              <UInput 
-                v-model.number="hlsConfig.maxBufferSizeMB" 
-                type="number" 
-                :min="30" 
-                :max="500"
+              <UInput
+                v-model.number="hlsConfig.maxBufferSizeMB"
+                type="number"
+                :min="30"
+                :max="8000"
                 class="flex-1"
               />
               <span class="text-sm text-gray-500">MB</span>
@@ -999,7 +999,7 @@ const hlsConfig = ref({
   maxMaxBufferLength: 3600,     // 最大缓冲时长（秒）
   backBufferLength: 3600,       // 后台缓冲（秒）
   // 内存设置
-  maxBufferSizeMB: 600,        // 缓冲大小（MB）
+  maxBufferSizeMB: 3600,       // 预取缓存内存上限（MB）——JS 侧缓存，非 MSE
   // 下载速度设置
   fragLoadingTimeOut: 30000,  // 分片下载超时（ms）
   fragLoadingMaxRetry: 3,     // 最大重试次数
@@ -2108,7 +2108,7 @@ const resetHlsConfig = () => {
     maxBufferLength: 30,
     maxMaxBufferLength: 60,
     backBufferLength: 30,
-    maxBufferSizeMB: 600,
+    maxBufferSizeMB: 3600,
     fragLoadingTimeOut: 30000,
     fragLoadingMaxRetry: 3,
     enableWorker: true,
