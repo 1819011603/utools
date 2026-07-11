@@ -57,9 +57,10 @@ export function useVideoProxy(opts: VideoProxyOptions) {
 
     const o = requestOrigin.value.trim()
     const r = effectiveReferer.value
-    // 走服务端 /api/proxy 的触发条件：需要注入头(o/r) 或 勾了「仅代理 Manifest」。
-    // manifestOnly 是独立触发项——即便不注入 Origin/Referer，也要把 manifest 交给代理补 CORS，分片仍直连。
-    if (o || r || manifestOnly.value) {
+    // 走服务端 /api/proxy 的触发条件：必须注入了 Origin 或 Referer。
+    // manifestOnly 只是在此基础上「只代理 manifest、分片直连」的附加选项，不能单独触发代理——
+    // 否则 Origin/Referer 都为空时代理也解决不了防盗链 403，白白多绕一层。
+    if (o || r) {
       if (manifestOnly.value && !isHlsUrl(url)) return url
 
       const params = new URLSearchParams({ url })

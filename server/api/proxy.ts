@@ -98,8 +98,17 @@ export default defineEventHandler(async (event) => {
 
     setResponseHeader(event, 'Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8')
     setResponseHeader(event, 'Access-Control-Allow-Origin', '*')
-    // manifest 可能变化（尤其直播），不缓存，避免拿到旧分片列表
-    setResponseHeader(event, 'Cache-Control', 'no-cache')
+    // manifest 缓存策略：
+    //   · master 列表（#EXT-X-STREAM-INF）→ 永远不变，缓存 1 天
+    //   · 点播媒体列表（含 #EXT-X-ENDLIST）→ 已完结、分片列表固定，缓存 1 天
+    //   · 直播媒体列表（无 ENDLIST，分片会滚动）→ no-cache，避免拿到旧分片列表
+    const isMaster = /#EXT-X-STREAM-INF/i.test(text)
+    const isVod = /#EXT-X-ENDLIST/i.test(text)
+    if (isMaster || isVod) {
+      setResponseHeader(event, 'Cache-Control', 'public, max-age=86400')
+    } else {
+      setResponseHeader(event, 'Cache-Control', 'no-cache')
+    }
     return rewritten
   }
 

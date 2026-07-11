@@ -19,6 +19,11 @@ export interface HlsPrefetchOptions {
   getConcurrencyCap: () => number
   // 当前倍速（倍速越高需要越大带宽），默认 1
   getPlaybackRate?: () => number
+  // 预取深度上限（秒）：真实前向缓冲达到此值即停止预取，默认 Infinity（不限）
+  getPrefetchTargetSecs?: () => number
+  // 预取闸门：返回 false 时冻结所有预取。起播/恢复进度时，先让播放头定位到目标位置，
+  // 到位后再解冻——否则会从 0 狂下一堆用不上的开头分片，抢占连接池饿死当前位置。默认 true
+  getShouldPrefetch?: () => boolean
 }
 
 export interface StrategySnapshot {
@@ -31,19 +36,11 @@ export interface StrategySnapshot {
 const MAX_CONN = 6          // 浏览器同 host 连接上限（HTTP/1.1）
 const SAFETY = 1.3          // 带宽安全系数
 
-// ── 单分片 Range 分块并行下载（慢链急救）──
-const SLOW_MS = 8000              // 单分片整段下载超过此值算「慢」
-const URGENT_BUF = 6              // 前向缓冲低于此值 = 濒临卡顿：分块拉满 + 暂停预取
-const MIN_RANGE_TOTAL = 1_000_000 // 分片 < 1MB 不值得分块（开销 > 收益）
-// 每 host 分块能力，探测一次即缓存，避免每片重探：
-//   'direct'=直连支持 Range 且能读总长  'proxy'=需走代理才读得到总长
-//   'none'=不支持 Range / 读不到总长    'nogain'=能分块但无加速收益（服务器卡总带宽）
-const hostRangeCap = new Map<string, 'direct' | 'proxy' | 'none' | 'nogain'>()
-const hostOf = (url: string): string => { try { return new URL(url, location.href).host } catch { return '' } }
-
 export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   const { getProxyUrl, cache, getConcurrencyCap } = opts
   const getPlaybackRate = opts.getPlaybackRate ?? (() => 1)
+  const getPrefetchTargetSecs = opts.getPrefetchTargetSecs ?? (() => Infinity)
+  const getShouldPrefetch = opts.getShouldPrefetch ?? (() => true)
   const {
     segPrefetchCache, segPrefetching, segPrefetchAborts,
     prefetchInfo, getPrefetchedBuf, evictPrefetchCache,
@@ -64,30 +61,9 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     if (bytes > 0 && sec > 0) segBitrate = ewma(segBitrate, (bytes * 8) / sec)
   }
 
-  // ── 可持续倍速：直接看缓冲的增长/消失速度（最直接、最跟手）──
-  // 以倍速 R 播放、前向缓冲每墙钟秒变化 Δ 秒，则每墙钟秒实际"下载"了 (R+Δ) 秒视频，
-  // 即当前可持续倍速 = R + Δ。Δ<0（缓冲在掉）说明追不上，可持续倍速 < 当前倍速。
-  // 缓冲按「分片到达」呈突发式增长：短窗内测增长率会在 大正/大负 间剧烈跳变。
-  // 因此这里刻意测长窗（≥10s，抹平单个分片到达的突发）+ 双层慢 EWMA，换取稳定的可持续倍速估计。
-  // 注意：抗卡顿闭环用的是原始 bufferSecs（见 stepControl），不受此平滑影响，仍然跟手。
-  let growthEwma = 0        // 缓冲增长率（秒/秒），慢 EWMA
-  let lastGrowthAhead = -1  // 上次采样的前向缓冲
-  let lastGrowthT = 0       // 上次采样墙钟时间
-  let fluentEwma = 0        // 平滑后的可持续倍速（对外上报），再抹一层瞬时抖动
-  const resetGrowth = () => { growthEwma = 0; lastGrowthAhead = -1; lastGrowthT = 0; fluentEwma = 0 }
-  const updateGrowth = (ahead: number) => {
-    const now = performance.now()
-    if (lastGrowthAhead < 0) { lastGrowthAhead = ahead; lastGrowthT = now; return }
-    const dt = (now - lastGrowthT) / 1000
-    if (dt < 10) return                      // ≥10s 窗口：抹平分片突发到达的抖动
-    const rate = (ahead - lastGrowthAhead) / dt
-    lastGrowthAhead = ahead
-    lastGrowthT = now
-    if (Math.abs(rate) > 10) return          // seek 等跳变，跳过不污染
-    growthEwma = growthEwma ? growthEwma * 0.7 + rate * 0.3 : rate
-    const instant = Math.max(1, getPlaybackRate() + growthEwma - 0.15)
-    fluentEwma = fluentEwma ? fluentEwma * 0.8 + instant * 0.2 : instant
-  }
+  // ── 最高流畅倍速：用实测带宽 ÷ 码率直接算（见 refreshStrategy）──
+  // 早期靠「缓冲增长率」反推，但预取到「预加载时长」封顶后缓冲不再增长、增长率≈0，
+  // 会把可持续倍速误判成 1x。改为纯带宽模型：满并发聚合带宽能喂几倍码率就是几倍。
 
   const strategy = ref<StrategySnapshot>({ perConnKBps: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0 })
 
@@ -105,7 +81,6 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     hostConcurrencyCap = MAX_CONN
     ctrlConn = 0
     lastAhead = -1
-    resetGrowth()
     strategy.value = { perConnKBps: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0 }
   }
 
@@ -120,11 +95,12 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
 
   // 刷新对外策略快照（供 UI 展示与倍速可行性判断）
   const refreshStrategy = (targetConn: number) => {
-    // 可持续倍速：取平滑后的 fluentEwma，对齐到 0.25 台阶（与自动调速台阶一致，隐去更细的抖动）。
-    // 冷启动（首个 ≥10s 窗口尚无数据）先按「当前选择的倍速」展示，而非 0。
-    const sustainable = lastGrowthAhead < 0 || fluentEwma <= 0
+    // 最高流畅倍速 = 满并发聚合带宽 ÷ (码率 × 安全系数)，向下对齐 0.25 档（保守，不过度承诺）。
+    // 与并发模型（computeTargetConcurrency）一致：满并发时能喂几倍码率就是几倍。
+    // 冷启动（还没测出每连接带宽或码率）先按「当前倍速」展示，而非 0。
+    const sustainable = (!perConnBps || !segBitrate)
       ? Math.max(1, Math.round(getPlaybackRate() / 0.25) * 0.25)
-      : Math.max(1, Math.round(fluentEwma / 0.25) * 0.25)
+      : Math.max(1, Math.floor((perConnBps * hostConcurrencyCap) / (segBitrate * SAFETY) / 0.25) * 0.25)
     strategy.value = {
       perConnKBps: Math.round(perConnBps / 8 / 1024),
       segMbps: Math.round((segBitrate / 1e6) * 10) / 10,
@@ -133,7 +109,8 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     }
   }
 
-  // 计算当前播放位置前方的缓冲秒数
+  // 计算当前播放位置前方的缓冲秒数（仅 MSE，真实可立即播放的量）。
+  // 抗卡顿闭环/自适应并发必须用这个，不能掺预取缓存（否则误判缓冲充足而停下载）。
   const getAheadBuffered = (video: HTMLVideoElement): number => {
     const ct = video.currentTime
     for (let i = 0; i < video.buffered.length; i++) {
@@ -144,8 +121,39 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     return 0
   }
 
-  // 闭环控制步进：按缓冲趋势调整受控并发（每分片缓冲事件调用一次，节奏 ~每几秒）
+  // 有效已缓冲时长（秒）：从当前播放位置往后，能「无需再下载」连续播出去的秒数。
+  // 一片算「可播」的条件：已在 MSE 里（播放器已有）或在 JS 预取缓存里（一拖就命中）——
+  // 两者都不需要再下载。逐片累加，直到遇到第一个「还需要下载」的分片（既不在 MSE 也没预取）为止。
+  const getCachedAhead = (video: HTMLVideoElement): number => {
+    const ct = video.currentTime
+    const hls = opts.getHls()
+    const level = hls && hls.currentLevel >= 0 ? hls.currentLevel : 0
+    const frags: any[] = (hls as any)?.levels?.[level]?.details?.fragments ?? []
+    if (!frags.length) return getAheadBuffered(video)
+
+    // 某时间点是否已落在 MSE 已缓冲区间内（已下载进播放器，无需再取）
+    const inMSE = (t: number): boolean => {
+      for (let i = 0; i < video.buffered.length; i++) {
+        if (video.buffered.start(i) <= t + 0.1 && t < video.buffered.end(i) + 0.1) return true
+      }
+      return false
+    }
+
+    let reach = ct
+    for (const frag of frags) {
+      if (frag.end <= ct + 0.1) continue                     // 播放头之前的分片，跳过
+      if (frag.start > reach + 0.5) break                     // 与已达区间不连续（真空洞）→ 停
+      const mid = (frag.start + frag.end) / 2
+      const available = getPrefetchedBuf(frag.url) !== null || inMSE(mid)
+      if (!available) break                                   // 该分片还需下载 → 停
+      reach = frag.end                                        // 可播 → 延伸
+    }
+    return Math.max(0, reach - ct)
+  }
+
+  // 闭环控制步进：按「真实前向缓冲」(getCachedAhead：MSE + 预取缓存) 的趋势调整受控并发。
   //   濒临卡顿 → 直接拉满；偏低或正在掉 → +1；很充足 → −1（省带宽）；中间维持。
+  // 注意：必须喂真实缓冲，不能只喂 MSE——MSE 被钳在 ~30s，会永远命中「偏低」分支、线程顶格下不来。
   const stepControl = (bufferSecs: number) => {
     if (ctrlConn === 0) ctrlConn = computeTargetConcurrency()   // 冷启动用实测估算作初值
     const drained = lastAhead >= 0 && bufferSecs < lastAhead - 0.5
@@ -170,76 +178,6 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
 
   // 不限制预取"触达距离"：始终让 count 个连接并行下载最近的 count 个未缓存分片。
   // （近处慢时远处也照下，保持并行聚合吞吐；否则退化成串行，太慢。）
-
-  // ── 单分片 Range 分块并行下载（慢链急救）──────────────────────────────
-  // 触发：最近 3 片整段下载都 > SLOW_MS（这条连接单片就是慢），或前向缓冲濒临卡顿。
-  const recentDurations: number[] = []   // 最近几片整段下载耗时(ms)，判「这条链路单片是否慢」
-  const recordDuration = (ms: number) => { recentDurations.push(ms); if (recentDurations.length > 3) recentDurations.shift() }
-  const isSlowLink = () => recentDurations.length >= 3 && recentDurations.every(d => d > SLOW_MS)
-  let rescueCount = 0   // >0 = 有分块急救在跑：预取让出连接给当前分片
-
-  // 探测某个 base 是否支持 Range 且能读到总长：返回 总字节数 / -1(支持Range但读不到总长) / -2(不支持Range)
-  const probeTotal = async (base: string, signal: AbortSignal): Promise<number> => {
-    // no-store：Range 请求绝不走 HTTP 缓存，避免不同 Range 拿到缓存里错乱的字节
-    const r = await fetch(base, { signal, headers: { Range: 'bytes=0-0' }, referrerPolicy: 'no-referrer', cache: 'no-store' })
-    if (r.status !== 206) return -2
-    const cr = r.headers.get('Content-Range')          // 形如 "bytes 0-0/123456"
-    const m = cr && /\/(\d+)\s*$/.exec(cr)
-    return m ? parseInt(m[1], 10) : -1
-  }
-
-  // 分块并行下载单个分片：探测能力(206+可读总长) → 选可用 base(直连/代理) → 等分并行 → 拼接。
-  // 不支持 / 无收益 / 太小 → 返回 null，调用方退化为整段下载（绝不返回残片，避免上次"取了播不了"）。
-  const rangeFetch = async (url: string, signal: AbortSignal, chunks: number): Promise<ArrayBuffer | null> => {
-    const host = hostOf(url)
-    const cap = hostRangeCap.get(host)
-    if (cap === 'none' || cap === 'nogain') return null
-
-    const direct = getProxyUrl(url)   // 当前模式 URL（直连=原始CDN；代理模式=已带 /api/proxy）
-    // 代理是同源，Content-Range 一定读得到；直连读不到时用它兜底（用户："代理能走也行"）
-    const viaProxy = direct.includes('/api/proxy?') ? direct : '/api/proxy?url=' + encodeURIComponent(url)
-
-    // 选一个能读到总长的 base（按缓存直取；未知则先探直连，读不到再探代理）
-    let base = direct, total = -2
-    if (cap === 'direct') { base = direct; total = await probeTotal(direct, signal) }
-    else if (cap === 'proxy') { base = viaProxy; total = await probeTotal(viaProxy, signal) }
-    else {
-      total = await probeTotal(direct, signal)
-      if (total > 0) { base = direct; hostRangeCap.set(host, 'direct') }
-      else if (total === -1 && viaProxy !== direct) {           // 直连支持 Range 但跨域没暴露总长 → 试代理
-        const t2 = await probeTotal(viaProxy, signal)
-        if (t2 > 0) { base = viaProxy; total = t2; hostRangeCap.set(host, 'proxy') }
-        else { hostRangeCap.set(host, 'none'); return null }
-      } else { hostRangeCap.set(host, 'none'); return null }    // 不支持 Range
-    }
-    if (total < MIN_RANGE_TOTAL) return null                     // 太小 / 异常，不值得分块
-
-    // 等分并行（块数 = min(目标并发, 连接上限)，每块 total/n，几乎同时结束）
-    const n = Math.max(2, Math.min(chunks, MAX_CONN))
-    const size = Math.ceil(total / n)
-    const ranges: Array<[number, number]> = []
-    for (let s = 0; s < total; s += size) ranges.push([s, Math.min(s + size - 1, total - 1)])
-
-    const t0 = performance.now()
-    const parts = await Promise.all(ranges.map(([s, e]) =>
-      fetch(base, { signal, headers: { Range: `bytes=${s}-${e}` }, referrerPolicy: 'no-referrer', cache: 'no-store' }).then(r => {
-        if (r.status !== 206) throw new Error(`chunk HTTP ${r.status}`)
-        return r.arrayBuffer()
-      })
-    ))
-    const wall = performance.now() - t0
-
-    let outLen = 0; for (const p of parts) outLen += p.byteLength
-    if (outLen < total) throw new Error('range truncated')      // 拼出来不够总长 → 失败重来，绝不返回残片
-    const out = new Uint8Array(outLen)
-    let off = 0; for (const p of parts) { out.set(new Uint8Array(p), off); off += p.byteLength }
-
-    // 无收益检测：聚合速度 ≈ 单连接速度 → 服务器卡的是总带宽，分块白占连接 → 标记该 host 不再分块
-    const aggBps = wall > 0 ? (outLen * 8) / (wall / 1000) : 0
-    if (perConnBps > 0 && aggBps > 0 && aggBps < perConnBps * 1.3) hostRangeCap.set(host, 'nogain')
-
-    return out.buffer
-  }
 
   // 创建自定义 HLS 分片加载器（fLoader）
   // 优先从预取缓存返回数据，cache miss 时走 fetch 正常加载
@@ -349,31 +287,12 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
       private rawFetch(url: string, config: any, succeed: (b: ArrayBuffer) => void, fail: (e: Error) => void, attempt = 0) {
         if (this.stats.aborted) return
         this.ctrl = new AbortController()
-        const timeout = config?.timeout ?? 30000
+        const timeout = config?.timeout ?? 60000
         const timer = setTimeout(() => this.ctrl?.abort(), timeout)
         const MAX_RETRY = 2   // cache-miss 时最多重试 2 次，避免偶发 502 直接触发 hls.js fatal
         const fStart = performance.now()
 
-        // 慢链急救：仅当这条链路确认慢（近 3 片整段下载都 > SLOW_MS）才对当前分片用 Range 分块并行猛拉。
-        // 缓冲越紧张分块越多（<URGENT_BUF 拉满 MAX_CONN 块，否则 3 块留连接给预取）。rangeFetch 内部自带
-        // 能力探测 + 不支持则退化整段（返回 null），失败也退化，绝不返回残片。
-        const video = opts.getVideoEl()
-        const buf0 = video ? getAheadBuffered(video) : 0
-        const useRescue = isSlowLink()
-        const chunkN = buf0 < URGENT_BUF ? MAX_CONN : 3
-
-        let viaRescue = false
         const loadOnce = async (): Promise<ArrayBuffer> => {
-          if (useRescue) {
-            rescueCount++
-            try {
-              const rb = await rangeFetch(url, this.ctrl!.signal, chunkN)
-              if (rb) { viaRescue = true; this.stats.loading.first = performance.now(); return rb }
-            } catch (e: any) {
-              if (e?.name === 'AbortError') throw e   // seek/换源中止：向上传播，不要退化重下
-              // 分块失败（某块出错/拼接不足）→ 退化整段，别让分片直接失败
-            } finally { rescueCount-- }
-          }
           const r = await fetch(getProxyUrl(url), { signal: this.ctrl!.signal, referrerPolicy: 'no-referrer' })
           if (!r.ok) throw new Error(`HTTP ${r.status}`)
           this.stats.loading.first = performance.now()   // 首字节时间
@@ -384,10 +303,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
           .then(buf => {
             clearTimeout(timer)
             const dur = performance.now() - fStart
-            if (!viaRescue) {                                    // 分块是多连接聚合速度，不喂单连接测速/慢链判定
-              sampleSpeed(buf.byteLength, dur)
-              recordDuration(dur)
-            }
+            sampleSpeed(buf.byteLength, dur)
             segPrefetchCache.set(url, { buf, ts: Date.now() })   // 存缓存，后续命中不再下载
             segPrefetching.delete(url)
             prefetchInfo.value.cached = segPrefetchCache.size
@@ -402,7 +318,9 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
         tracked
           .then(buf => { if (!this.stats.aborted) succeed(buf) })
           .catch(e => {
-            if (this.stats.aborted || e?.name === 'AbortError') return
+            // 同上：只有真·外部 abort 才放弃，超时导致的 AbortError 要走下面的重试，
+            // 否则会被误判成"外部中止"而永远不 succeed/fail，播放冻结
+            if (this.stats.aborted) return
             if (attempt < MAX_RETRY) {
               setTimeout(() => this.doFetch(url, config, succeed, fail, attempt + 1), 300 * 2 ** attempt)
               return
@@ -421,15 +339,18 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
 
   // 发起一个分片预取请求（带 1 次轻量重试，减少「空洞」导致的临播卡顿）
   // durationSec = 该分片代表的视频秒数，用于实测码率
+  const PREFETCH_TIMEOUT_MS = 60000   // 单分片下载上限：无此保护会导致个别卡死连接永久占位，形成永不填补的「缓冲缺口」
   const spawnPrefetch = (url: string, durationSec: number, onDone: () => void) => {
     const attemptFetch = (attempt: number): Promise<ArrayBuffer> => {
       const ctrl = new AbortController()
       segPrefetchAborts.set(url, ctrl)
+      const timer = setTimeout(() => ctrl.abort(), PREFETCH_TIMEOUT_MS)
       const aStart = performance.now()
       return fetch(getProxyUrl(url), { signal: ctrl.signal, referrerPolicy: 'no-referrer' })
         .then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error(`HTTP ${r.status}`)))
-        .then(buf => { sampleSpeed(buf.byteLength, performance.now() - aStart); return buf })
+        .then(buf => { clearTimeout(timer); sampleSpeed(buf.byteLength, performance.now() - aStart); return buf })
         .catch(e => {
+          clearTimeout(timer)
           if (e?.name === 'AbortError' || attempt >= 1) throw e
           return new Promise<ArrayBuffer>((resolve, reject) => {
             setTimeout(() => {
@@ -463,7 +384,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
 
   // 触发自适应预取（每次 FRAG_BUFFERED 后调用）
   const triggerAdaptivePrefetch = (lastFragSn: number) => {
-    if (rescueCount > 0) return   // 分块急救进行中：让出连接给当前分片，暂不预取远处
+    if (!getShouldPrefetch()) return   // 闸门未开（起播定位未到位）→ 不预取
     const hls = opts.getHls()
     const video = opts.getVideoEl()
     if (!hls || !video) return
@@ -483,13 +404,16 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     for (const f of lookahead) { try { hosts.add(new URL(f.url).host) } catch {} }
     hostConcurrencyCap = Math.min(12, Math.max(1, hosts.size) * MAX_CONN)
 
-    // 用 getAheadBuffered 拿"当前播放位置往后"的缓冲秒数，避免多缓冲段时取错
-    const bufferSecs = getAheadBuffered(video)
-    stepControl(bufferSecs)                       // 闭环：按缓冲趋势调整并发
-    const count = getAdaptivePrefetchCount(bufferSecs)
+    // 闭环控制/深度上限都用「真实前向缓冲」getCachedAhead（含预取缓存）——
+    // 只看 MSE 会被钳在 ~30s，导致永远判定缓冲不足、线程顶格。
+    const mseAhead = getAheadBuffered(video)
+    const cachedAhead = getCachedAhead(video)
+    stepControl(cachedAhead)                       // 闭环：按真实缓冲趋势调整并发
+    let count = getAdaptivePrefetchCount()
+    if (cachedAhead >= getPrefetchTargetSecs()) count = 0   // 已达「预加载时长」→ 停止预取
 
     prefetchInfo.value = {
-      bufferSecs: Math.round(bufferSecs * 10) / 10,
+      bufferSecs: Math.round(mseAhead * 10) / 10,   // 「缓冲健康」仍展示 MSE 即时窗口
       threads: count,
       cached: segPrefetchCache.size,
       pending: segPrefetching.size,
@@ -523,14 +447,16 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
 
   // 完成1个分片后补充1个，基于当前播放进度定位下一个未下载分片
   const startOnePrefetch = () => {
-    if (rescueCount > 0) return   // 分块急救进行中：让出连接给当前分片
+    if (!getShouldPrefetch()) return   // 闸门未开（起播定位未到位）→ 不预取
     const hls = opts.getHls()
     const video = opts.getVideoEl()
     if (!hls || !video) return
-    const bufferSecs = getAheadBuffered(video)
-    const count = getAdaptivePrefetchCount(bufferSecs)
+    const mseAhead = getAheadBuffered(video)
+    const cachedAhead = getCachedAhead(video)
+    let count = getAdaptivePrefetchCount()
+    if (cachedAhead >= getPrefetchTargetSecs()) count = 0   // 已达「预加载时长」→ 停止预取
 
-    prefetchInfo.value.bufferSecs = Math.round(bufferSecs * 10) / 10
+    prefetchInfo.value.bufferSecs = Math.round(mseAhead * 10) / 10
     prefetchInfo.value.threads = count
     prefetchInfo.value.cached = segPrefetchCache.size
     prefetchInfo.value.pending = segPrefetching.size
@@ -556,13 +482,15 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   // 实时心跳：由定时器/视频事件驱动（不依赖 FRAG_BUFFERED，避免卡顿时停更）。
   // 刷新缓冲读数、跑闭环控制、把在途预取补足到目标并发。
   const tick = () => {
+    if (!getShouldPrefetch()) return   // 闸门未开（起播定位未到位）→ 不预取
     const video = opts.getVideoEl()
     if (!video) return
-    const bufferSecs = getAheadBuffered(video)
-    updateGrowth(bufferSecs)               // 按固定 1s 节奏更新缓冲增长率 → 可持续倍速
-    stepControl(bufferSecs)
-    const count = getAdaptivePrefetchCount(bufferSecs)
-    prefetchInfo.value.bufferSecs = Math.round(bufferSecs * 10) / 10
+    const mseAhead = getAheadBuffered(video)
+    const cachedAhead = getCachedAhead(video)
+    stepControl(cachedAhead)
+    let count = getAdaptivePrefetchCount()
+    if (cachedAhead >= getPrefetchTargetSecs()) count = 0   // 已达「预加载时长」→ 停止预取
+    prefetchInfo.value.bufferSecs = Math.round(mseAhead * 10) / 10
     prefetchInfo.value.threads = count
     prefetchInfo.value.cached = segPrefetchCache.size
     prefetchInfo.value.pending = segPrefetching.size
@@ -575,11 +503,13 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     }
   }
 
-  // 起播/seek 预热：并行预取后续分片。缓冲濒临卡顿时，fragLoader 会对"当前急需分片"启用
-  // Range 分块并行猛拉，并通过 rescueCount 暂停这里的预取，把连接全让给当前分片。
+  // 起播/seek 预热：并行预取后续分片。
   const primePrefetch = () => {
+    if (!getShouldPrefetch()) return   // 闸门未开（起播定位未到位）→ 不预取
     const video = opts.getVideoEl()
-    const count = getAdaptivePrefetchCount(video ? getAheadBuffered(video) : 0)
+    const cachedAhead = video ? getCachedAhead(video) : 0
+    let count = getAdaptivePrefetchCount()
+    if (cachedAhead >= getPrefetchTargetSecs()) count = 0   // 已达「预加载时长」→ 停止预取
     let guard = 0
     while (segPrefetching.size < count && guard++ < count) {
       const before = segPrefetching.size
@@ -588,5 +518,5 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     }
   }
 
-  return { getAheadBuffered, getAdaptivePrefetchCount, createHlsFragLoader, triggerAdaptivePrefetch, startOnePrefetch, strategy, resetStrategy, tick, primePrefetch }
+  return { getAheadBuffered, getCachedAhead, getAdaptivePrefetchCount, createHlsFragLoader, triggerAdaptivePrefetch, startOnePrefetch, strategy, resetStrategy, tick, primePrefetch }
 }

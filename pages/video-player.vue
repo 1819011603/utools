@@ -85,6 +85,8 @@
             <UCheckbox
               v-model="manifestOnly"
               label="仅代理 Manifest"
+              :disabled="manifestOnlyDisabled"
+              :title="manifestOnlyDisabled ? 'Origin/Referer 均为空时该选项只能解决 CORS 问题，解决不了防盗链 403' : ''"
               @change="onManualProxyChange"
             />
           </UFormGroup>
@@ -229,7 +231,13 @@
             </div>
             <div class="flex gap-4 flex-wrap items-center text-xs">
               <UCheckbox v-model="rule.useProxy" label="跨域代理" @change="applyRulesAndReload" />
-              <UCheckbox v-model="rule.manifestOnly" label="仅代理 Manifest" @change="applyRulesAndReload" />
+              <UCheckbox
+                v-model="rule.manifestOnly"
+                label="仅代理 Manifest"
+                :disabled="!rule.origin?.trim() && !rule.referer?.trim()"
+                :title="(!rule.origin?.trim() && !rule.referer?.trim()) ? 'Origin/Referer 均为空时该选项只能解决 CORS 问题，解决不了防盗链 403' : ''"
+                @change="applyRulesAndReload"
+              />
               <UCheckbox v-model="rule.disguiseAsDownloader" label="伪装下载器" @change="applyRulesAndReload" />
               <div class="flex items-center gap-1">
                 <span class="text-gray-500">预取并发</span>
@@ -902,6 +910,8 @@ const disguiseAsDownloader = ref(false)  // 默认直连不注入；自动可达
 const { isHlsUrl, effectiveReferer, refererHelp, getProxyUrl } = useVideoProxy({
   requestOrigin, requestReferer, manifestOnly, disguiseAsDownloader, useProxy,
 })
+// 「仅代理 Manifest」只解决 CORS 问题，解决不了防盗链 403；Origin/Referer 都为空时禁用，避免误勾了没用的选项
+const manifestOnlyDisabled = computed(() => !requestOrigin.value.trim() && !requestReferer.value.trim())
 // 站点规则：用户自定义规则 + 当前 URL 命中的规则（供代理/预取/下载并发读取）
 const userSiteRules = ref<SiteRule[]>([])
 const activeRule = ref<SiteRule | null>(null)
@@ -1014,17 +1024,22 @@ const hlsConfig = ref({
   // 内存设置
   maxBufferSizeMB: 3600,       // 预取缓存内存上限（MB）——JS 侧缓存，非 MSE
   // 下载速度设置
-  fragLoadingTimeOut: 30000,  // 分片下载超时（ms）
+  fragLoadingTimeOut: 60000,  // 单个分片下载超时上限（ms）
   fragLoadingMaxRetry: 3,     // 最大重试次数
   // 高级设置
   enableWorker: true,         // 启用 Web Worker
   lowLatencyMode: false,      // 低延迟模式
 })
 
+// 预取闸门：刷新/恢复进度起播时，先让播放头跳到目标位置，到位后再解冻预取。
+// 否则播放头还在 0，预取会从头狂下一堆用不上的开头分片，抢占连接池、饿死真正要播的位置 → 转圈。
+let pendingStartPos = 0            // 本次起播要定位到的位置（秒），0=从头（无需等待，立即预取）
+const prefetchArmed = ref(false)   // 预取是否已解冻（播放头到达起播位置后置真）
+
 // 预取缓存 + 自适应预取（并发上限受站点规则约束）
 const segmentCache = useSegmentCache({ getMaxBufferSizeMB: () => hlsConfig.value.maxBufferSizeMB })
 const { prefetchInfo, useCacheForVideo, abortAllPrefetches, startPrefetchCleanup, stopPrefetchCleanup } = segmentCache
-const { getAheadBuffered, createHlsFragLoader, triggerAdaptivePrefetch, startOnePrefetch, strategy, resetStrategy, tick: prefetchTick, primePrefetch } = useHlsPrefetch({
+const { getAheadBuffered, getCachedAhead, createHlsFragLoader, triggerAdaptivePrefetch, startOnePrefetch, strategy, resetStrategy, tick: prefetchTick, primePrefetch } = useHlsPrefetch({
   getHls: () => hls,
   getVideoEl: () => videoEl.value,
   getProxyUrl,
@@ -1032,7 +1047,22 @@ const { getAheadBuffered, createHlsFragLoader, triggerAdaptivePrefetch, startOne
   // 站点规则 playbackConcurrency 作并发下限（默认 1）；引擎按实测+倍速动态往上算
   getConcurrencyCap: () => activeRule.value?.playbackConcurrency ?? 1,
   getPlaybackRate: () => playbackRate.value,
+  // 「预加载时长」= 往后预取多少秒就够了，到量即停（0/负数视为不限）
+  getPrefetchTargetSecs: () => {
+    const t = hlsConfig.value.maxBufferLength
+    return t && t > 0 ? t : Infinity
+  },
+  // 起播定位未到位前冻结预取（见 pendingStartPos/prefetchArmed）
+  getShouldPrefetch: () => prefetchArmed.value,
 })
+
+// 解冻预取：播放头已到达起播/恢复位置（或用户已手动跳转），此后才允许从当前位置往后预取。
+const armPrefetch = () => {
+  if (prefetchArmed.value) return
+  prefetchArmed.value = true
+  pendingStartPos = 0
+  if (isHls.value) primePrefetch()   // 到位即刻并行预热当前位置后续分片
+}
 
 // 倍速变化：立即顶格补取；若超出当前带宽可流畅倍速，提示（不拦截）
 watch(playbackRate, (rate) => {
@@ -1448,7 +1478,17 @@ const loadHlsVideo = async (url: string) => {
   
   const finalUrl = getProxyUrl(url)
   console.log('加载 HLS 视频:', finalUrl)
-  
+
+  // 恢复播放进度：直接告诉 hls.js 从目标位置起播，避免它先从头猛下一堆用不上的分片、
+  // 等 onLoadedMetadata 里再 seek 过去（那样等于白下了一遍开头）。
+  const resumeTime = getSavedProgress(url)
+  const startPosition = resumeTime > 0 ? resumeTime : -1
+
+  // 预取闸门：有恢复位 → 先冻结，等播放头跳到该位置（onSeeked/onPlaying/onTimeUpdate）再解冻，
+  // 避免刷新后从 0 狂下开头分片；无恢复位 → 从头起播，直接解冻。
+  pendingStartPos = resumeTime > 0 ? resumeTime : 0
+  prefetchArmed.value = pendingStartPos <= 0
+
   // HLS 配置
   // 关键：MSE 缓冲要"小而健康"——append 太多（几百 MB）会触发浏览器 MSE 配额/驱逐，
   // 产生缓冲空洞导致明明缓冲很多却卡在原地。真正的大量预读放在 JS 预取缓存里
@@ -1475,6 +1515,7 @@ const loadHlsVideo = async (url: string) => {
     enableWorker: hlsConfig.value.enableWorker,
     lowLatencyMode: hlsConfig.value.lowLatencyMode,
     startLevel: -1,
+    startPosition,
     // 自定义分片加载器：接管分片请求，命中预取缓存直接返回
     fLoader: createHlsFragLoader() as any,
     // Origin/Referer 由 /api/proxy 服务端注入，XHR 层只需关闭 credentials
@@ -1585,7 +1626,7 @@ const updateHlsStats = () => {
   if (!hls || !videoEl.value) return
 
   const video = videoEl.value
-  const buffered = getAheadBuffered(video)
+  const buffered = getCachedAhead(video)   // 含预取缓存的有效已缓冲，不只 MSE 的 ~60s
   
   const currentLevel = hls.currentLevel
   const levels = hls.levels
@@ -1856,10 +1897,15 @@ let progressSaveTimer: ReturnType<typeof setTimeout> | null = null
 const onTimeUpdate = () => {
   if (!videoEl.value) return
   currentTime.value = videoEl.value.currentTime
-  
-  // 更新缓冲进度（取包含当前播放位置的区间末尾）
-  if (videoEl.value.buffered.length > 0 && duration.value > 0) {
-    const aheadEnd = videoEl.value.currentTime + getAheadBuffered(videoEl.value)
+
+  // 兜底解冻：播放头已到达（或越过）起播/恢复位置 → 解冻预取，从当前位置往后拉
+  if (!prefetchArmed.value && pendingStartPos > 0 && currentTime.value >= pendingStartPos - 2) {
+    armPrefetch()
+  }
+
+  // 更新缓冲进度（含预取缓存的有效已缓冲，进度条反映真实可拖范围）
+  if (duration.value > 0) {
+    const aheadEnd = videoEl.value.currentTime + getCachedAhead(videoEl.value)
     bufferedPercent.value = (aheadEnd / duration.value) * 100
   }
   
@@ -1887,9 +1933,13 @@ const onLoadedMetadata = () => {
   markDataReceived()  // 标记收到有效数据
   duration.value = videoEl.value.duration
   
-  // 恢复保存的播放进度
+  // 恢复保存的播放进度：HLS 已经通过 hls.js 的 startPosition 直接从目标位置起播，
+  // 这里不用再 seek 一次（避免多余的 seek 打断刚起播的加载）；非 HLS（原生 video）没有
+  // startPosition 机制，仍需在这里手动 seek。
   const savedTime = getSavedProgress(videoUrl.value)
-  if (savedTime > 0 && savedTime < duration.value - 5) {
+  if (isHls.value && savedTime > 0 && savedTime < duration.value - 5) {
+    hasSkippedIntro.value = true
+  } else if (savedTime > 0 && savedTime < duration.value - 5) {
     console.log('恢复播放进度:', savedTime)
     videoEl.value.currentTime = savedTime
     hasSkippedIntro.value = true  // 已恢复进度，标记为已跳过片头
@@ -2081,8 +2131,11 @@ const onSeeked = () => {
   // 内存由 TTL(1天)+LRU(maxBufferSizeMB) 兜底，无需在 seek 时手动清。
   prefetchInfo.value.pending = 0
   isBuffering.value = false
+  // 跳转到位即为「起播定位完成」：首次 seek 解冻预取；已解冻则照常在新位置预热。
+  const wasArmed = prefetchArmed.value
+  armPrefetch()
   // 立刻在新位置并行预取（不等 1s 心跳），尽快把 seek 目标分片拉下来
-  if (isHls.value) primePrefetch()
+  if (wasArmed && isHls.value) primePrefetch()
 }
 
 // 开始播放
@@ -2090,6 +2143,7 @@ const onPlaying = () => {
   console.log('视频开始播放')
   isBuffering.value = false
   isPlaying.value = true
+  armPrefetch()   // 兜底：已在播放 = 起播位置已定，解冻预取（防 seeked 事件缺失时永久冻结）
 }
 
 
@@ -2138,7 +2192,7 @@ const resetHlsConfig = () => {
     maxMaxBufferLength: 60,
     backBufferLength: 30,
     maxBufferSizeMB: 3600,
-    fragLoadingTimeOut: 30000,
+    fragLoadingTimeOut: 60000,
     fragLoadingMaxRetry: 3,
     enableWorker: true,
     lowLatencyMode: false,
