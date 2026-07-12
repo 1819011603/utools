@@ -74,5 +74,19 @@ export function useVideoProxy(opts: VideoProxyOptions) {
     return url
   }
 
-  return { corsProxies, isHlsUrl, effectiveReferer, refererHelp, getProxyUrl }
+  // 「直连+代理双通道」的代理 lane：只为多占一个 origin（+ 服务器 IP）来提并发，
+  // 请求内容必须与直连 lane 完全一致。直连 lane 是浏览器裸 fetch（referrerPolicy: no-referrer，
+  // 且 Origin/Referer 是 forbidden headers 本就发不出去），所以这里也不能注入任何头——
+  // 用 noref=1 明确禁发。若注入 Origin/Referer，两条 lane 对同一 CDN 发的就是不同请求，
+  // 可能一条成一条败（甚至内容不一致），失去分流意义。双通道只在分片直连可达时启用，本就不需要头。
+  const getProxyPassthroughUrl = (url: string): string => {
+    if (url.includes('/api/proxy?')) return url
+    return '/api/proxy?' + new URLSearchParams({ url, noref: '1' }).toString()
+  }
+
+  // 当前对该 url 是否为「直连模式」（getProxyUrl 原样返回，浏览器直接打 CDN）。
+  // 只有直连可达的源才能做双通道——需要注入头/走代理的源，直连 lane 会 403/CORS 失败。
+  const isDirectMode = (url: string): boolean => getProxyUrl(url) === url
+
+  return { corsProxies, isHlsUrl, effectiveReferer, refererHelp, getProxyUrl, getProxyPassthroughUrl, isDirectMode }
 }

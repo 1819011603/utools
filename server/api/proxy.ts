@@ -34,8 +34,10 @@ async function getNodeDispatcher(): Promise<any> {
     if (undici?.Agent) {
       _dispatcher = new undici.Agent({
         connect: { rejectUnauthorized: false, timeout: 15000 },
-        bodyTimeout: 30000,
-        headersTimeout: 30000,
+        // 与客户端「单分片 5 分钟」上限一致：慢源大分片别在服务端被 30s 提前掐断。
+        // headersTimeout=首字节等待；bodyTimeout=body 分块间的空闲上限（都设 5 分钟）。
+        bodyTimeout: 300000,
+        headersTimeout: 300000,
         connections: 64,             // 每 origin 最大连接数（默认 10，太低会让 hls.js + 预取互相堵）
         pipelining: 1,
       })

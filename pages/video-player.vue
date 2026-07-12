@@ -90,6 +90,15 @@
               @change="onManualProxyChange"
             />
           </UFormGroup>
+          <UFormGroup label=" " class="pt-1">
+            <UCheckbox
+              v-model="dualChannel"
+              label="直连+代理双通道"
+              :disabled="dualChannelUnavailable"
+              :title="dualChannelUnavailable ? '需直连可达才有效：走代理/注入头/伪装时直连通道会 403' : '分片在直连 CDN 与本站代理两个 origin 间分流，把并发从 6 提到 ~12（代价：占用服务器出口流量）'"
+              @change="saveState"
+            />
+          </UFormGroup>
         </div>
 
         <!-- 片头片尾跳过设置 -->
@@ -239,6 +248,26 @@
                 @change="applyRulesAndReload"
               />
               <UCheckbox v-model="rule.disguiseAsDownloader" label="伪装下载器" @change="applyRulesAndReload" />
+              <UCheckbox
+                v-model="rule.dualChannel"
+                label="直连+代理双通道"
+                title="分片在直连 CDN 与本站代理两个 origin 间分流，把并发从 6 提到 ~12（仅直连可达的源有效）"
+                @change="applyRulesAndReload"
+              />
+              <div class="flex items-center gap-1">
+                <span class="text-gray-500">服务器档位</span>
+                <USelect
+                  v-model="rule.serverTier"
+                  :options="serverTierOptions"
+                  value-attribute="value"
+                  option-attribute="label"
+                  size="xs"
+                  class="w-20"
+                  placeholder="自动"
+                  title="好=单连接就够（低并发）；中=单连接慢但可并行（多线程）；差=带宽硬顶（双通道+快跳片）；自动=按实测分档"
+                  @change="applyRulesAndReload"
+                />
+              </div>
               <div class="flex items-center gap-1">
                 <span class="text-gray-500">预取并发</span>
                 <UInput v-model.number="rule.playbackConcurrency" type="number" :min="1" :max="3" size="xs" class="w-16" @change="applyRulesAndReload" />
@@ -628,6 +657,45 @@
           </UFormGroup>
         </div>
 
+        <!-- 抗卡策略（服务器档位参数）：留空=用当前档位预设（灰字占位） -->
+        <div class="space-y-2 border-t border-gray-200 dark:border-gray-700 pt-3">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="text-sm font-medium">抗卡策略</span>
+            <UBadge :color="tierBadgeColor" variant="subtle" size="xs">
+              当前档位：{{ tierLabel }}{{ tierIsAuto ? '（自动）' : '（锁定）' }}
+            </UBadge>
+            <UButton v-if="hasTierOverride" size="2xs" variant="ghost" color="gray" @click="clearTierOverrides">
+              清除覆盖 · 跟随档位
+            </UButton>
+          </div>
+          <p class="text-xs text-gray-500 dark:text-gray-400">
+            留空 = 用档位预设（灰字）；改动即覆盖当前档位。档位在「站点规则」里可手动锁定「好/中/差」或让引擎自动分档。
+          </p>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+            <UFormGroup label="濒卡阈值(秒)" help="MSE 前向低于此=濒卡→降速/跳片">
+              <UInput v-model.number="tierOverrides.panicSecs" type="number" :min="2" :max="30" size="xs" :placeholder="String(tierDefaults.panicSecs)" />
+            </UFormGroup>
+            <UFormGroup label="吃紧阈值(秒)" help="MSE 前向低于此=吃紧→并发爬坡">
+              <UInput v-model.number="tierOverrides.lowSecs" type="number" :min="5" :max="90" size="xs" :placeholder="String(tierDefaults.lowSecs)" />
+            </UFormGroup>
+            <UFormGroup label="安全系数" help="供给带宽相对消耗的冗余倍数">
+              <UInput v-model.number="tierOverrides.safety" type="number" :min="1" :max="3" :step="0.1" size="xs" :placeholder="String(tierDefaults.safety)" />
+            </UFormGroup>
+            <UFormGroup label="并发下限" help="起播即保证的最小并行连接数">
+              <UInput v-model.number="tierOverrides.concurrencyFloor" type="number" :min="1" :max="6" size="xs" :placeholder="String(tierDefaults.concurrencyFloor)" />
+            </UFormGroup>
+            <UFormGroup label="对冲延迟(ms)" help="关键分片超此→追加竞速连接">
+              <UInput v-model.number="tierOverrides.hedgeMs" type="number" :min="1000" :max="15000" :step="500" size="xs" :placeholder="String(tierDefaults.hedgeMs)" />
+            </UFormGroup>
+            <UFormGroup label="跳片超时(ms)" help="关键分片超此→跳过（先降速后才跳）">
+              <UInput v-model.number="tierOverrides.skipMs" type="number" :min="5000" :max="60000" :step="1000" size="xs" :placeholder="String(tierDefaults.skipMs)" />
+            </UFormGroup>
+            <UFormGroup label="竞速上限" help="单个关键分片最多并行竞速连接数">
+              <UInput v-model.number="tierOverrides.maxRacers" type="number" :min="1" :max="8" size="xs" :placeholder="String(tierDefaults.maxRacers)" />
+            </UFormGroup>
+          </div>
+        </div>
+
         <!-- 高级设置 -->
         <div class="flex flex-wrap gap-x-8 gap-y-3">
           <div class="space-y-1">
@@ -642,7 +710,27 @@
 
         <!-- 实时状态 -->
         <div v-if="hlsStats" class="p-3 bg-gray-50 dark:bg-gray-800 rounded-lg space-y-2">
-          <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+          <!-- 服务器档位 + 缓冲健康区 + 真实卡顿 -->
+          <div class="flex flex-wrap items-center gap-2 text-sm">
+            <UBadge :color="tierBadgeColor" variant="subtle" size="xs">
+              服务器：{{ tierLabel }}{{ tierIsAuto ? '（自动）' : '（锁定）' }}
+            </UBadge>
+            <UBadge
+              :color="strategy.healthZone === 'panic' ? 'red' : strategy.healthZone === 'low' ? 'amber' : 'green'"
+              variant="subtle" size="xs"
+            >
+              {{ strategy.healthZone === 'panic' ? '濒卡' : strategy.healthZone === 'low' ? '吃紧' : '健康' }}
+            </UBadge>
+            <UBadge v-if="guardRateCeiling < 99" color="amber" variant="subtle" size="xs">抗卡降速中</UBadge>
+            <UBadge :color="stall.stallCount.value > 0 ? 'red' : 'green'" variant="subtle" size="xs">
+              卡顿 {{ stall.stallCount.value }} 次 / {{ (stall.stallMsTotal.value / 1000).toFixed(1) }}s
+            </UBadge>
+            <UBadge color="gray" variant="subtle" size="xs">连续流畅 {{ stall.getSmoothSecs().toFixed(0) }}s</UBadge>
+            <UBadge :color="strategy.aggregateScales ? 'green' : 'red'" variant="subtle" size="xs">
+              {{ strategy.aggregateScales ? '可并行' : '带宽硬顶' }}
+            </UBadge>
+          </div>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm border-t border-gray-200 dark:border-gray-700 pt-2">
             <div>
               <span class="text-gray-500">已缓冲：</span>
               <span class="font-medium">{{ hlsStats.buffered.toFixed(1) }} 秒</span>
@@ -688,6 +776,13 @@
               <span class="font-medium">{{ strategy.perConnKBps }} KB/s</span>
             </div>
             <div>
+              <span class="text-gray-500">聚合速度：</span>
+              <span class="font-medium" :class="dualChannel && !dualChannelUnavailable ? 'text-green-500' : ''">
+                {{ aggregateKBps }} KB/s
+                <span class="text-xs text-gray-400">({{ aggregateMbps }} Mbps)</span>
+              </span>
+            </div>
+            <div>
               <span class="text-gray-500">视频码率：</span>
               <span class="font-medium">{{ strategy.segMbps }} Mbps</span>
             </div>
@@ -701,6 +796,11 @@
                 {{ strategy.maxFluentRate }}x
               </span>
             </div>
+          </div>
+          <!-- 播放卡点诊断：已缓冲一直加却不播时看这里 -->
+          <div class="text-sm border-t border-gray-200 dark:border-gray-700 pt-2">
+            <span class="text-gray-500">播放状态：</span>
+            <span class="font-medium">{{ playbackDiag }}</span>
           </div>
         </div>
 
@@ -807,7 +907,7 @@
 <script setup lang="ts">
 import type HlsType from 'hls.js'
 import { onClickOutside } from '@vueuse/core'
-import type { SiteRule } from '~/composables/videoSiteRules'
+import type { SiteRule, ServerTier, TierParams } from '~/composables/videoSiteRules'
 
 // 动态导入 hls.js（避免 SSR 问题）
 let Hls: typeof HlsType | null = null
@@ -835,8 +935,10 @@ interface SavedState {
   requestReferer: string
   manifestOnly: boolean
   disguiseAsDownloader: boolean
+  dualChannel?: boolean            // 直连+代理双通道
   manualStrategyOverride: boolean  // 手动连接策略（持久化，避免刷新后被自动策略覆盖）
   hlsConfig: typeof hlsConfig.value
+  tierOverrides?: Partial<TierParams>  // 抗卡策略参数覆盖（页面可调，空=跟随档位）
 }
 
 // 从本地存储加载状态
@@ -871,8 +973,10 @@ const saveState = () => {
       requestReferer: requestReferer.value,
       manifestOnly: manifestOnly.value,
       disguiseAsDownloader: disguiseAsDownloader.value,
+      dualChannel: dualChannel.value,
       manualStrategyOverride: manualStrategyOverride.value,
-      hlsConfig: { ...hlsConfig.value }
+      hlsConfig: { ...hlsConfig.value },
+      tierOverrides: { ...tierOverrides.value }
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
   } catch (e) {
@@ -906,15 +1010,68 @@ const requestOrigin = ref('')    // 自定义 Origin 请求头
 const requestReferer = ref('')   // 自定义 Referer 请求头（空则自动为 origin + /）
 const manifestOnly = ref(true)   // 仅代理 manifest，分片直连 CDN（更快）
 const disguiseAsDownloader = ref(false)  // 默认直连不注入；自动可达性阶梯或站点规则可置真
+const dualChannel = ref(false)  // 直连+代理双通道：分片在「直连 CDN」和「/api/proxy」两个 origin 间分流，把并发从 6 提到 ~12
 // 代理 URL 生成（Origin/Referer 注入、manifestOnly、伪装下载器、CORS 代理）
-const { isHlsUrl, effectiveReferer, refererHelp, getProxyUrl } = useVideoProxy({
+const { isHlsUrl, effectiveReferer, refererHelp, getProxyUrl, getProxyPassthroughUrl, isDirectMode } = useVideoProxy({
   requestOrigin, requestReferer, manifestOnly, disguiseAsDownloader, useProxy,
 })
 // 「仅代理 Manifest」只解决 CORS 问题，解决不了防盗链 403；Origin/Referer 都为空时禁用，避免误勾了没用的选项
 const manifestOnlyDisabled = computed(() => !requestOrigin.value.trim() && !requestReferer.value.trim())
+// 双通道需要「分片直连可达」才有分流的直连 lane。跟 getProxyUrl 对分片(.ts)的判定保持一致：
+//   伪装 → 全代理；注入头 → 仅 manifestOnly 时分片才直连；否则看 useProxy。分片非直连时置灰。
+const dualChannelUnavailable = computed(() => {
+  if (disguiseAsDownloader.value) return true
+  const hasHeaders = !!requestOrigin.value.trim() || !!requestReferer.value.trim()
+  if (hasHeaders) return !manifestOnly.value
+  return useProxy.value
+})
+// 聚合下载速度（估算）= 单连接实测速度 × 当前并发。perConnKBps 是当前并发下的实测值，
+// 故乘积能反映「加并发到底换没换来更多总带宽」：双通道真生效则随 6→12 翻倍，被 per-IP 限死则基本不变。
+const aggregateKBps = computed(() => Math.round(strategy.value.perConnKBps * strategy.value.targetConn))
+const aggregateMbps = computed(() => Math.round((aggregateKBps.value * 8 / 1024) * 10) / 10)
 // 站点规则：用户自定义规则 + 当前 URL 命中的规则（供代理/预取/下载并发读取）
 const userSiteRules = ref<SiteRule[]>([])
 const activeRule = ref<SiteRule | null>(null)
+
+// ── 服务器档位（好/中/差）+ 抗卡自愈 ──
+const serverTierOptions = [
+  { label: '自动', value: 'auto' },
+  { label: '好', value: 'good' },
+  { label: '中', value: 'medium' },
+  { label: '差', value: 'bad' },
+]
+const autoTier = ref<ServerTier>(DEFAULT_TIER)          // auto 模式下实测/学习得出的档位
+const tierOverrides = ref<Partial<TierParams>>({})      // 页面可调的档位参数覆盖（空=用预设）
+const guardRateCeiling = ref(Infinity)                  // 抗卡降速守卫上限：PANIC 置 1，恢复置 Infinity
+const currentHost = ref('')                             // 当前视频 host（学习档案按 host 存取）
+
+// 生效档位名：手动规则锁定优先，否则自动实测/学习档
+const effectiveTierName = computed<ServerTier>(() => {
+  const manual = activeRule.value?.serverTier
+  if (manual && manual !== 'auto') return manual
+  return autoTier.value
+})
+const tierIsAuto = computed(() => {
+  const m = activeRule.value?.serverTier
+  return !m || m === 'auto'
+})
+// 生效档位参数 = 预设 + 页面覆盖（过滤掉空/非法覆盖值，避免输入框清空污染数值逻辑）
+const tierDefaults = computed(() => SERVER_TIERS[effectiveTierName.value])
+const effectiveTierParams = computed<TierParams>(() => {
+  const ov = tierOverrides.value
+  const clean: Partial<TierParams> = {}
+  for (const k in ov) {
+    const v = (ov as any)[k]
+    if ((typeof v === 'number' && Number.isFinite(v)) || typeof v === 'boolean') (clean as any)[k] = v
+  }
+  return { ...tierDefaults.value, ...clean }
+})
+const tierLabel = computed(() => ({ good: '好', medium: '中', bad: '差' } as const)[effectiveTierName.value])
+const tierBadgeColor = computed(() => ({ good: 'green', medium: 'amber', bad: 'red' } as const)[effectiveTierName.value])
+const hasTierOverride = computed(() => Object.keys(tierOverrides.value).length > 0)
+const clearTierOverrides = () => { tierOverrides.value = {} }
+// 抗卡参数覆盖改动即持久化（实时生效，无需「应用配置」）
+watch(tierOverrides, () => saveState(), { deep: true })
 
 // Origin/Referer 历史（localStorage 永久保存，供输入框下拉选择）
 const ORIGIN_HISTORY_KEY = 'video-player-origin-history'
@@ -1007,9 +1164,11 @@ let hls: HlsType | null = null
 let hlsTickTimer: ReturnType<typeof setInterval> | null = null
 const startHlsTick = () => {
   if (hlsTickTimer) return
+  stall.bind()   // 心跳启动时 video 已就绪，绑定卡顿监听（幂等）
   hlsTickTimer = setInterval(() => {
     prefetchTick()
     updateHlsStats()
+    selfHeal()
   }, 1000)
 }
 const stopHlsTick = () => {
@@ -1024,22 +1183,23 @@ const hlsConfig = ref({
   // 内存设置
   maxBufferSizeMB: 3600,       // 预取缓存内存上限（MB）——JS 侧缓存，非 MSE
   // 下载速度设置
-  fragLoadingTimeOut: 60000,  // 单个分片下载超时上限（ms）
+  fragLoadingTimeOut: 300000,  // 单个分片下载超时上限（ms，5 分钟）
   fragLoadingMaxRetry: 3,     // 最大重试次数
   // 高级设置
   enableWorker: true,         // 启用 Web Worker
   lowLatencyMode: false,      // 低延迟模式
 })
 
-// 预取闸门：刷新/恢复进度起播时，先让播放头跳到目标位置，到位后再解冻预取。
-// 否则播放头还在 0，预取会从头狂下一堆用不上的开头分片，抢占连接池、饿死真正要播的位置 → 转圈。
-let pendingStartPos = 0            // 本次起播要定位到的位置（秒），0=从头（无需等待，立即预取）
-const prefetchArmed = ref(false)   // 预取是否已解冻（播放头到达起播位置后置真）
+// 起播锚点：刷新/恢复进度起播时，播放头还停在 0、但要起播的位置在 pendingStartPos。
+// 预取以此为起点（见 useHlsPrefetch 的 getStartPosition/anchorTime）——起播即在正确位置全力并行预取，
+// 既不浪费带宽下开头，也不会退化成「只有 hls.js 串行下 1 片」。到位/用户跳转后清 0，改用真实播放头。
+let pendingStartPos = 0            // >0=起播定位目标（秒）；0=用真实播放头
+let startAnchorActive = false      // 起播锚点是否仍生效（播放头尚未到达 pendingStartPos）
 
 // 预取缓存 + 自适应预取（并发上限受站点规则约束）
 const segmentCache = useSegmentCache({ getMaxBufferSizeMB: () => hlsConfig.value.maxBufferSizeMB })
 const { prefetchInfo, useCacheForVideo, abortAllPrefetches, startPrefetchCleanup, stopPrefetchCleanup } = segmentCache
-const { getAheadBuffered, getCachedAhead, createHlsFragLoader, triggerAdaptivePrefetch, startOnePrefetch, strategy, resetStrategy, tick: prefetchTick, primePrefetch } = useHlsPrefetch({
+const { getAheadBuffered, getCachedAhead, createHlsFragLoader, triggerAdaptivePrefetch, startOnePrefetch, strategy, resetStrategy, tick: prefetchTick, primePrefetch, getStuckSegment } = useHlsPrefetch({
   getHls: () => hls,
   getVideoEl: () => videoEl.value,
   getProxyUrl,
@@ -1052,17 +1212,23 @@ const { getAheadBuffered, getCachedAhead, createHlsFragLoader, triggerAdaptivePr
     const t = hlsConfig.value.maxBufferLength
     return t && t > 0 ? t : Infinity
   },
-  // 起播定位未到位前冻结预取（见 pendingStartPos/prefetchArmed）
-  getShouldPrefetch: () => prefetchArmed.value,
+  // 起播锚点：定位未到位前，预取从 pendingStartPos 起（而非 currentTime=0）
+  getStartPosition: () => (startAnchorActive ? pendingStartPos : 0),
+  // 直连+代理双通道：仅在「开启 + 该分片直连可达」时加一条本站代理 lane（不同 origin → 各享 6 连接）。
+  // 需注入头/走代理的源直连 lane 会 403，退回单 lane。
+  getLaneUrls: (url: string) => {
+    if (dualChannel.value && isDirectMode(url)) return [url, getProxyPassthroughUrl(url)]
+    return [getProxyUrl(url)]
+  },
+  // 服务器档位参数（好/中/差预设 + 页面覆盖）：抗卡阈值/超时/安全系数/并发下限/预取深度全从这里读
+  getTierParams: () => effectiveTierParams.value,
 })
 
-// 解冻预取：播放头已到达起播/恢复位置（或用户已手动跳转），此后才允许从当前位置往后预取。
-const armPrefetch = () => {
-  if (prefetchArmed.value) return
-  prefetchArmed.value = true
-  pendingStartPos = 0
-  if (isHls.value) primePrefetch()   // 到位即刻并行预热当前位置后续分片
-}
+// 卡顿记录器：以 <video> 真实停顿为地面真值，喂给自愈调参环（selfHeal）
+const stall = useStallTracker(() => videoEl.value)
+
+// 清除起播锚点：播放头已到达起播/恢复位置，此后预取改用真实播放头（见 getStartPosition）。
+const clearStartAnchor = () => { startAnchorActive = false; pendingStartPos = 0 }
 
 // 倍速变化：立即顶格补取；若超出当前带宽可流畅倍速，提示（不拦截）
 watch(playbackRate, (rate) => {
@@ -1082,10 +1248,18 @@ const RATE_STEP = 0.25            // 自动调速每步最大幅度
 const RATE_COOLDOWN_MS = 10000    // 两次自动调速的最小间隔
 let lastAutoRateAt = 0            // 上次自动调速时刻（performance.now）
 const applyEffectiveRate = () => {
+  const guard = guardRateCeiling.value   // 抗卡守卫上限（PANIC=1，否则 Infinity）
+  // 抗卡阶梯第一步「先降速」：生效倍速高于守卫上限时立即压下（绕过冷却/步进，保命优先）。
+  if (isHls.value && guard < playbackRate.value - 1e-6) {
+    const g = Math.max(1, guard)
+    playbackRate.value = g
+    if (videoEl.value) videoEl.value.playbackRate = g
+    return
+  }
   if (autoBestRate.value && isHls.value) {
-    // 目标倍速 = min(所选, 可持续)，≥1，对齐到 0.25 台阶
+    // 目标倍速 = min(所选, 可持续, 守卫上限)，≥1，对齐到 0.25 台阶
     const max = strategy.value.maxFluentRate
-    const rawCeil = max > 0 ? Math.min(desiredRate.value, max) : desiredRate.value
+    const rawCeil = Math.min(desiredRate.value, max > 0 ? max : desiredRate.value, guard)
     const target = Math.max(1, Math.round(rawCeil / RATE_STEP) * RATE_STEP)
     const cur = playbackRate.value
     if (Math.abs(target - cur) < 1e-6) return           // 已到位
@@ -1099,15 +1273,57 @@ const applyEffectiveRate = () => {
     playbackRate.value = next
     if (videoEl.value) videoEl.value.playbackRate = next
   } else {
-    const eff = desiredRate.value                       // 手动：完全听用户，立即生效
+    const eff = Math.min(desiredRate.value, guard)      // 手动：听用户，但仍受抗卡守卫钳制
     if (eff !== playbackRate.value) {
       playbackRate.value = eff
       if (videoEl.value) videoEl.value.playbackRate = eff
     }
   }
 }
-// 带宽实测变化 或 开关切换 时，重新评估生效倍速
-watch([strategy, autoBestRate], () => applyEffectiveRate())
+// 带宽实测变化 / 开关切换 / 抗卡守卫变化 时，重新评估生效倍速
+watch([strategy, autoBestRate, guardRateCeiling], () => applyEffectiveRate())
+
+// ── 自愈调参环：以真实卡顿 + 健康区反馈，自动分档 + 抗卡阶梯 + 按 host 记忆 ──
+const SMOOTH_RELAX_SECS = 30    // 连续流畅超此秒数 → 放松（解除降速守卫、可回收资源）
+let lastLearnSaveAt = 0
+const selfHeal = () => {
+  if (!isHls.value) return
+  const s = strategy.value
+  // 1) 自动分档（仅 auto 模式）：实测 + 聚合可并行 → classifyTier；真实卡顿则强制降档
+  if (tierIsAuto.value) {
+    const perBps = s.perConnKBps * 8 * 1024
+    const segBps = s.segMbps * 1e6
+    let t = classifyTier(perBps, segBps, s.aggregateScales, playbackRate.value, effectiveTierParams.value.maxConn)
+    const recentStalls = stall.stallCountInWindow(60000)   // 近 1 分钟真实卡顿次数
+    if (recentStalls >= 2) t = 'bad'
+    else if (recentStalls >= 1 && t === 'good') t = 'medium'
+    autoTier.value = t
+  }
+  // 2) 抗卡阶梯
+  // 2a) 差档濒卡 → 自动开双通道换出口（属连接策略，与倍速无关，手动/自动模式都可）
+  if (s.healthZone === 'panic' && effectiveTierParams.value.dualChannelAuto && !dualChannel.value && !dualChannelUnavailable.value) {
+    dualChannel.value = true
+  }
+  // 2b) 先降速：仅「自动最佳倍速」开启时生效——用户手动锁定倍速则尊重其选择，绝不强制降速
+  //     （手动模式下应急完全交给跳片，见 skipSegment：倍速>1 时仅在几乎冻结才跳）。
+  //     迟滞防抖：濒卡(panic)才压到 1x，恢复到健康(healthy)才放回，中间(low)保持不动。
+  if (autoBestRate.value) {
+    if (s.healthZone === 'panic') guardRateCeiling.value = 1
+    else if (s.healthZone === 'healthy' && guardRateCeiling.value !== Infinity) guardRateCeiling.value = Infinity
+  } else if (guardRateCeiling.value !== Infinity) {
+    guardRateCeiling.value = Infinity   // 手动模式：确保降速守卫不残留，倍速立即听用户
+  }
+  // 3) 按 host 记忆：连续流畅够久，把当前档位/双通道效果学到 host（下次同站直接从最优起步）
+  const now = performance.now()
+  if (currentHost.value && stall.getSmoothSecs() > SMOOTH_RELAX_SECS && now - lastLearnSaveAt > 30000) {
+    lastLearnSaveAt = now
+    saveLearnedProfile(currentHost.value, {
+      learnedTier: effectiveTierName.value,
+      bestConcurrency: s.targetConn,
+      dualChannelHelped: dualChannel.value,
+    })
+  }
+}
 
 // MP4 预加载策略
 const preloadStrategy = ref('auto')
@@ -1333,6 +1549,13 @@ const applyReachabilityStep = (step: number) => {
 const applyStrategy = (url: string) => {
   const rule = matchSiteRule(url, userSiteRules.value)
   activeRule.value = rule
+  // 按 host 记忆：auto 模式下用学到的档位起步（第二遍即最优，不再从冷启动乐观值试探）
+  currentHost.value = hostOf(url)
+  const learned = loadLearnedProfile(currentHost.value)
+  autoTier.value = learned?.learnedTier ?? DEFAULT_TIER
+  guardRateCeiling.value = Infinity   // 新流解除上一流的降速守卫
+  // 双通道：规则可指定；手动模式保留用户当前设置（dualChannel 与可达性无关，单独套用）
+  if (!manualStrategyOverride.value && rule?.dualChannel !== undefined) dualChannel.value = rule.dualChannel
   if (url !== lastStrategyUrl) { autoStrategyStep.value = 0; lastStrategyUrl = url }
   if (manualStrategyOverride.value) return  // 手动模式：保留用户当前代理设置，不自动改
   if (ruleControlsReachability(rule)) {
@@ -1484,10 +1707,10 @@ const loadHlsVideo = async (url: string) => {
   const resumeTime = getSavedProgress(url)
   const startPosition = resumeTime > 0 ? resumeTime : -1
 
-  // 预取闸门：有恢复位 → 先冻结，等播放头跳到该位置（onSeeked/onPlaying/onTimeUpdate）再解冻，
-  // 避免刷新后从 0 狂下开头分片；无恢复位 → 从头起播，直接解冻。
+  // 起播锚点：有恢复位 → 预取直接锚定到该位置（起播即在正确位置全力预取，不下开头、不串行）；
+  // 播放头到位（onSeeked）后清锚点改用真实播放头。无恢复位 → 锚点=0，等价于从头。
   pendingStartPos = resumeTime > 0 ? resumeTime : 0
-  prefetchArmed.value = pendingStartPos <= 0
+  startAnchorActive = resumeTime > 0
 
   // HLS 配置
   // 关键：MSE 缓冲要"小而健康"——append 太多（几百 MB）会触发浏览器 MSE 配额/驱逐，
@@ -1621,11 +1844,68 @@ const loadHlsVideo = async (url: string) => {
   })
 }
 
+// 播放卡点诊断：「已缓冲一直加却不播」时，一眼看出卡在哪。
+// 关键区分：「已缓冲」是 JS 预取缓存（getCachedAhead），能一直涨；能不能播只看 video 元素的 MSE 缓冲。
+// readyState 是「整体就绪等级」，不是帧序号：2=有当前帧但不够续播 → 会停下等。
+const READY_STATE_TXT = ['无数据(0)', '仅元数据(1)', '有当前帧·不够续播(2)', '够续播(3)', '缓冲充足(4)']
+const playbackDiag = ref('—')
+const updatePlaybackDiag = (video: HTMLVideoElement) => {
+  const ct = video.currentTime
+  const rs = READY_STATE_TXT[video.readyState] ?? String(video.readyState)
+  if (video.error) {
+    playbackDiag.value = `❌ 媒体错误(code ${video.error.code})：${video.error.message || '解码/格式失败'}`
+    return
+  }
+  const n = video.buffered.length
+  if (n === 0) {
+    playbackDiag.value = `⏳ MSE 为空：播放器尚未 append 任何分片（hls.js 正在下载/解码首片，readyState=${rs}）`
+    return
+  }
+  const ranges: string[] = []
+  let curEnd = -1, nextStart = -1   // 播放头所在区间的末尾；其后最近一个区间的起点（用于判空洞）
+  for (let i = 0; i < n; i++) {
+    const s = video.buffered.start(i), e = video.buffered.end(i)
+    ranges.push(`${s.toFixed(1)}~${e.toFixed(1)}`)
+    if (s <= ct + 0.1 && ct <= e + 0.1) curEnd = e
+    else if (s > ct && (nextStart < 0 || s < nextStart)) nextStart = s
+  }
+  if (curEnd < 0) {
+    // 播放头不在任何区间内：定位错位/落在洞里
+    const after = nextStart >= 0 ? `，最近的下一段从 ${nextStart.toFixed(1)}s 开始` : ''
+    const stuck = getStuckSegment()
+    const dl = stuck ? ` ｜ 最久在途：${stuck.name} 已下 ${(stuck.elapsedMs / 1000).toFixed(1)}s（共 ${stuck.count} 片）` : ''
+    playbackDiag.value = `⚠️ 播放头 ${ct.toFixed(1)}s 不在任何缓冲区间内（定位错位）${after}；MSE 区间：${ranges.join(', ')}s${dl}`
+    return
+  }
+  const mseAhead = curEnd - ct
+  if (mseAhead < 0.5) {
+    // 附上「哪个分片卡住、下了多久」
+    const stuck = getStuckSegment()
+    const dl = stuck
+      ? ` ｜ 最久在途：${stuck.name} 已下 ${(stuck.elapsedMs / 1000).toFixed(1)}s（共 ${stuck.count} 片在下）`
+      : ' ｜ 当前无分片在下载（卡在 append/解码，非下载）'
+    if (nextStart > curEnd + 0.05) {
+      // MSE 有空洞：播到 curEnd 就断，下一段从 nextStart 开始，中间没接上（不是某帧坏了）
+      playbackDiag.value = `⚠️ 缓冲空洞：播到 ${curEnd.toFixed(1)}s 断开，下一段从 ${nextStart.toFixed(1)}s 起（缺 ${(nextStart - curEnd).toFixed(1)}s 没接上）→ 卡在洞前${dl}`
+    } else {
+      // 无洞、就是喂得慢：hls.js 还没把下一片 append 进来（下载/解码中）
+      playbackDiag.value = `⏳ MSE 到头（前向仅 ${mseAhead.toFixed(1)}s）：在等下一片${dl}`
+    }
+    return
+  }
+  if (video.paused) {
+    playbackDiag.value = `⏸ 已就绪(前向 ${mseAhead.toFixed(1)}s) 但处于暂停：等待/被拦截的自动播放`
+    return
+  }
+  playbackDiag.value = `✅ 正常播放（前向 MSE ${mseAhead.toFixed(1)}s，readyState=${rs}）`
+}
+
 // 更新 HLS 统计信息
 const updateHlsStats = () => {
   if (!hls || !videoEl.value) return
 
   const video = videoEl.value
+  updatePlaybackDiag(video)
   const buffered = getCachedAhead(video)   // 含预取缓存的有效已缓冲，不只 MSE 的 ~60s
   
   const currentLevel = hls.currentLevel
@@ -1634,9 +1914,12 @@ const updateHlsStats = () => {
   
   if (currentLevel >= 0 && levels[currentLevel]) {
     const level = levels[currentLevel]
-    levelInfo = `${level.height}p`
-    if (level.bitrate) {
-      levelInfo += ` (${Math.round(level.bitrate / 1000)}kbps)`
+    // 部分流不上报分辨率(height=0)：退回显示码率，避免出现无意义的「0p」
+    if (level.height) {
+      levelInfo = `${level.height}p`
+      if (level.bitrate) levelInfo += ` (${Math.round(level.bitrate / 1000)}kbps)`
+    } else if (level.bitrate) {
+      levelInfo = `${Math.round(level.bitrate / 1000)}kbps`
     }
   }
   
@@ -1690,6 +1973,9 @@ const destroyHls = () => {
   abortAllPrefetches()
   prefetchInfo.value = { bufferSecs: 0, threads: 0, cached: 0, pending: 0 }
   resetStrategy()
+  stall.unbind()          // 解绑卡顿监听（换流重新计）
+  stall.reset()
+  guardRateCeiling.value = Infinity   // 解除抗卡降速守卫
   cancelDownload()
 }
 
@@ -1897,11 +2183,6 @@ let progressSaveTimer: ReturnType<typeof setTimeout> | null = null
 const onTimeUpdate = () => {
   if (!videoEl.value) return
   currentTime.value = videoEl.value.currentTime
-
-  // 兜底解冻：播放头已到达（或越过）起播/恢复位置 → 解冻预取，从当前位置往后拉
-  if (!prefetchArmed.value && pendingStartPos > 0 && currentTime.value >= pendingStartPos - 2) {
-    armPrefetch()
-  }
 
   // 更新缓冲进度（含预取缓存的有效已缓冲，进度条反映真实可拖范围）
   if (duration.value > 0) {
@@ -2124,18 +2405,20 @@ const onSeeked = () => {
     clearTimeout(seekBufferingTimer)
     seekBufferingTimer = null
   }
-  // 终止旧位置的预取请求，腾出连接池给新位置的分片
-  abortAllPrefetches()
-
-  // 不清空已完成缓存：seek 回跳/来回拖动时直接命中内存，不重新下载。
-  // 内存由 TTL(1天)+LRU(maxBufferSizeMB) 兜底，无需在 seek 时手动清。
-  prefetchInfo.value.pending = 0
+  // 起播定位到位（currentTime 刚跳到 pendingStartPos）不是用户跳转：预取本就锚定在此、已在正确位置
+  // 并行下载，别 abort 掉白费。只有真·用户跳转才终止旧位置预取、腾连接给新位置。
+  const ct = videoEl.value?.currentTime ?? 0
+  const arrivingAtStart = startAnchorActive && Math.abs(ct - pendingStartPos) < 3
+  clearStartAnchor()   // 此后以真实播放头为准
+  if (!arrivingAtStart) {
+    // 终止旧位置的预取请求，腾出连接池给新位置的分片。
+    // 不清空已完成缓存：seek 回跳/来回拖动时直接命中内存，不重新下载（TTL+LRU 兜底）。
+    abortAllPrefetches()
+    prefetchInfo.value.pending = 0
+  }
   isBuffering.value = false
-  // 跳转到位即为「起播定位完成」：首次 seek 解冻预取；已解冻则照常在新位置预热。
-  const wasArmed = prefetchArmed.value
-  armPrefetch()
-  // 立刻在新位置并行预取（不等 1s 心跳），尽快把 seek 目标分片拉下来
-  if (wasArmed && isHls.value) primePrefetch()
+  // 立刻在当前位置并行预取（不等 1s 心跳），尽快把目标分片拉下来
+  if (isHls.value) primePrefetch()
 }
 
 // 开始播放
@@ -2143,7 +2426,7 @@ const onPlaying = () => {
   console.log('视频开始播放')
   isBuffering.value = false
   isPlaying.value = true
-  armPrefetch()   // 兜底：已在播放 = 起播位置已定，解冻预取（防 seeked 事件缺失时永久冻结）
+  clearStartAnchor()   // 兜底：已在播放 = 起播位置已定，改用真实播放头（防 seeked 事件缺失时锚点残留）
 }
 
 
@@ -2192,7 +2475,7 @@ const resetHlsConfig = () => {
     maxMaxBufferLength: 60,
     backBufferLength: 30,
     maxBufferSizeMB: 3600,
-    fragLoadingTimeOut: 60000,
+    fragLoadingTimeOut: 300000,
     fragLoadingMaxRetry: 3,
     enableWorker: true,
     lowLatencyMode: false,
@@ -2297,11 +2580,13 @@ onMounted(async () => {
     requestReferer.value = savedState.requestReferer ?? ''
     manifestOnly.value = savedState.manifestOnly ?? true
     disguiseAsDownloader.value = savedState.disguiseAsDownloader ?? false
+    dualChannel.value = savedState.dualChannel ?? false
     manualStrategyOverride.value = savedState.manualStrategyOverride ?? false
     if (manualStrategyOverride.value) showAdvancedProxy.value = true  // 手动过则展开显示当前设置
     if (savedState.hlsConfig) {
       hlsConfig.value = { ...hlsConfig.value, ...savedState.hlsConfig }
     }
+    if (savedState.tierOverrides) tierOverrides.value = { ...savedState.tierOverrides }
 
     // 如果没有 URL 参数，恢复保存的视频地址
     const urlParam = route.query.url as string

@@ -9,7 +9,11 @@
       "Grep(*)",
       "WebSearch",
       "WebFetch(*)",
-      "mcp__plugin_claude-mem_mcp-search__smart_search"
+      "mcp__plugin_claude-mem_mcp-search__smart_search",
+      "Bash(grep -nE \"500|terminated|video-player|GET|POST|proxy\" /tmp/nuxt-dev.log | tail -30)",
+      "Read(//tmp/**)",
+      "Bash(kill 1587)",
+      "Bash(pkill -f \"nuxt dev\")"
     ],
     "ask": [
       "Bash(rm *)",
