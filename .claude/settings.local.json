@@ -13,7 +13,9 @@
       "Bash(grep -nE \"500|terminated|video-player|GET|POST|proxy\" /tmp/nuxt-dev.log | tail -30)",
       "Read(//tmp/**)",
       "Bash(kill 1587)",
-      "Bash(pkill -f \"nuxt dev\")"
+      "Bash(pkill -f \"nuxt dev\")",
+      "Bash(curl -s -A \"Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\) AppleWebKit/537.36 Chrome/120 Safari/537.36\" \"https://www.ncat22.com/play/357213-41-4502531.html\" -o /tmp/ncat.html -w \"HTTP %{http_code} size %{size_download}\\\\n\")",
+      "Bash(curl -sS -m 20 -A \"Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\) AppleWebKit/537.36 Chrome/120 Safari/537.36\" \"https://www.ncat22.com/play/357213-41-4502531.html\" -o /tmp/ncat.html -w \"HTTP %{http_code} size %{size_download}\\\\n\")"
     ],
     "ask": [
       "Bash(rm *)",

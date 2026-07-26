@@ -63,20 +63,18 @@ export default defineEventHandler(async (event) => {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
     Accept: '*/*',
   }
-  if (origin) reqHeaders['Origin'] = origin
-  if (referer) reqHeaders['Referer'] = referer
+  // 注意：Origin / Referer 不在这里塞——交给 fetchWithHeaderProbe 决定
+  // （很多源站根本不校验防盗链，不带头反而更快更稳，见下方探测逻辑）
 
   // 透传 Range（支持视频 seek / MP4 拖拽）
   const rangeHeader = getRequestHeader(event, 'range')
   if (rangeHeader) reqHeaders['Range'] = rangeHeader
 
   const dispatcher = await getNodeDispatcher()
-  const fetchOpts: RequestInit & { dispatcher?: any } = { headers: reqHeaders }
-  if (dispatcher) fetchOpts.dispatcher = dispatcher
 
   let response: Response
   try {
-    response = await fetchWithRetry(targetUrl, fetchOpts as RequestInit)
+    response = await fetchWithHeaderProbe(targetUrl, reqHeaders, origin, referer, dispatcher)
   } catch (e) {
     const err = e as Error & { cause?: { code?: string; message?: string } }
     const cause = err.cause?.code || err.cause?.message || ''
@@ -144,6 +142,121 @@ export default defineEventHandler(async (event) => {
   return response.body
 })
 
+// ── 防盗链头探测 ──────────────────────────────────────────────
+//
+// 前端传了 origin/referer，但很多源站压根不校验防盗链；
+// 不带头请求往往更快（少一次源站鉴权），有些站反而会因为 Origin 触发 CORS 预检式拒绝。
+// 所以首次访问某个 host 时「带头 / 不带头」两路并发，谁先成功用谁，
+// 结果按 host 缓存，后续请求（分片、后续 m3u8）只发一路。
+
+type HeaderVariant = 'with' | 'without'
+const headerModeCache = new Map<string, { variant: HeaderVariant; at: number }>()
+const HEADER_MODE_TTL = 30 * 60 * 1000 // 30 分钟后重新探测，避免源站策略变更后一直用错
+
+function hostKey(url: string): string {
+  try { return new URL(url).host } catch { return url }
+}
+
+function readHeaderMode(host: string): HeaderVariant | undefined {
+  const hit = headerModeCache.get(host)
+  if (!hit) return undefined
+  if (Date.now() - hit.at > HEADER_MODE_TTL) {
+    headerModeCache.delete(host)
+    return undefined
+  }
+  return hit.variant
+}
+
+/**
+ * 按需探测「带 Origin/Referer」还是「裸请求」能通，返回成功的那个响应。
+ * 未提供 origin/referer 时退化为普通单次请求。
+ */
+async function fetchWithHeaderProbe(
+  targetUrl: string,
+  baseHeaders: Record<string, string>,
+  origin: string,
+  referer: string,
+  dispatcher: any,
+): Promise<Response> {
+  const buildOpts = (variant: HeaderVariant, signal?: AbortSignal) => {
+    const headers = { ...baseHeaders }
+    if (variant === 'with') {
+      if (origin) headers['Origin'] = origin
+      if (referer) headers['Referer'] = referer
+    }
+    const opts: RequestInit & { dispatcher?: any } = { headers, signal }
+    if (dispatcher) opts.dispatcher = dispatcher
+    return opts as RequestInit
+  }
+
+  // 没有防盗链头可省 → 两路完全一样，没必要并发
+  if (!origin && !referer) return fetchWithRetry(targetUrl, buildOpts('with'))
+
+  const host = hostKey(targetUrl)
+  const cached = readHeaderMode(host)
+  if (cached) {
+    try {
+      const res = await fetchWithRetry(targetUrl, buildOpts(cached))
+      if (res.ok) return res
+      // 缓存的方式失效了（源站改策略 / 换了签名）→ 丢弃缓存，下面重新探测
+      void res.body?.cancel().catch(() => {})
+      headerModeCache.delete(host)
+    } catch {
+      headerModeCache.delete(host)
+    }
+  }
+
+  // 两路并发探测
+  const variants: HeaderVariant[] = ['with', 'without']
+  const attempts = variants.map(variant => {
+    const ctrl = new AbortController()
+    return { variant, ctrl, p: fetchWithRetry(targetUrl, buildOpts(variant, ctrl.signal)) }
+  })
+
+  const { variant, res } = await firstSuccess(attempts)
+
+  // 放弃另一路：中止连接 + 取消 body，别占着连接池
+  for (const a of attempts) {
+    if (a.variant === variant) continue
+    try { a.ctrl.abort() } catch {}
+    a.p.then(r => r.body?.cancel().catch(() => {}), () => {})
+  }
+
+  if (res.ok) {
+    headerModeCache.set(host, { variant, at: Date.now() })
+    console.log(`[proxy] header probe: ${host} → ${variant === 'with' ? 'Origin/Referer' : '裸请求'}`)
+  }
+  return res
+}
+
+/** 取第一个 2xx 的结果；全都不是 2xx 就返回第一个拿到的响应；全都抛错就抛最后一个错。 */
+function firstSuccess(
+  attempts: Array<{ variant: HeaderVariant; p: Promise<Response> }>,
+): Promise<{ variant: HeaderVariant; res: Response }> {
+  return new Promise((resolve, reject) => {
+    let left = attempts.length
+    let fallback: { variant: HeaderVariant; res: Response } | null = null
+    let lastErr: any
+    let done = false
+
+    for (const a of attempts) {
+      a.p.then(
+        res => {
+          if (done) return
+          if (res.ok) { done = true; resolve({ variant: a.variant, res }); return }
+          if (!fallback) fallback = { variant: a.variant, res }
+        },
+        err => { lastErr = err },
+      ).finally(() => {
+        if (done || --left > 0) return
+        done = true
+        if (fallback) resolve(fallback)
+        else reject(lastErr ?? new Error('all header variants failed'))
+      })
+    }
+  })
+}
+
 // ── 工具函数 ──────────────────────────────────────────────────
 
 // 带 1 次重试的 fetch：网络错误或 5xx 时重试一次，与前端分片重试形成两层兜底。
@@ -157,6 +270,8 @@ async function fetchWithRetry(url: string, opts: RequestInit, retries = 1): Prom
       return res
     } catch (e) {
       lastErr = e
+      // 被探测逻辑主动中止（另一路已胜出）→ 立刻放弃，别再重试浪费连接
+      if (opts.signal?.aborted) throw e
       if (attempt >= retries) throw e
     }
   }
