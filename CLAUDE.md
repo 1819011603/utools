@@ -55,7 +55,7 @@ server/api/proxy.ts   唯一服务端接口：视频跨域/防盗链代理
 
 ## 视频播放器（重点模块）
 
-`pages/video-player.vue` + 7 个 composable + `server/api/proxy.ts`。核心难点是**跨域、防盗链、慢速源站**。
+`pages/video-player.vue` + 8 个 composable + `server/api/proxy.ts`。核心难点是**跨域、防盗链、慢速源站**。
 
 ### 代理与防盗链
 
@@ -69,10 +69,54 @@ server/api/proxy.ts   唯一服务端接口：视频跨域/防盗链代理
 - Node 上动态加载 undici Agent 放宽 TLS、超时拉到 5 分钟；CF Workers 上降级原生 fetch
 - `fetchWithHeaderProbe` 会并发探测「带头/不带头」哪种能过，结果按 host 缓存 30 分钟
 
-页面侧有三层策略，优先级 **手动 > 站点规则 > 自动阶梯**：
-1. **自动可达性阶梯**（`applyReachabilityStep`）：直连 → 代理·伪装 → 代理·防盗链，失败自动升级重载
-2. **站点规则**（`composables/videoSiteRules.ts`）：按 host 子串或 `/正则/` 匹配，内置 jisuzyv/xhscdn/huyall 三条，用户规则存 localStorage 且优先
+页面侧有三层策略，优先级 **手动 > 站点规则 > 自动探测**：
+
+1. **自动可达性探测**（`composables/useReachabilityProbe.ts`）：起播前用几个小请求把
+   **manifest 轴**和**分片轴**各自的可达性实测出来，再决策。取代了早先「直连→失败重载→代理→失败重载→代理+防盗链」的线性盲试。
+2. **站点规则**（`composables/videoSiteRules.ts`）：按 host 子串或 `/正则/` 匹配，内置 jisuzyv/xhscdn/huyall 三条，用户规则存 localStorage 且优先。
+   注意：规则里只要写了 `useProxy`/`manifestOnly`/`disguiseAsDownloader`/`origin`/`referer` 任一字段就算「接管可达性」，会整站跳过探测——只想调并发就别写这些字段。
 3. **手动**：用户改任一连接设置即置 `manualStrategyOverride`，引擎不再覆盖（改动必须 `loadVideo()` 重载——连接策略只在加载时生效）
+
+### 为什么必须两轴分开
+
+manifest 与分片经常不在同一个 host（实测：manifest 在 `bf.jisuziyuanbf.com:443`、分片在 `p.jisuts.com:999`），
+CORS 头、防盗链、端口、证书都各自独立。三通道（`direct` / `disguise`=代理不发头 / `headers`=代理注入 Origin+Referer）
+× 两轴，靠一条归一化规则收敛成 5 种有效组合：
+
+| 清单 | 分片 | 典型场景 | refs |
+| --- | --- | --- | --- |
+| 直连 | 直连 | 全站 `ACAO: *` 无防盗链 | 全关 |
+| 代理·伪装 | **直连** | 清单无 CORS / mixed content，分片 CDN 开放；或分片端口非标代理打不通 | `disguise=true, manifestOnly=true` |
+| 代理·伪装 | 代理·伪装 | 两边都无 CORS，源站不校验防盗链 | `disguise=true, manifestOnly=false` |
+| 代理·防盗链 | **直连** | 清单要 Referer，分片 CDN 开放 | `origin/referer, manifestOnly=true` |
+| 代理·防盗链 | 代理·防盗链 | 全站防盗链 | `origin/referer, manifestOnly=false` |
+
+归一化规则：**分片要代理 → manifest 必须走同一种代理**（分片 URL 的重写只发生在服务端 `rewriteM3u8`，
+manifest 不过代理就没法把分片指向代理）；**分片可直连 → manifest 取自己最优的那条**，靠 `noseg=1` 保住分片直连。
+故「manifest 直连 + 分片代理」不单独实现（归到全代理，只多一跳 manifest）。
+
+**已知不支持的角落**：manifest 只能直连（服务端到该 host 不通）+ 分片只能代理（浏览器到该 host 不通）。
+两个方向相反的不对称同时出现，`resolveConnConfig` 返回 null → 退回线性阶梯。要支持得再加一个「只代理分片」的 ref，暂不值得。
+
+### 探测的几个关键约束（改之前先看）
+
+- **直连探测绝不能加 `Range` 头**。跨域带自定义头会触发 CORS 预检 OPTIONS，很多 CDN 不处理 → 探测假阴性；
+  而真实分片请求（`useHlsPrefetch` 里的 `fetch`）是不带自定义头的 simple request。探测必须与真实请求**完全同形**：
+  裸 `fetch` + `referrerPolicy: 'no-referrer'`，拿到响应头立刻 `body.cancel()`。
+- **`unknown`（超时）≠ `fail`**。慢 ≠ 不可达，超时判死会把慢源误判成要代理。`skip` = 没探（已有更优通道）。
+- **mixed content 提前短路**：https 页面上的 `http://` 地址直连必被浏览器拦，不发请求直接判 fail。
+- **AES key 折进分片轴**：`noseg=1` 时服务端只重写 `.m3u8`，key 留成直连地址由浏览器直接取，所以 key 跟分片同通道。
+- **探测顺序有讲究**：manifest 先只探直连；代理通道慢得多（绕服务端回源，实测某些源 >10s），
+  只在「直连不通」或「分片得走代理」时才补测。ncat 那个源靠这条从 12s 降到 1.5s。
+- **两级超时**：单通道 8s + 整轮 12s 硬上限（探测阻塞起播，不能让多个超时叠加）。
+- 结果按 host 存进 `video-player-learned-profiles` 的 `reach` 字段，TTL 30 分钟。
+  首访阻塞探测（显示「正在探测连接方式…」），命中缓存则秒起播 + 后台静默复验，结论变了才重载一次
+  （每 host 每会话只复验一次，否则「复验→重载→又命中刚写的缓存→又复验」会白跑）。
+- **双通道自动开的判据**：`分片.直连 === ok && 分片.代理·伪装 === ok && 最终分片通道 === 直连`。
+  分片必须走代理时直连 lane 必 403/CORS，开了等于一半连接白扔。实测生效时预取线程从 6 → 12。
+- 线性阶梯（`applyReachabilityStep`，4 级）只留作「探测拿不到结论」（断网/全超时）的兜底。
+  **每一级都必须把四个 ref 全写一遍**——漏写任何一个都会让上一级的残留值改变本级语义
+  （典型：忘了关 `manifestOnly`，「全程代理」会悄悄变成「分片直连」）。
 
 ### 并发预取与抗卡
 
@@ -117,7 +161,7 @@ server/api/proxy.ts   唯一服务端接口：视频跨域/防盗链代理
 | --- | --- |
 | `video-player-state` | 播放器全量状态（地址/播放列表/进度/音量/倍速/代理设置/HLS 配置/档位覆盖） |
 | `video-player-site-rules` | 用户自定义站点规则 |
-| `video-player-learned-profiles` | 按 host 学到的服务器档位 |
+| `video-player-learned-profiles` | 按 host 学到的服务器档位 + 可达性探测结果（`reach`，TTL 30 分钟） |
 | `video-player-origin-history` / `-referer-history` | Origin/Referer 输入历史（下拉复用） |
 | `json-format-settings` / `json-diff-settings` / `json-extract-settings` / `content-diff-settings` / `timestamp-settings` | 各页设置 |
 | `json-extract-import` | json-format → json-extract 的跨页传值 |
@@ -129,4 +173,7 @@ server/api/proxy.ts   唯一服务端接口：视频跨域/防盗链代理
 - **`@ffmpeg/*` 必须 `optimizeDeps.exclude`**（已在 nuxt.config.ts）
 - **206 Range 响应不可缓存**，见上
 - **改连接策略必须重载视频**，否则 hls.js 还在用上次解析出的分片 URL，看起来「改了没生效」
+- **CF Workers 会静默吞掉非标端口**：`compatibility_date` 必须 ≥ `2024-09-02` 且开 `allow_custom_ports`（见 wrangler.json），
+  否则线上 `fetch('https://host:999/x.ts')` 被降级成 `:443`，`/api/proxy` 拉这类分片必然失败，而本地 Node/undici 一切正常 —— 极难排查。
+  实测 `p.jisuts.com:999` 与 `208.69.102.105:11306` 两个源都属这一类（它们的 `:443` 根本没监听）
 - **`crossorigin="anonymous"`** 只对远程源加，本地 blob 文件要设 `undefined`

@@ -1971,30 +1971,6 @@ const reprobeNow = async () => {
   if (currentConnSignature() !== before) loadVideo()
 }
 
-// __TEMP_VERIFY__ 临时验证钩子（验完删除）
-if (typeof window !== 'undefined' && location.search.includes('__verify=1')) {
-  onMounted(() => {
-    const snap = () => JSON.stringify({
-      strategyLabel: strategyLabel.value,
-      isProbing: isProbing.value,
-      probe: probeResult.value && {
-        manifest: probeResult.value.manifest, segment: probeResult.value.segment,
-        manCh: probeResult.value.manifestChannel, segCh: probeResult.value.segmentChannel,
-        dual: probeResult.value.dualChannel, degraded: probeResult.value.degraded,
-      },
-      refs: { disguise: disguiseAsDownloader.value, origin: requestOrigin.value, manifestOnly: manifestOnly.value, dualChannel: dualChannel.value, useProxy: useProxy.value },
-      dualUnavailable: dualChannelUnavailable.value,
-      isVideoLoaded: isVideoLoaded.value, errorMessage: errorMessage.value,
-      duration: duration.value, currentTime: currentTime.value, isPlaying: isPlaying.value,
-      buffered: bufferedPercent.value, prefetch: prefetchInfo.value,
-      sampleLaneUrls: probeResult.value?.segmentUrl ? getLaneUrlsForVerify(probeResult.value.segmentUrl) : null,
-    }, null, 1)
-    setTimeout(() => { fetch('http://127.0.0.1:8899/result', { method: 'POST', mode: 'no-cors', body: snap() }).catch(() => {}) }, 20000)
-  })
-}
-const getLaneUrlsForVerify = (u: string) =>
-  dualChannel.value && isDirectMode(u) ? [u, getProxyPassthroughUrl(u)] : [getProxyUrl(u)]
-
 // 内置规则（只读展示用）
 const builtinRules = BUILTIN_RULES
 
