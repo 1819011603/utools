@@ -237,14 +237,15 @@ const userRules = ref<ParseRule[]>([])
 const matchedRule = computed(() => {
   const u = inputUrl.value.trim()
   if (!u) return null
-  return matchParseRule(u, userRules.value)
+  return matchParseSite(u, userRules.value)
 })
 
 const currentLine = computed(() => result.value?.lines[result.value.activeLineIndex] ?? null)
 const resolvedEpisodes = computed(() => (currentLine.value?.episodes || []).filter(e => e.videoUrl))
 const resolvedCount = computed(() => resolvedEpisodes.value.length)
 const hasSignedUrl = computed(() =>
-  resolvedEpisodes.value.some(e => /[?&](sign|timestamp|token|auth_key)=/i.test(e.videoUrl || '')),
+  // Expires/Signature 是 S3 风格预签名地址的标志（4kvm 的部分集数走网盘直链就是这种）
+  resolvedEpisodes.value.some(e => /[?&](sign|signature|timestamp|token|auth_key|expires)=/i.test(e.videoUrl || '')),
 )
 
 // 已探明不给直链的线路（本次解析内记忆），置灰避免用户反复去点

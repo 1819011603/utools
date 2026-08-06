@@ -32,7 +32,9 @@ pages/          12 个工具页，一页一工具，逻辑基本自包含
 composables/    跨页复用的处理引擎（视频/PDF/GIF/TIFF/历史）
 components/     FileUpload（拖拽上传，播放器已不用，其余工具页仍在用）、ColorModeButton
 layouts/default.vue   侧边栏导航（新增页面需在此 + pages/index.vue 各登记一次）
-server/api/proxy.ts   唯一服务端接口：视频跨域/防盗链代理
+server/api/proxy.ts   视频跨域/防盗链代理（也给解析链路取站点自己的 js/wasm/接口用）
+server/api/resolve.ts 播放页解析接口，薄壳；站点策略在 server/parsers/ 下
+server/parsers/       每站一个策略，见「视频解析」一节
 ```
 
 新增工具页的落地点有三处，别漏：`pages/新页.vue`、`pages/index.vue` 的 `categories`、`layouts/default.vue` 的 `toolCategories`。
@@ -157,18 +159,42 @@ manifest 不过代理就没法把分片指向代理）；**分片可直连 → m
 
 ## 视频解析（/video-parse）
 
-`pages/video-parse.vue` + `composables/videoParseRules.ts` + `composables/usePowSolver.ts` + `server/api/resolve.ts`。
 把「网站播放页地址」变成「整季选集的真实 m3u8」，再拼成 `urls=a|b|c&index=N` 跳去 `/video-player`。
 
-### 分工
+### 分工（策略模式）
 
-- `videoParseRules.ts` — 规则表，pattern 语义与 `videoSiteRules.ts` 完全一致（`/正则/` 或 host 子串），
-  内置 `ncat` 一条。规则只是四条正则：`sourceRe`（当前集地址）/ `lineRe`（线路标签）/
-  `episodeGroupRe`（选集容器）/ `episodeRe`（组内单集）。加新站 = 加一条规则，不改代码。
-- `server/api/resolve.ts` — 两步式接口。浏览器有 CORS，取第三方页面只能绕服务端。
-- `usePowSolver.ts` — 浏览器侧算反爬的工作量证明。
-- `server/utils/siteFetch.ts` — 抓网页用的 undici dispatcher（放宽 TLS + 支持 `HTTPS_PROXY`）。
-  与 `proxy.ts` 里那份**不是同一个**：那份面向视频流、连接数和超时按分片下载调过，不要合并。
+每个站点 = 一个 `SiteParser`。`server/api/resolve.ts` 只做四件事——**匹配站点 → 抓页 → 过反爬握手 →
+把 HTML 交给策略**，站点差异全部收在 `server/parsers/` 下，接新站不用碰接口层。
+
+```
+server/parsers/
+  types.ts               SiteParser / ParserContext / ChallengeHandler 接口
+  utils.ts               各策略共用：absolutize / decodeEntities / innerTexts / parseTitle / pool …
+  index.ts               注册表 + matchParser（用户规则 > 代码型站点 > 内置规则）
+  htmlRule.ts            数据驱动策略：地址明文在页面里，靠正则抠（覆盖 ncat + 全部用户自定义规则）
+  challenges/cdndefend.ts 反爬握手：认出挑战页 + 抠常量（nonce 交前端算）
+  sites/nbmovie.ts       4kvm，页面里没有地址，要另调签名接口
+composables/
+  videoParseRules.ts     规则表 + 代码型站点登记表 + 前后端共用的数据形状
+  useClientResolve.ts    「取址作业单」的前端执行器注册表，按 kind 分发
+  useWasmUrlSigner.ts    执行器之一：跑站点自带 wasm 签接口地址，再从 JSON 里挑播放地址
+  usePowSolver.ts        浏览器侧算反爬的工作量证明
+  useResolvePlaylist.ts  完整流程（PoW → 分批续拉 / 作业单 → 合并），两个页面共用
+```
+
+**接新站两条路**：
+
+1. 地址明文写在页面里 → 在 `BUILTIN_PARSE_RULES` 加一条规则，**不用写代码**。
+   规则就四条正则：`sourceRe`（当前集地址）/ `lineRe`（线路标签）/ `episodeGroupRe`（选集容器）/
+   `episodeRe`（组内单集），pattern 语义与 `videoSiteRules.ts` 一致（`/正则/` 或 host 子串）。
+2. 要另调接口 / 要签名 / 要解密 → 在 `server/parsers/sites/` 加一个 `.ts` 导出 `SiteParser`，
+   在 `server/parsers/index.ts` 的 `CODED_PARSERS` 注册，**并在 `videoParseRules.ts` 的
+   `CODED_PARSE_SITES` 登记 pattern**——前端 `matchParseSite()` 要靠它判断「这个地址支持不支持」，
+   而前端不能 import `server/` 下的代码，漏登记的表现是「能解析但输入框上不显示规则徽标」。
+
+`server/utils/siteFetch.ts` — 抓网页用的 undici dispatcher（放宽 TLS + 支持 `HTTPS_PROXY`）。
+与 `proxy.ts` 里那份**不是同一个**：那份面向视频流、连接数和超时按分片下载调过，不要合并
+（两份都支持 `HTTPS_PROXY`，本地开发才不会「解析页出得来、取址全 502」）。
 
 ### 为什么 PoW 放前端算
 
@@ -198,6 +224,47 @@ ncat 系挂了 cdndefend：首访返回 **HTTP 850** + 挑战页，要求暴力�
   把可达性探测整个关掉。gsuus 系正是靠「manifest 先只探直连」从 12s 降到 1.5s 的
 - **线路上的集数徽标不等于实际能解析的集数**：徽标是站点自报的 `source-item-num`，
   真实集数以解析出的 `episode-item` 锚点数为准（同一部片子各线路可能不同，实测 40 / 53 / 73 都有）
+
+### 取址作业单（服务端做不完、必须由浏览器收尾的那类站点）
+
+有些站点页面里根本没有播放地址，服务端只能给一张**作业单**（`ParseResult.clientTask`），
+由浏览器补齐每集的 `videoUrl`。`useResolvePlaylist` 见到 `clientTask` 就走 `useClientResolve`
+按 `kind` 分发，走完直接返回，**不走分批**。执行器目前只有 `wasm-url-signer` 一种。
+
+为什么这一步非得放浏览器（三条各自独立成立的理由）：
+
+1. **CF Workers 禁止运行时实例化非打包的 wasm**，服务端跑不了；而 wasm 文件名带内容 hash
+   （站点一更新就变），也没法预先打进产物里
+2. **签名带时间戳，有效期很短**，服务端攒一批再用必然过期，只能现签现用
+3. 顺带绕开「单请求 50 subrequest」硬顶：浏览器逐发打 `/api/proxy`，每发都是独立 Worker 调用，
+   所以 185 集也不用像 `htmlRule` 那样分批
+
+`WasmSignerTask` 是**纯声明**，不含站点专有逻辑：模块地址 / 函数名 / 每集实参 / 时间戳 meta 的 id /
+怎么从接口 JSON 里挑地址（`JsonUrlPick`：`listPath`+`urlKey`+`skipFlags`+`rankKey`）全由服务端下发。
+接一个同类站点只写服务端那半边，前端一行不用改。
+
+**我们只加载并调用站点公开导出的函数，不复刻它的算法**——所以站点换签名方案时前端不用动，
+只要页面上还能读到模块地址就继续能用。
+
+### 4kvm（nbmovie）实测结论
+
+- **只有一条线路**，站点自报的线路名是内部标识（`alists`），没展示价值 → 单线路时显示「默认线路」
+- 页面结构：`<a href="/play/xxx" @click.prevent="handleEpisodeClick($el.getAttribute('href'), 'dataid', 线路, 集号)">`，
+  真实地址要拿 `dataid` 调 `/video/play?p=&v=&q=&s=&t=&k=`，整串 query 由
+  `<link id="wasm-cfg">` 指向的 wasm 的 `build_play_url(dataid, slug, quality, userlink)` 生成
+- **`k`（令牌）来自页面里的 `userlink:'…'`，匿名访问也有**，不需要登录、不需要 cookie。
+  少了它接口回 401「请提供访问令牌」，签名过期也是 401（两种 401 的文案不同，排查时看 body）
+- **wasm 会读 `<meta id="nb-plt">` 的 content 当时间戳**（站点原页面由内联脚本写 `Date.now()`）。
+  我们的页面得自己补一个，且**每次签名前都要刷新**——整批共用一个旧时间戳会让后面几集签出过期地址
+- 胶水 js 走 blob 再 `import`（而不是直接 import 代理地址）：动态 import 按响应 MIME 校验，
+  代理回来的 content-type 不一定过得来；wasm 同理传 **ArrayBuffer** 而不是 URL，避开
+  `instantiateStreaming` 的 `application/wasm` 校验
+- **别用剥标签的办法从选集锚点里取集名**：开标签的 `x-effect` 属性里有 `=>`，`<[^>]*>` 会在属性中间断开，
+  把剩下的属性当正文吐出来（踩过）。取锚点里最后一个 `<span>` 的文本才对（`innerTexts`）
+- 档位表里 4K 那条 `locked: true` 且 `url` 是 `"1"` 这种占位值 → 必须按 `locked` + 协议头两道筛
+- **同一部片子里各集的地址不一定同源**：实测大部分是 `oss.douyinbit.com` 的 m3u8，
+  最新一集却是天翼云盘的**预签名 mp4**（带 `Expires`/`Signature`）。所以「带时效签名」的提示
+  要连 `expires`/`signature` 一起判，不能只看 `sign`/`timestamp`
 
 ### 刷新链接（就地重新解析）
 

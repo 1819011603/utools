@@ -73,6 +73,16 @@ export async function resolvePlaylist(opts: ResolveOptions): Promise<ResolveOutc
   const episodes = first.lines[first.activeLineIndex]?.episodes ?? []
   const total = episodes.length
 
+  // 有些站点页面里根本没有地址，服务端只能给一张「作业单」，最后一步要浏览器来做
+  // （见 useClientResolve）。这类站点服务端一次就拿全了整季，不走下面的分批。
+  if (first.clientTask) {
+    await runClientResolve(first.clientTask, episodes, {
+      onStage,
+      onProgress: (done, n) => onStage?.(`正在解析选集 ${done}/${n}…`),
+    })
+    return { result: first, cookie }
+  }
+
   // 首批只覆盖前若干集，长剧继续按 offset 把后面的批次拉完
   let next = first
   for (let round = 0; round < MAX_BATCHES && next.remaining > 0; round++) {

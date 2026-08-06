@@ -13,24 +13,14 @@ import { hostOf } from './videoSiteRules'
 /** 反爬类型。none = 直接能取到页面；cdndefend = 需要先过 SHA1 工作量证明。 */
 export type ChallengeKind = 'none' | 'cdndefend'
 
-/**
- * 取地址的方式。
- *   html    —— 地址明文写在页面里，靠下面几条正则抠出来（默认）
- *   nbmovie —— 页面里没有地址：每集要另调站点接口，接口 URL 由站点自带的 wasm 现签，
- *              签名带时间戳会过期，且 CF Workers 不允许运行时编译 wasm，
- *              所以签名与取址整段挪到浏览器做，见 useNbmovieSigner.ts
- */
-export type ResolverKind = 'html' | 'nbmovie'
-
 export interface ParseRule {
   id: string
   name: string
   pattern: string
   challenge?: ChallengeKind
-  resolver?: ResolverKind
 
-  /** 提取当前集播放地址，取第 1 个捕获组。resolver='html' 时必填 */
-  sourceRe?: string
+  /** 提取当前集播放地址，取第 1 个捕获组 */
+  sourceRe: string
 
   /**
    * 线路标签。捕获组约定：
@@ -53,7 +43,9 @@ export interface ParseRule {
   referer?: string
 }
 
-// 内置规则表——按需扩展：复制一条改 pattern 与几个正则即可
+// 内置规则表——地址明文写在页面里、能用正则描述的站点都加在这，复制一条改 pattern 与几个正则即可。
+// 需要写代码才能解析的站点（接口另取、签名、加密…）不进这张表，
+// 去 server/parsers/sites/ 加一个 .ts 并在 server/parsers/index.ts 注册。
 export const BUILTIN_PARSE_RULES: ParseRule[] = [
   {
     id: 'ncat',
@@ -69,14 +61,27 @@ export const BUILTIN_PARSE_RULES: ParseRule[] = [
     episodeGroupRe: '<div class="episode-list"[^>]*>([\\s\\S]*?)</div>',
     episodeRe: '<a[^>]*href="([^"]+)"[^>]*class="[^"]*episode-item[^"]*"[^>]*>\\s*<span>([^<]*)</span>',
   },
+]
+
+/**
+ * 代码型站点的登记表：这些站点用正则描述不了（要另调接口、要签名、要解密…），
+ * 实现各自独立在 `server/parsers/sites/<id>.ts`，在 `server/parsers/index.ts` 注册。
+ *
+ * pattern 放在这里而不是各自的 .ts 里，是因为前端也要用它判断「这个地址支持不支持」——
+ * 前端不能 import server/ 下的代码，两边各写一份必然漂移。
+ */
+export interface CodedParseSite {
+  id: string
+  name: string
+  pattern: string
+}
+
+export const CODED_PARSE_SITES: CodedParseSite[] = [
   {
     id: 'nbmovie',
     name: '4k影视 (4kvm)',
-    // 同样会换域名后缀，用正则兜住
+    // 站点会换域名后缀，用正则兜住
     pattern: '/4kvm\\d*\\.(org|com|net|cc|top)/',
-    // 页面只给「集 → dataid」的映射，真实地址要拿 dataid 去调 /video/play，
-    // 该接口的整个 query（含签名 s 与时间戳 t）由站点自带 wasm 生成，抠不出正则
-    resolver: 'nbmovie',
   },
 ]
 
@@ -125,6 +130,19 @@ export function matchParseRule(url: string, userRules: ParseRule[] = []): ParseR
   return null
 }
 
+/**
+ * 界面用：这个地址能不能解析、命中的是谁。
+ * 优先级与服务端 matchParser 保持一致：用户规则 > 代码型站点 > 内置规则。
+ */
+export function matchParseSite(url: string, userRules: ParseRule[] = []): { id: string; name: string } | null {
+  const host = hostOf(url)
+  if (!host) return null
+  for (const s of [...userRules, ...CODED_PARSE_SITES, ...BUILTIN_PARSE_RULES]) {
+    if (patternMatches(s.pattern, host, url)) return { id: s.id, name: s.name }
+  }
+  return null
+}
+
 // ── 服务端也要用这张表，但 Nitro 里没有 localStorage ──
 // 所以解析接口只吃内置表 + 前端随请求带上来的规则（前端负责读 localStorage）。
 export function findRuleById(id: string): ParseRule | null {
@@ -139,6 +157,55 @@ export interface ParsedEpisode {
   videoUrl?: string      // 解析出的 m3u8/mp4；解析失败时为空
   error?: string
 }
+
+// ── 「取址作业单」：服务端做不了、必须由浏览器完成的那部分 ──
+//
+// 出现这种分工有两类原因，都不是某个站点独有的：
+//   · 算法只以 wasm 形式存在。CF Workers 禁止运行时实例化非打包的 wasm，服务端跑不了；
+//     文件名还带内容 hash（站点一更新就变），也没法预先打进产物。
+//   · 结果带时效签名，攒一批再用会过期，只能现算现用。
+// 另外走浏览器逐发打 /api/proxy，每发都是独立 Worker 调用，
+// 天然绕开「单请求 50 subrequest」的硬顶，长剧不必分批。
+
+/** 从接口返回的 JSON 里挑出可播地址的规则（纯声明，接新站不用写代码） */
+export interface JsonUrlPick {
+  /** 候选数组的路径，点分，如 'data.quality_urls'；留空表示根就是数组 */
+  listPath?: string
+  /** 地址字段名 */
+  urlKey: string
+  /** 这些字段为真的候选直接跳过（会员锁定、下架等） */
+  skipFlags?: string[]
+  /** 按该字段降序取最大（通常是码率/清晰度） */
+  rankKey?: string
+  /** 失败时取错误文案的路径，点分 */
+  messagePath?: string
+}
+
+/**
+ * 用站点自带的 wasm 现签接口地址，再从接口 JSON 里取真实播放地址。
+ * 我们只加载并调用站点公开的导出函数，不复刻其算法——
+ * 站点换签名方案时前端不用动，只要页面上还能读到模块地址就继续能用。
+ */
+export interface WasmSignerTask {
+  kind: 'wasm-url-signer'
+  /** wasm-bindgen 胶水 js 的绝对地址（带内容 hash，会变，所以每次从页面现读） */
+  moduleUrl: string
+  /** .wasm 本体的绝对地址 */
+  wasmUrl: string
+  /** 胶水模块里导出的签名函数名 */
+  fn: string
+  /** 签名函数返回相对地址时的基准（站点根） */
+  base: string
+  /** 每集一组实参，与 lines[activeLineIndex].episodes 下标严格一一对应 */
+  argsList: string[][]
+  /** wasm 要读页面上某个 <meta id=…> 的 content 当时间戳时，填它的 id */
+  timestampMetaId?: string
+  /** 接口 JSON → 播放地址 */
+  pick: JsonUrlPick
+}
+
+/** 目前只有一种；新增执行器时在这里并上，前端 useClientResolve 按 kind 分发 */
+export type ClientResolveTask = WasmSignerTask
 
 export interface ParsedLine {
   name: string           // 「GS线路」
@@ -162,6 +229,8 @@ export interface ParseResult {
   remaining: number
   lineUnsupported?: boolean  // 该线路页面不给直链（src 渲染成空串），整条线路都取不到
   referer?: string
+  /** 有它就表示 episodes 里全都没有 videoUrl，要前端拿这张作业单去补 */
+  clientTask?: ClientResolveTask
 }
 
 /** 需要前端算工作量证明时的应答 */

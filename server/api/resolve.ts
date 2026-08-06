@@ -4,34 +4,28 @@
  * 用途：把「网站播放页地址」变成「真实视频地址 + 整季选集表」，直接喂给 /video-player。
  *       浏览器受 CORS 限制取不到第三方页面，必须绕服务端。
  *
+ * 本文件只做四件事：匹配站点策略 → 抓页 → 过反爬握手 → 把 HTML 交给策略。
+ * 站点之间的差异全部收在 server/parsers/ 下，接新站不用改这里。
+ *
  * 两步式（step 参数）：
  *   step=challenge  取页；若站点有反爬挑战则返回 { needPow, c, n1, target } 让**前端**去算
- *   step=extract    带前端算出的 cookie 重取，解析出线路 × 选集，并并发解析选中线路的每一集
- *
- * 为什么 PoW 不在服务端算：
- *   cdndefend 的挑战是「暴力找 nonce 使 SHA1 命中 2 个特定字节」，期望 6.5 万次哈希、
- *   实测 ~250ms CPU。CF Workers 免费版每请求只有 10ms CPU，服务端硬算必然超限。
- *   挑战本身不依赖 DOM/浏览器指纹，纯 SHA1，所以放前端算完全等价。
+ *   step=extract    带前端算出的 cookie 重取，再走策略解析
+ * 为什么挑战不在服务端算：见 server/parsers/challenges/cdndefend.ts
  *
  * 实现约束（同 proxy.ts）：不静态 import 任何 node:*，只用 Web API。
  */
-import { BUILTIN_PARSE_RULES } from '../../composables/videoParseRules'
-import type { ParseRule, ParsedEpisode, ParsedLine, ParseResult } from '../../composables/videoParseRules'
+import type { ParseRule, ParseResult, PowChallenge } from '../../composables/videoParseRules'
+import { matchParser } from '../parsers'
+import type { FetchedPage } from '../parsers/types'
+import { hostOf } from '../parsers/utils'
 import { getSiteDispatcher } from '../utils/siteFetch'
 
 // 与 proxy.ts:63 保持一致：源站普遍按 UA 做粗筛
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
 
-// 单次请求最多解析多少集。CF 免费版单请求 50 subrequest 硬顶，留出主页面那一发和余量，取 40。
-// 超出的不丢弃也不截断：用 offset 分批，前端拿到 remaining>0 就继续拉下一批，
-// 每批各自是一次独立请求，各自的 subrequest 预算互不叠加，所以多少集都能解析完。
-const MAX_EPISODES = 40
-// 解析各集的并发。太高会被源站限流，也更容易撞 CF 的并发子请求限制。
-const EPISODE_CONCURRENCY = 4
-
 // ── 挑战 cookie 缓存（按 host）──
 // 实测同一站点不同影片页拿到的挑战常量完全相同，且数分钟内稳定，
-// 所以一次 PoW 可全站复用。TTL 与 proxy.ts 的 headerModeCache 对齐（30 分钟）。
+// 所以一次工作量证明可全站复用。TTL 与 proxy.ts 的 headerModeCache 对齐（30 分钟）。
 const cookieCache = new Map<string, { cookie: string; at: number }>()
 const COOKIE_TTL = 30 * 60 * 1000
 
@@ -45,26 +39,7 @@ function readCookie(host: string): string | undefined {
   return hit.cookie
 }
 
-function hostOf(url: string): string {
-  try { return new URL(url).host } catch { return '' }
-}
-
-function matchRule(url: string, extra: ParseRule[]): ParseRule | null {
-  const host = hostOf(url)
-  if (!host) return null
-  for (const rule of [...extra, ...BUILTIN_PARSE_RULES]) {
-    const p = rule.pattern
-    if (!p) continue
-    if (p.length > 2 && p.startsWith('/') && p.endsWith('/')) {
-      try { if (new RegExp(p.slice(1, -1), 'i').test(url)) return rule } catch {}
-    } else if (host.includes(p)) {
-      return rule
-    }
-  }
-  return null
-}
-
-async function fetchPage(url: string, cookie?: string): Promise<{ status: number; body: string }> {
+async function fetchPage(url: string, cookie?: string): Promise<FetchedPage> {
   const headers: Record<string, string> = {
     'User-Agent': UA,
     Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -89,100 +64,7 @@ async function fetchPage(url: string, cookie?: string): Promise<{ status: number
   }
 }
 
-/** 挑战页判据用 body 内容而非状态码——站点改状态码时不会整个失效 */
-function isChallenge(body: string): boolean {
-  return body.includes('cdndefend_js_cookie')
-}
-
-/**
- * 从挑战页里抠出常量。
- * 页面 JS 被混淆过，但挑战常量始终是其中唯一的 40 位大写十六进制串（SHA1 长度）。
- * n1（校验字节偏移）由常量首字符决定，目标字节 0xB0 0x0B 是反混淆后固定写死的。
- */
-function parseChallenge(body: string): { c: string; n1: number } | null {
-  const m = body.match(/['"]([0-9A-F]{40})['"]/)
-  if (!m) return null
-  const c = m[1]
-  const n1 = Number.parseInt(c[0], 16)
-  if (!Number.isFinite(n1)) return null
-  return { c, n1 }
-}
-
-function absolutize(href: string, base: string): string {
-  try { return new URL(href, base).href } catch { return href }
-}
-
-function decodeEntities(s: string): string {
-  return s
-    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
-    .trim()
-}
-
-/** 解析线路 × 选集表。该站把所有线路的选集都渲染在同一页，故只需一次请求。 */
-function parseLines(html: string, rule: ParseRule, pageUrl: string): { lines: ParsedLine[]; activeIndex: number } {
-  if (!rule.lineRe || !rule.episodeGroupRe || !rule.episodeRe) return { lines: [], activeIndex: -1 }
-
-  const lineMatches = [...html.matchAll(new RegExp(rule.lineRe, 'gi'))]
-  const groupMatches = [...html.matchAll(new RegExp(rule.episodeGroupRe, 'gi'))]
-
-  const lines: ParsedLine[] = []
-  let activeIndex = -1
-
-  // 线路标签与选集容器按出现顺序一一对应（三个不同页面实测恒等：16/16、18/18、17/17）。
-  // 数量不等说明页面改版了，此时宁可只输出能对上的前 N 组，也不要错位。
-  const n = Math.min(lineMatches.length, groupMatches.length)
-  for (let i = 0; i < n; i++) {
-    const lm = lineMatches[i]
-    const active = /active/i.test(lm[1] ?? '')
-    if (active) activeIndex = i
-
-    const inner = groupMatches[i][1] ?? ''
-    const episodes: ParsedEpisode[] = [...inner.matchAll(new RegExp(rule.episodeRe, 'gi'))].map(em => ({
-      // 电影页这里是「TC高清」这类版本标签而非「第N集」，不要假设是数字
-      title: decodeEntities(em[2] ?? ''),
-      pageUrl: absolutize(decodeEntities(em[1] ?? ''), pageUrl),
-    }))
-
-    lines.push({
-      name: decodeEntities(lm[2] ?? `线路${i + 1}`),
-      sublabel: decodeEntities(lm[3] ?? '') || undefined,
-      active,
-      episodes,
-    })
-  }
-
-  return { lines, activeIndex }
-}
-
-function parseSource(html: string, rule: ParseRule): string | undefined {
-  const m = html.match(new RegExp(rule.sourceRe, 'i'))
-  return m?.[1]
-}
-
-function parseTitle(html: string): string | undefined {
-  const m = html.match(/<title>([^<]*)<\/title>/i)
-  if (!m) return undefined
-  // 站点标题形如「斯特林角-网飞猫」，去掉站名后缀
-  return decodeEntities(m[1]).replace(/[-|_–]\s*[^-|_–]{1,12}$/, '').trim() || undefined
-}
-
-/** 固定并发的任务池（不引第三方依赖） */
-async function pool<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
-  const out = new Array<R>(items.length)
-  let cursor = 0
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (true) {
-      const i = cursor++
-      if (i >= items.length) return
-      out[i] = await fn(items[i], i)
-    }
-  })
-  await Promise.all(workers)
-  return out
-}
-
-export default defineEventHandler(async (event): Promise<ParseResult | { needPow: true; kind: string; c: string; n1: number; target: [number, number] }> => {
+export default defineEventHandler(async (event): Promise<ParseResult | PowChallenge> => {
   const query = getQuery(event)
   const pageUrl = (query.url as string)?.trim()
   const step = (query.step as string) || 'challenge'
@@ -198,27 +80,28 @@ export default defineEventHandler(async (event): Promise<ParseResult | { needPow
     try { extraRules = JSON.parse(query.rules as string) } catch {}
   }
 
-  const rule = matchRule(pageUrl, extraRules)
-  if (!rule) throw createError({ statusCode: 400, statusMessage: '没有匹配的解析规则：' + hostOf(pageUrl) })
+  const parser = matchParser(pageUrl, extraRules)
+  if (!parser) throw createError({ statusCode: 400, statusMessage: '没有匹配的解析规则：' + hostOf(pageUrl) })
 
   const host = hostOf(pageUrl)
+  const challenge = parser.challenge
   // step=extract 时用前端算出的 cookie；否则尝试缓存
-  const cookieFromClient = (query.cookie as string)?.trim()
-  let cookie = cookieFromClient ? `cdndefend_js_cookie=${cookieFromClient}` : readCookie(host)
+  const tokenFromClient = (query.cookie as string)?.trim()
+  let cookie = tokenFromClient && challenge ? challenge.toCookie(tokenFromClient) : readCookie(host)
 
   let page = await fetchPage(pageUrl, cookie)
 
-  if (isChallenge(page.body)) {
+  if (challenge?.detect(page.body)) {
     // 缓存的 cookie 过期了 → 清掉，避免下次继续用错的
-    if (!cookieFromClient && cookie) {
+    if (!tokenFromClient && cookie) {
       cookieCache.delete(host)
       cookie = undefined
       page = await fetchPage(pageUrl)
     }
   }
 
-  if (isChallenge(page.body)) {
-    const ch = parseChallenge(page.body)
+  if (challenge?.detect(page.body)) {
+    const ch = challenge.build(page.body)
     // 抠不出常量说明站点换了反爬方案：明确报错，不要静默拿挑战页去跑正则（那只会得到空结果）
     if (!ch) throw createError({ statusCode: 502, statusMessage: '站点反爬已变更：挑战常量提取失败' })
     if (step === 'extract') {
@@ -226,7 +109,7 @@ export default defineEventHandler(async (event): Promise<ParseResult | { needPow
       throw createError({ statusCode: 409, statusMessage: '校验未通过，请重试解析' })
     }
     setResponseHeader(event, 'Cache-Control', 'no-store')
-    return { needPow: true, kind: rule.challenge ?? 'cdndefend', c: ch.c, n1: ch.n1, target: [0xb0, 0x0b] }
+    return { needPow: true, kind: challenge.kind, ...ch }
   }
 
   if (page.status !== 200) {
@@ -234,88 +117,20 @@ export default defineEventHandler(async (event): Promise<ParseResult | { needPow
   }
 
   // 走到这说明页面拿到了：把 cookie 记下来给后续请求复用（实测全站通用）
-  if (cookieFromClient) cookieCache.set(host, { cookie: `cdndefend_js_cookie=${cookieFromClient}`, at: Date.now() })
-
-  const html = page.body
-  const { lines, activeIndex } = parseLines(html, rule, pageUrl)
-  const currentVideoUrl = parseSource(html, rule)
-
-  if (!currentVideoUrl && !lines.length) {
-    throw createError({ statusCode: 502, statusMessage: '页面结构不匹配，规则需要更新' })
+  if (tokenFromClient && challenge) {
+    cookieCache.set(host, { cookie: challenge.toCookie(tokenFromClient), at: Date.now() })
   }
 
-  // 要解析哪条线路：显式指定 > 页面标记的 active > 第一条
-  const targetIndex = Number.isFinite(lineParam as number) && (lineParam as number) >= 0 && (lineParam as number) < lines.length
-    ? (lineParam as number)
-    : (activeIndex >= 0 ? activeIndex : 0)
-
-  const target = lines[targetIndex]
   const offsetParam = query.offset !== undefined ? Number.parseInt(query.offset as string, 10) : 0
-  const offset = Number.isFinite(offsetParam) && offsetParam > 0 ? offsetParam : 0
-  let batchTo = offset
-  let remaining = 0
-  let lineUnsupported = false
-
-  if (target?.episodes.length) {
-    const cookieForEpisodes = cookie ?? readCookie(host)
-
-    const resolveOne = async (ep: ParsedEpisode) => {
-      // 传入的那一集已经解析过了，不重复请求
-      if (ep.pageUrl === pageUrl && currentVideoUrl) {
-        ep.videoUrl = currentVideoUrl
-        return
-      }
-      try {
-        const sub = await fetchPage(ep.pageUrl, cookieForEpisodes)
-        if (isChallenge(sub.body)) { ep.error = '需要重新校验'; return }
-        const src = parseSource(sub.body, rule)
-        if (src) ep.videoUrl = src
-        else ep.error = '该线路未给出直链'
-      } catch (e) {
-        // 单集失败不影响整体：标记后继续
-        ep.error = (e as Error).message || '请求失败'
-      }
-    }
-
-    const todo = target.episodes.slice(offset, offset + MAX_EPISODES)
-    batchTo = offset + todo.length
-    remaining = target.episodes.length - batchTo
-    if (remaining > 0) {
-      console.log(`[resolve] ${host} 线路「${target.name}」共 ${target.episodes.length} 集，本批 ${offset}~${batchTo}，还剩 ${remaining} 集`)
-    }
-
-    // 有些线路（如「4K」）的页面把 playSource.src 渲染成空串，地址由前端运行时另取，
-    // 服务端拿不到。这类线路整条都取不到，先探第一集，不行就立刻收工——
-    // 否则要白白等完剩下几十集的请求才知道结果是空的。
-    // 只在第一批探：后续批次已经知道这条线路是好的，不必再多花一个来回。
-    if (offset === 0 && todo.length) {
-      await resolveOne(todo[0])
-      if (!todo[0].videoUrl) {
-        lineUnsupported = true
-        remaining = 0   // 整条线路都取不到，别让前端再去拉后续批次
-        for (let i = 1; i < todo.length; i++) todo[i].error = '该线路未给出直链'
-        console.log(`[resolve] ${host} 线路「${target.name}」不提供直链，跳过其余 ${target.episodes.length - 1} 集`)
-      } else {
-        await pool(todo.slice(1), EPISODE_CONCURRENCY, resolveOne)
-      }
-    } else {
-      await pool(todo, EPISODE_CONCURRENCY, resolveOne)
-    }
-  }
+  const result = await parser.parse({
+    pageUrl,
+    host,
+    line: lineParam,
+    offset: Number.isFinite(offsetParam) && offsetParam > 0 ? offsetParam : 0,
+    cookie: cookie ?? readCookie(host),
+    fetchPage,
+  }, page.body)
 
   setResponseHeader(event, 'Cache-Control', 'no-store')
-  return {
-    ruleId: rule.id,
-    ruleName: rule.name,
-    title: parseTitle(html),
-    pageUrl,
-    currentVideoUrl,
-    lines,
-    activeLineIndex: targetIndex,
-    batchFrom: offset,
-    batchTo,
-    remaining,
-    lineUnsupported: lineUnsupported || undefined,
-    referer: rule.referer,
-  }
+  return result
 })

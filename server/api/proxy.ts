@@ -31,16 +31,26 @@ async function getNodeDispatcher(): Promise<any> {
   try {
     const spec = 'undici'
     const undici = await import(/* @vite-ignore */ spec)
-    if (undici?.Agent) {
-      _dispatcher = new undici.Agent({
-        connect: { rejectUnauthorized: false, timeout: 15000 },
-        // 与客户端「单分片 5 分钟」上限一致：慢源大分片别在服务端被 30s 提前掐断。
-        // headersTimeout=首字节等待；bodyTimeout=body 分块间的空闲上限（都设 5 分钟）。
-        bodyTimeout: 300000,
-        headersTimeout: 300000,
-        connections: 64,             // 每 origin 最大连接数（默认 10，太低会让 hls.js + 预取互相堵）
-        pipelining: 1,
-      })
+    const opts = {
+      connect: { rejectUnauthorized: false, timeout: 15000 },
+      // 与客户端「单分片 5 分钟」上限一致：慢源大分片别在服务端被 30s 提前掐断。
+      // headersTimeout=首字节等待；bodyTimeout=body 分块间的空闲上限（都设 5 分钟）。
+      bodyTimeout: 300000,
+      headersTimeout: 300000,
+      connections: 64,             // 每 origin 最大连接数（默认 10，太低会让 hls.js + 预取互相堵）
+      pipelining: 1,
+    }
+    // 本地开发时目标站点常被 DNS 污染或需要代理才能访问（同 siteFetch.ts 的理由）。
+    // 视频解析会经本接口去取站点自己的 js/wasm 和取址接口，这条链路也得能走代理，
+    // 否则「解析页能出选集、取址却全 502」。CF Pages 上没有这些变量，出口直连。
+    // @ts-ignore CF Workers 上没有 process
+    const env = globalThis.process?.env ?? {}
+    const proxyUri = env.HTTPS_PROXY || env.https_proxy || env.HTTP_PROXY || env.http_proxy || env.ALL_PROXY || env.all_proxy
+    if (proxyUri && undici?.ProxyAgent) {
+      _dispatcher = new undici.ProxyAgent({ uri: proxyUri, ...opts })
+      console.log('[proxy] 走代理转发：' + proxyUri)
+    } else if (undici?.Agent) {
+      _dispatcher = new undici.Agent(opts)
     }
   } catch {
     // 加载失败就降级为原生 fetch
