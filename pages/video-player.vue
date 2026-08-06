@@ -977,8 +977,42 @@ let Hls: typeof HlsType | null = null
 // 直接读 route.query.url 只能拿到 sign 之前的部分。所以这里从原始 search 串手工解析：
 // 凡「不是本页已知参数」的片段，一律原样回写进最近的那个视频地址。
 const PAGE_QUERY_KEYS = new Set([
-  'url', 'urls', 'index', 'origin', 'referer', 'proxy', 'noref', 'manifestOnly',
+  'url', 'urls', 'index', 'origin', 'referer', 'proxy', 'noref', 'manifestOnly', 'handoff',
 ])
+
+// ── 长播放列表交接槽 ───────────────────────────────────────────
+// 几十集的列表拼进 query 会顶爆地址栏（部分浏览器 2000 字符上界，硬刷新还要过 CF 的请求头上限），
+// 所以改走 localStorage 交接：调用方（如 /video-parse）写这个槽 + 跳 ?handoff=1，本页读出来。
+// 槽由本页持有，任何页面都能当生产者。带时间戳，过期的不用——避免半个月前的残留列表被翻出来。
+const HANDOFF_KEY = 'video-player-handoff'
+const HANDOFF_TTL = 24 * 60 * 60 * 1000
+
+interface HandoffPayload {
+  urls: string[]
+  index?: number
+  at: number
+}
+
+const readHandoff = (): HandoffPayload | null => {
+  try {
+    const raw = localStorage.getItem(HANDOFF_KEY)
+    if (!raw) return null
+    const p = JSON.parse(raw) as HandoffPayload
+    if (!Array.isArray(p?.urls) || !p.urls.length) return null
+    if (!p.at || Date.now() - p.at > HANDOFF_TTL) return null
+    return p
+  } catch {
+    return null
+  }
+}
+
+const writeHandoff = (urls: string[], index: number) => {
+  try {
+    localStorage.setItem(HANDOFF_KEY, JSON.stringify({ urls, index, at: Date.now() } as HandoffPayload))
+  } catch (e) {
+    console.error('写入播放列表交接槽失败:', e)
+  }
+}
 
 interface QueryVideoParams {
   urls: string[]
@@ -1036,6 +1070,16 @@ const parseQueryVideoParams = (): QueryVideoParams => {
       case 'proxy': result.proxy = isTrue(val); break
       case 'noref': result.noref = isTrue(val); break
       case 'manifestOnly': result.manifestOnly = isTrue(val); break
+      case 'handoff': {
+        // 列表放在 localStorage 交接槽里，query 里只留个标记
+        if (!isTrue(val)) break
+        const p = readHandoff()
+        if (!p) break
+        p.urls.forEach(u => result.urls.push(u))
+        // ?index= 若显式给了以它为准，所以只在没给时才用槽里的
+        if (result.index === undefined && Number.isFinite(p.index)) result.index = p.index
+        break
+      }
     }
   }
   return result
@@ -1596,10 +1640,13 @@ const syncUrlToQuery = () => {
   }
 
   let search = parts.length ? '?' + parts.join('&') : ''
-  // 长播放列表会把地址栏顶爆（部分浏览器 2000 字符上界）→ 退化成只带当前这一集
+  // 长播放列表会把地址栏顶爆（部分浏览器 2000 字符上界）→ 转存交接槽，query 里只留标记。
+  // 早先这里是退化成只带当前一集，代价是刷新后整个列表就没了（query 优先级高于 savedState）；
+  // 走交接槽则刷新也能把几十集完整读回来。
   if (search.length > 2000 && shareable) {
-    const cur = urls[Math.min(Math.max(currentIndex.value, 0), urls.length - 1)]
-    search = '?url=' + encodeURIComponent(cur)
+    const idx = Math.min(Math.max(currentIndex.value, 0), urls.length - 1)
+    writeHandoff(urls, idx)
+    search = '?handoff=1'
   }
 
   if (window.location.search === search) return

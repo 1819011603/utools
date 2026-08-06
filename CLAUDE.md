@@ -47,6 +47,7 @@ server/api/proxy.ts   唯一服务端接口：视频跨域/防盗链代理
 | `video-to-gif.vue` | `/video-to-gif` | 视频抽帧 → gif.js 编码，可选抖动算法/调色板（quantize）/帧率/裁剪 |
 | `audio-convert.vue` | `/audio-convert` | WebAudio 解码 + OfflineAudioContext 重采样，采样率/位深可调 |
 | `video-player.vue` | `/video-player` | M3U8/MP4 播放器，见下节（本项目最复杂的一页，105K） |
+| `video-parse.vue` | `/video-parse` | 粘贴视频站播放页地址 → 解析整季选集的真实 m3u8 → 一键送进播放器，见下节 |
 | `json-format.vue` | `/json-format` | 格式化 + 语法高亮 + 树形视图 + 智能解析（从任意文本里捞 JSON、递归去转义最多 3 层）+ 路径删除/撤销 |
 | `json-diff.vue` | `/json-diff` | 两份 JSON 差异对比，可指定字段做数组匹配键，差异分组排序可配 |
 | `json-extract.vue` | `/json-extract` | JQ 风格路径提取，输出每行一个 / JSON 数组 / 逗号分隔，可排序去重 |
@@ -153,6 +154,61 @@ manifest 不过代理就没法把分片指向代理）；**分片可直连 → m
 - 多个地址用 `urls=a|b` 省长度；超 2000 字符退化成只带当前这一集
 - 入向的非规范写法（未编码的 `&`）会在出向被自动规范成 percent 编码
 
+## 视频解析（/video-parse）
+
+`pages/video-parse.vue` + `composables/videoParseRules.ts` + `composables/usePowSolver.ts` + `server/api/resolve.ts`。
+把「网站播放页地址」变成「整季选集的真实 m3u8」，再拼成 `urls=a|b|c&index=N` 跳去 `/video-player`。
+
+### 分工
+
+- `videoParseRules.ts` — 规则表，pattern 语义与 `videoSiteRules.ts` 完全一致（`/正则/` 或 host 子串），
+  内置 `ncat` 一条。规则只是四条正则：`sourceRe`（当前集地址）/ `lineRe`（线路标签）/
+  `episodeGroupRe`（选集容器）/ `episodeRe`（组内单集）。加新站 = 加一条规则，不改代码。
+- `server/api/resolve.ts` — 两步式接口。浏览器有 CORS，取第三方页面只能绕服务端。
+- `usePowSolver.ts` — 浏览器侧算反爬的工作量证明。
+- `server/utils/siteFetch.ts` — 抓网页用的 undici dispatcher（放宽 TLS + 支持 `HTTPS_PROXY`）。
+  与 `proxy.ts` 里那份**不是同一个**：那份面向视频流、连接数和超时按分片下载调过，不要合并。
+
+### 为什么 PoW 放前端算
+
+ncat 系挂了 cdndefend：首访返回 **HTTP 850** + 挑战页，要求暴力找 nonce 使
+`SHA1(c + nonce)` 的第 `n1`、`n1+1` 字节等于 `0xB0 0x0B`（`n1 = parseInt(c[0], 16)`），
+再带 cookie `cdndefend_js_cookie = c + nonce` 重取。期望约 65536 次哈希。
+
+**CF Workers 免费版每请求只有 10ms CPU，服务端硬算必超**。而挑战是纯 SHA1、不依赖 DOM 或
+浏览器指纹，放前端完全等价（实测浏览器 ~55ms）。所以 `step=challenge` 只把常量丢给前端，
+`step=extract` 拿前端算好的 cookie 重取。
+
+`usePowSolver.ts` 内置同步 SHA1 而非 `crypto.subtle.digest`：后者是异步的，
+6.5 万次 await 的微任务开销比哈希本身大一个量级。输入恒为「40 位常量 + 十进制 nonce」
+（≤55 字节），永远单个 512 位分组，所以只实现了单块 SHA1。
+
+### 几个实测结论（改之前先看）
+
+- **挑战常量 `c` 是全站级的**：同站不同影片页拿到的完全一样，且数分钟内稳定 →
+  一次 PoW 全站复用。服务端按 host 缓存 cookie，TTL 30 分钟（与 `proxy.ts` 的 `headerModeCache` 对齐）
+- **线路标签与选集容器按出现顺序严格一一对应**，三个不同页面实测恒等（16/16、18/18、17/17）。
+  且**全部线路的选集都渲染在同一页**（非当前线路 `display:none`），所以线路 × 集数表只需一次请求
+- **不是所有线路都给直链**：如「4K」线路把 `playSource.src` 渲染成空串，地址由前端运行时另取。
+  这类线路整条都取不到 → 先探第一集，拿不到就立刻收工并回 `lineUnsupported`，
+  否则要白等完剩下几十集的请求才知道结果是空的
+- **有些线路的地址带时效签名**（`?sign=…&timestamp=…`），会过期，UI 上要提示别收藏/分享
+- 跳转 `/video-player` 时**不带** `proxy`/`noref`/`origin`/`referer`：这些会置 `manualStrategyOverride`，
+  把可达性探测整个关掉。gsuus 系正是靠「manifest 先只探直连」从 12s 降到 1.5s 的
+- 单次请求最多解析 40 集（CF 免费版单请求 50 subrequest 硬顶），超出用 `truncated` 回报，不静默截断
+
+### 本地开发注意
+
+若目标站点被 DNS 污染或需要代理才能访问，会出现「浏览器能打开、接口报 `fetch failed`」——
+因为浏览器走系统代理而 Node 默认不走。起 dev 前设一下即可：
+
+```powershell
+$env:HTTPS_PROXY = 'http://127.0.0.1:7897'   # 换成你本机代理端口
+npm run dev
+```
+
+CF Pages 上没有这些变量，出口直连，不受影响。
+
 ## 状态持久化
 
 全部走 localStorage，无后端。key 一览：
@@ -161,6 +217,7 @@ manifest 不过代理就没法把分片指向代理）；**分片可直连 → m
 | --- | --- |
 | `video-player-state` | 播放器全量状态（地址/播放列表/进度/音量/倍速/代理设置/HLS 配置/档位覆盖） |
 | `video-player-site-rules` | 用户自定义站点规则 |
+| `video-parse-rules` | 用户自定义解析规则（`/video-parse`，与站点规则分开存，别混用） |
 | `video-player-learned-profiles` | 按 host 学到的服务器档位 + 可达性探测结果（`reach`，TTL 30 分钟） |
 | `video-player-origin-history` / `-referer-history` | Origin/Referer 输入历史（下拉复用） |
 | `json-format-settings` / `json-diff-settings` / `json-extract-settings` / `content-diff-settings` / `timestamp-settings` | 各页设置 |

@@ -154,6 +154,14 @@ const categories: Category[] = [
         description: '支持 M3U8/MP4 播放、代理、防盗链处理与下载',
         bgColor: 'bg-fuchsia-100 dark:bg-fuchsia-900/50',
         iconColor: 'text-fuchsia-600 dark:text-fuchsia-400'
+      },
+      {
+        name: '视频解析',
+        path: '/video-parse',
+        icon: 'i-heroicons-link',
+        description: '粘贴播放页地址，解析整季选集并直接送进播放器',
+        bgColor: 'bg-rose-100 dark:bg-rose-900/50',
+        iconColor: 'text-rose-600 dark:text-rose-400'
       }
     ]
   },
