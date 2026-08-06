@@ -201,17 +201,6 @@
           </div>
         </div>
 
-        <!-- 本地文件 -->
-        <div class="text-center text-sm text-gray-500 dark:text-gray-400">或</div>
-        
-        <FileUpload
-          accept="video/*,.m3u8,.mp4,.webm,.mkv"
-          accept-text="视频文件 (MP4, WebM, MKV, M3U8)"
-          icon="i-heroicons-film"
-          :multiple="true"
-          @files="handleLocalFiles"
-        />
-
         <!-- URL 参数直链说明 -->
         <div class="flex items-center gap-3 flex-wrap">
           <details class="text-xs text-gray-500 dark:text-gray-400 flex-1 min-w-64">
@@ -989,8 +978,25 @@ const HANDOFF_TTL = 24 * 60 * 60 * 1000
 
 interface HandoffPayload {
   urls: string[]
+  names?: string[]   // 集名（「第 12 集」这类），与 urls 同下标；解析页知道，光看 URL 猜不出来
   index?: number
   at: number
+}
+
+// 播放列表的显示名，来自交接槽；查不到时 getVideoName 退回从 URL 猜文件名。
+// 长剧每一集的地址都叫 index.m3u8，光看文件名分不清第几集。
+//
+// 按 URL 存而不是按下标存：下标要跟播放列表严格对齐，任何一处重新赋值 playlist
+// 都得记着同步清理，漏一处就会把上一部剧的集名套到新列表上（这里踩过：onMounted
+// 走 parseAndLoad 加载 query 地址，而 parseAndLoad 里的清理正好把刚读出的集名冲掉）。
+// 按 URL 存则天然对齐，残留条目也只是查不中，无害。
+const playlistNames = ref<Record<string, string>>({})
+
+const setPlaylistNames = (urls: string[], names?: string[]) => {
+  if (!names || names.length !== urls.length) return
+  const map: Record<string, string> = { ...playlistNames.value }
+  urls.forEach((u, i) => { if (names[i]) map[u] = names[i] })
+  playlistNames.value = map
 }
 
 const readHandoff = (): HandoffPayload | null => {
@@ -1008,7 +1014,10 @@ const readHandoff = (): HandoffPayload | null => {
 
 const writeHandoff = (urls: string[], index: number) => {
   try {
-    localStorage.setItem(HANDOFF_KEY, JSON.stringify({ urls, index, at: Date.now() } as HandoffPayload))
+    // 名字要一起写回去，否则本页每次同步地址栏都会把交接槽里的集名冲掉
+    const picked = urls.map(u => playlistNames.value[u] ?? '')
+    const names = picked.every(Boolean) ? picked : undefined
+    localStorage.setItem(HANDOFF_KEY, JSON.stringify({ urls, names, index, at: Date.now() } as HandoffPayload))
   } catch (e) {
     console.error('写入播放列表交接槽失败:', e)
   }
@@ -1076,12 +1085,23 @@ const parseQueryVideoParams = (): QueryVideoParams => {
         const p = readHandoff()
         if (!p) break
         p.urls.forEach(u => result.urls.push(u))
+        setPlaylistNames(p.urls, p.names)
         // ?index= 若显式给了以它为准，所以只在没给时才用槽里的
         if (result.index === undefined && Number.isFinite(p.index)) result.index = p.index
         break
       }
     }
   }
+
+  // 短列表是用 urls= 传的（那样的链接能直接分享），集名则始终放在交接槽里。
+  // 两边内容完全一致时才采用，避免把别的列表的名字套上来。
+  if (result.urls.length) {
+    const p = readHandoff()
+    if (p && p.urls.length === result.urls.length && p.urls.every((u, i) => u === result.urls[i])) {
+      setPlaylistNames(p.urls, p.names)
+    }
+  }
+
   return result
 }
 
@@ -1580,6 +1600,9 @@ const formatTime = (seconds: number): string => {
 
 // 从 URL 获取视频名称
 const getVideoName = (url: string, index: number): string => {
+  // 交接槽带来的集名优先：长剧每一集的地址都叫 index.m3u8，从 URL 根本认不出第几集
+  const named = playlistNames.value[url]
+  if (named) return named
   try {
     const urlObj = new URL(url)
     const pathname = urlObj.pathname
@@ -1730,6 +1753,7 @@ const clearAllProgress = () => {
 // 清空播放列表
 const clearPlaylist = () => {
   playlist.value = []
+  playlistNames.value = {}
   currentIndex.value = 0
   videoUrlInput.value = ''
   syncUrlToQuery()

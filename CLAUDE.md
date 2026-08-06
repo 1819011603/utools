@@ -195,7 +195,54 @@ ncat 系挂了 cdndefend：首访返回 **HTTP 850** + 挑战页，要求暴力�
 - **有些线路的地址带时效签名**（`?sign=…&timestamp=…`），会过期，UI 上要提示别收藏/分享
 - 跳转 `/video-player` 时**不带** `proxy`/`noref`/`origin`/`referer`：这些会置 `manualStrategyOverride`，
   把可达性探测整个关掉。gsuus 系正是靠「manifest 先只探直连」从 12s 降到 1.5s 的
-- 单次请求最多解析 40 集（CF 免费版单请求 50 subrequest 硬顶），超出用 `truncated` 回报，不静默截断
+- **线路上的集数徽标不等于实际能解析的集数**：徽标是站点自报的 `source-item-num`，
+  真实集数以解析出的 `episode-item` 锚点数为准（同一部片子各线路可能不同，实测 40 / 53 / 73 都有）
+
+### 分批解析（长剧）
+
+单请求最多解析 40 集（`MAX_EPISODES`）——CF 免费版单请求 50 subrequest 硬顶，留出主页面那一发和余量。
+**超出的不截断，用 `offset` 分批**：接口返回 `batchFrom` / `batchTo` / `remaining`，
+前端拿到 `remaining > 0` 就带 `offset=batchTo` 继续拉下一批，把地址按下标合并进已有结构。
+每批是一次独立请求，各自的 subrequest 预算互不叠加，所以多少集都能解析完（前端 20 轮上限兜底）。
+
+「该线路不给直链」的探测只在第一批做（`offset === 0`）：后续批次已经知道线路是好的，不必再多花一个来回。
+探到不给直链时要把 `remaining` 归零，否则前端会继续去拉注定为空的后续批次。
+
+**解析未完成时禁用播放按钮**——长剧分多批拉，中途点「播放全部」只会把已解析的那部分带过去
+（表现为「明明有 73 集，跳过去只有 40 集」）。
+
+### 长播放列表交接槽
+
+几十集的地址拼进 query 会顶爆地址栏（部分浏览器 2000 字符上界，硬刷新还要过 CF 的请求头上限）。
+早先 video-parse 是截成 31 集的窗口、video-player 是退化成只带当前一集——两边都在偷偷丢集数。
+
+现改走 **localStorage 交接槽**（key `video-player-handoff`，槽由 `video-player.vue` 持有，任何页面都能当生产者）：
+
+- 载荷 `{ urls, names, index, at }`，TTL 1 天（防止半个月前的残留列表被翻出来）
+- 长列表：video-parse 整份写槽 + 跳 `?handoff=1`；video-player 的 `syncUrlToQuery` 超长时也写槽并把地址栏收敛成 `?handoff=1`
+  （比原来退化成单集更好：刷新后整个列表还在，因为 query 优先级高于 savedState）
+- 短列表：地址仍走 `urls=`（这样的链接能直接分享，交接槽是本机存储分享不了），
+  但**集名照样写槽**；video-player 在「槽里的 urls 与 query 解析出的完全一致」时才取用其中的 `names`
+- `names` 解决的是：长剧每一集的地址都叫 `index.m3u8`，播放列表光看 URL 全是重复项、认不出第几集。
+  `getVideoName` 优先查 `playlistNames`，查不到才退回从 URL 猜文件名
+- **`playlistNames` 按 URL 存（`Record<url, name>`），不要改成按下标存的数组**：
+  按下标要跟 `playlist` 严格对齐，每一处重新赋值 `playlist` 都得记着同步清理，漏一处就串名。
+  这里踩过一次——`onMounted` 加载 query 地址走的是 `parseAndLoad`，而 `parseAndLoad` 里的
+  「清掉上一份集名」正好把刚从交接槽读出的名字冲没了，表现为播放列表还是一排 `index.m3u8`。
+  按 URL 存则天然对齐，残留条目只是查不中，无害，也不需要任何清理逻辑
+- 集名不进 `video-player-state`：刷新时靠 `?handoff=1` 重新从槽里读回来
+
+### URL 参数双向同步（/video-parse）
+
+参数：`url`（播放页地址）、`line`（线路序号，0 基）。做法与 video-player 同源，包括那个坑：
+播放页地址自带 query 时未编码的 `&` 会被拆成独立参数，所以从原始 `window.location.search` 手工解析，
+不在 `PAGE_QUERY_KEYS` 里的片段原样回写进地址。
+
+- 出向在解析成功和失败后都调用（失败也写，刷新能直接重试同一地址）
+- `line` 只在 `result.pageUrl === 当前输入` 时才写——否则换片子/解析失败时会把上一次残留的线路号
+  写进新地址，分享出去直接跳到一条不相干的线路
+- **`window.history.replaceState` 必须写全 `window.`**：本组件有个叫 `history` 的 ref（解析历史），
+  会遮蔽全局 `history`，直接写 `history.replaceState` 会报 `is not a function`
 
 ### 本地开发注意
 
@@ -219,6 +266,7 @@ CF Pages 上没有这些变量，出口直连，不受影响。
 | `video-player-site-rules` | 用户自定义站点规则 |
 | `video-parse-rules` | 用户自定义解析规则（`/video-parse`，与站点规则分开存，别混用） |
 | `video-player-learned-profiles` | 按 host 学到的服务器档位 + 可达性探测结果（`reach`，TTL 30 分钟） |
+| `video-player-handoff` | 长播放列表交接槽 `{ urls, names, index, at }`，TTL 1 天，`/video-parse` → `/video-player` 传值 |
 | `video-player-origin-history` / `-referer-history` | Origin/Referer 输入历史（下拉复用） |
 | `json-format-settings` / `json-diff-settings` / `json-extract-settings` / `content-diff-settings` / `timestamp-settings` | 各页设置 |
 | `json-extract-import` | json-format → json-extract 的跨页传值 |

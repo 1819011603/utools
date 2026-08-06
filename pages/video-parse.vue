@@ -77,13 +77,15 @@
             <UButton size="xs" variant="soft" icon="i-heroicons-clipboard" @click="copyAll">
               复制全部地址
             </UButton>
+            <!-- 解析未完成时禁用：长剧要分多批拉，中途点会只把已解析的那部分带过去 -->
             <UButton
               size="xs"
               icon="i-heroicons-play"
-              :disabled="!resolvedCount"
+              :disabled="!resolvedCount || busy"
+              :title="busy ? '正在解析，稍候' : ''"
               @click="playAll()"
             >
-              播放全部 ({{ resolvedCount }})
+              播放全部 ({{ resolvedCount }}<template v-if="busy">…</template>)
             </UButton>
           </div>
         </div>
@@ -177,6 +179,7 @@
                 size="2xs"
                 variant="ghost"
                 icon="i-heroicons-play"
+                :disabled="busy"
                 title="从这一集开始播放"
                 @click="playAll(i)"
               />
@@ -436,18 +439,28 @@ const playAll = (startIndex = 0) => {
   const clicked = eps[startIndex]
   const idx = Math.max(0, playable.findIndex(e => e === clicked))
   const urls = playable.map(e => e.videoUrl!) as string[]
+  // 集名一并带过去：长剧每集的地址都叫 index.m3u8，播放器光看 URL 认不出第几集
+  const names = playable.map((e, i) => e.title || `第 ${i + 1} 集`)
 
   const params = new URLSearchParams()
 
+  // 交接槽始终写：长列表靠它整份传过去，短列表靠它把集名带过去
+  // （短列表的地址仍走 urls=，那样的链接可以直接复制给别人；交接槽是本机 localStorage，分享不了）
+  let handoffOk = true
+  try {
+    localStorage.setItem(HANDOFF_KEY, JSON.stringify({ urls, names, index: idx, at: Date.now() }))
+  } catch (e) {
+    handoffOk = false
+    console.error('写入播放列表交接槽失败:', e)
+  }
+
   if (urls.join('|').length > MAX_QUERY_LEN) {
-    // 几十集拼进 query 会顶爆地址栏，以前是截成 31 集的窗口——等于偷偷丢集数。
-    // 改成整份写进交接槽，一集不少
-    try {
-      localStorage.setItem(HANDOFF_KEY, JSON.stringify({ urls, index: idx, at: Date.now() }))
+    if (handoffOk) {
+      // 几十集拼进 query 会顶爆地址栏。以前是截成 31 集的窗口——等于偷偷丢集数，
+      // 现在整份走交接槽，一集不少
       params.set('handoff', '1')
-    } catch (e) {
-      // localStorage 满了/被禁 → 退回 query，此时只能带得下多少算多少
-      console.error('写入播放列表交接槽失败，退回 query 传递:', e)
+    } else {
+      // localStorage 满了/被禁 → 只能退回 query，带得下多少算多少
       params.set('urls', urls.slice(0, 31).join('|'))
       params.set('index', String(Math.min(idx, 30)))
       toast.add({ title: '浏览器存储不可用，本次只带 31 集', color: 'orange' })
