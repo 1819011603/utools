@@ -173,7 +173,15 @@ manifest 不过代理就没法把分片指向代理）；**分片可直连 → m
 - **`@ffmpeg/*` 必须 `optimizeDeps.exclude`**（已在 nuxt.config.ts）
 - **206 Range 响应不可缓存**，见上
 - **改连接策略必须重载视频**，否则 hls.js 还在用上次解析出的分片 URL，看起来「改了没生效」
-- **CF Workers 会静默吞掉非标端口**：`compatibility_date` 必须 ≥ `2024-09-02` 且开 `allow_custom_ports`（见 wrangler.json），
+- **CF Workers 会静默吞掉非标端口**：`wrangler.json` 的 `compatibility_date` 必须 ≥ `2024-09-02`，
   否则线上 `fetch('https://host:999/x.ts')` 被降级成 `:443`，`/api/proxy` 拉这类分片必然失败，而本地 Node/undici 一切正常 —— 极难排查。
-  实测 `p.jisuts.com:999` 与 `208.69.102.105:11306` 两个源都属这一类（它们的 `:443` 根本没监听）
+  实测 `p.jisuts.com:999` 与 `208.69.102.105:11306` 两个源都属这一类（它们的 `:443` 根本没监听）。
+  **千万别顺手加 `compatibility_flags: ["allow_custom_ports"]`**：该 flag 自 2024-09-02 起已是默认值，
+  日期达标后再显式声明会让 Pages 部署在**最后一步**失败（前面 build/上传全成功，只在 publish Function 时报
+  `The compatibility flag allow_custom_ports became the default as of 2024-09-02 so does not need to be specified anymore`）。
+  只改日期，不加 flag。
+- **两个 compatibilityDate 是两回事，别混**：`nuxt.config.ts` 的 `compatibilityDate`（现为 `2024-07-01`）是
+  Nitro 自己的特性门控，构建日志里打印的就是它（`preset: cloudflare-pages, compatibility date: 2024-07-01`）；
+  真正决定 CF 运行时行为（含上面的端口问题）的是 `wrangler.json` 的 `compatibility_date`。
+  看到日志里是 2024-07-01 不代表线上就是它，别据此改错文件
 - **`crossorigin="anonymous"`** 只对远程源加，本地 blob 文件要设 `undefined`
