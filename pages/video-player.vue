@@ -169,6 +169,10 @@
             <span class="text-sm font-medium text-gray-700 dark:text-gray-300 truncate">
               {{ playlistTitle || '播放列表' }}
               <span v-if="playlistTitle" class="font-normal text-gray-400">· 共 {{ playlist.length }} 集</span>
+              <!-- Toast 会消失，这里常驻一个上次刷新时间，随时能确认刷没刷过 -->
+              <span v-if="lastRefreshAt" class="font-normal text-xs text-gray-400">
+                · 已于 {{ formatClock(lastRefreshAt) }} 刷新
+              </span>
             </span>
             <div class="flex gap-2">
               <!-- 带签名的地址会过期，用交接槽里的来源就地重解析，不用回解析页 -->
@@ -907,6 +911,7 @@ const playlistTitle = ref('')
 // 播放列表的来源，有值才显示「刷新链接」
 const playlistSource = ref<{ pageUrl: string; line: number } | null>(null)
 const isRefreshingLinks = ref(false)
+const lastRefreshAt = ref(0)
 
 // 播放列表的显示名，来自交接槽；查不到时 getVideoName 退回从 URL 猜文件名。
 // 长剧每一集的地址都叫 index.m3u8，光看文件名分不清第几集。
@@ -1515,6 +1520,10 @@ const volumeIcon = computed(() => {
 })
 
 // 格式化时间
+// 时钟格式（HH:MM），用于「已于 xx:xx 刷新」这类时间点提示
+const formatClock = (ts: number): string =>
+  new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
+
 const formatTime = (seconds: number): string => {
   if (!isFinite(seconds) || isNaN(seconds)) return '00:00'
   const h = Math.floor(seconds / 3600)
@@ -1702,32 +1711,68 @@ const refreshPlaylistLinks = async () => {
     const { urls, names } = toPlaylist(result)
     if (!urls.length) throw new Error('没有解析出可播放的地址')
 
+    // 刷新前后按「集名 → 地址」对照，才能说清到底变了什么。
+    // 只报「已刷新 N 集」等于没说：用户要知道的是地址换没换、集数多没多
+    const before = new Map<string, string>()
+    playlist.value.forEach((u, i) => before.set(playlistNames.value[u] ?? `#${i}`, u))
+    let changed = 0
+    let added = 0
+    names.forEach((n, i) => {
+      const old = before.get(n)
+      if (old === undefined) added++
+      else if (old !== urls[i]) changed++
+    })
+    const removed = [...before.keys()].filter(n => !names.includes(n)).length
+
     // 认名字而不是下标：集数可能变了
     const curUrl = playlist.value[currentIndex.value] ?? ''
     const curName = playlistNames.value[curUrl] ?? ''
     const hit = curName ? names.indexOf(curName) : -1
     const nextIndex = hit >= 0 ? hit : Math.min(currentIndex.value, urls.length - 1)
+    const curChanged = urls[nextIndex] !== curUrl
 
     // 进度按 URL 存，换地址等于丢进度 → 先把当前时间搬到新地址上，
     // 后面 loadVideo 里的 getSavedProgress 就能原位续播
     const pos = videoEl.value?.currentTime ?? currentTime.value
-    if (pos > 0) savedProgress.value[urls[nextIndex]] = pos
+    if (curChanged && pos > 0) savedProgress.value[urls[nextIndex]] = pos
 
     playlist.value = urls
     setPlaylistNames(urls, names)
     if (result.title) playlistTitle.value = result.title
     currentIndex.value = nextIndex
-
-    videoUrl.value = urls[nextIndex]
-    isRestoringFromSaved.value = true
+    lastRefreshAt.value = Date.now()
     saveState()
     syncUrlToQuery()
-    await loadVideo()
 
-    toast.add({ title: `已刷新 ${urls.length} 集的链接`, color: 'green', timeout: 2500 })
+    // 当前这集地址没变就别重载：正播着呢，重载纯属打断
+    if (curChanged) {
+      videoUrl.value = urls[nextIndex]
+      isRestoringFromSaved.value = true
+      await loadVideo()
+    }
+
+    if (!changed && !added && !removed) {
+      toast.add({
+        title: '链接没有变化',
+        description: `共 ${urls.length} 集，源站给的还是原来的地址`,
+        color: 'blue',
+        timeout: 3000,
+      })
+    } else {
+      const parts: string[] = []
+      if (changed) parts.push(`${changed} 集换了新地址`)
+      if (added) parts.push(`新增 ${added} 集`)
+      if (removed) parts.push(`少了 ${removed} 集`)
+      toast.add({
+        title: '刷新完成：' + parts.join('，'),
+        description: `共 ${urls.length} 集` + (curChanged ? '；当前这集已用新地址重新载入' : '；当前这集地址未变，未打断播放'),
+        color: 'green',
+        timeout: 4000,
+      })
+    }
   } catch (e: any) {
     const msg = e?.statusMessage || e?.data?.statusMessage || e?.message || '刷新失败'
-    toast.add({ title: '刷新链接失败', description: msg, color: 'red' })
+    toast.add({ title: '刷新链接失败', description: msg, color: 'red', timeout: 6000 })
   } finally {
     isRefreshingLinks.value = false
   }
