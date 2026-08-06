@@ -13,14 +13,24 @@ import { hostOf } from './videoSiteRules'
 /** 反爬类型。none = 直接能取到页面；cdndefend = 需要先过 SHA1 工作量证明。 */
 export type ChallengeKind = 'none' | 'cdndefend'
 
+/**
+ * 取地址的方式。
+ *   html    —— 地址明文写在页面里，靠下面几条正则抠出来（默认）
+ *   nbmovie —— 页面里没有地址：每集要另调站点接口，接口 URL 由站点自带的 wasm 现签，
+ *              签名带时间戳会过期，且 CF Workers 不允许运行时编译 wasm，
+ *              所以签名与取址整段挪到浏览器做，见 useNbmovieSigner.ts
+ */
+export type ResolverKind = 'html' | 'nbmovie'
+
 export interface ParseRule {
   id: string
   name: string
   pattern: string
   challenge?: ChallengeKind
+  resolver?: ResolverKind
 
-  /** 提取当前集播放地址，取第 1 个捕获组 */
-  sourceRe: string
+  /** 提取当前集播放地址，取第 1 个捕获组。resolver='html' 时必填 */
+  sourceRe?: string
 
   /**
    * 线路标签。捕获组约定：
@@ -58,6 +68,15 @@ export const BUILTIN_PARSE_RULES: ParseRule[] = [
     // 所以一次请求就能拿到整张线路 × 集数表，不用逐线路翻页
     episodeGroupRe: '<div class="episode-list"[^>]*>([\\s\\S]*?)</div>',
     episodeRe: '<a[^>]*href="([^"]+)"[^>]*class="[^"]*episode-item[^"]*"[^>]*>\\s*<span>([^<]*)</span>',
+  },
+  {
+    id: 'nbmovie',
+    name: '4k影视 (4kvm)',
+    // 同样会换域名后缀，用正则兜住
+    pattern: '/4kvm\\d*\\.(org|com|net|cc|top)/',
+    // 页面只给「集 → dataid」的映射，真实地址要拿 dataid 去调 /video/play，
+    // 该接口的整个 query（含签名 s 与时间戳 t）由站点自带 wasm 生成，抠不出正则
+    resolver: 'nbmovie',
   },
 ]
 
