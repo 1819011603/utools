@@ -180,7 +180,8 @@ manifest 不过代理就没法把分片指向代理）；**分片可直连 → m
 - `videoPlayer/useHlsPrefetch.ts`：自定义 hls.js `fLoader`，命中预取缓存即时返回；按缓冲健康度动态调并发。
   浏览器同 host 只给 6 条连接（`MAX_CONN`），所以有**双通道**——同一分片给出「直连 CDN」和「/api/proxy」两个 origin 的 URL，并发提到 ~12。
 - **服务器档位** good/medium/bad（`SERVER_TIERS`）：一套抗卡参数（濒卡/吃紧阈值、安全系数、并发下限、对冲延迟、跳片超时、竞速上限）。
-  可自动分档（`classifyTier`）或站点规则锁定；页面「抗卡策略」区可逐项覆盖。
+  可自动分档（`classifyTier`）或站点规则锁定；页面「抗卡策略」区可覆盖其中几项
+  （`hedgeMs`/`maxRacers` 只留预设不开放覆盖：手调它们只是在换「多快开始浪费连接」，帮不上忙）。
   分档结果按 host 学习并持久化（`loadLearnedProfile`/`saveLearnedProfile`），下次进同站直接从最优起步。
 - `videoPlayer/useStallTracker.ts`：以 `<video>` 真实停顿（waiting/stalled）为地面真值反馈调参，排除 seek 和用户 pause。
   **必须每次心跳都调一次 `tick()`（内含幂等 `bind()`）**：`loadVideo` 里 `videoKey++` 会重建 `<video>`，
@@ -188,11 +189,20 @@ manifest 不过代理就没法把分片指向代理）；**分片可直连 → m
   一个事件都收不到，表现是统计面板「卡顿恒 0 次 / 连续流畅恒 0s」，且从面板完全看不出是绑错了。
   另外「连续流畅」只能读响应式的 `smoothSecs`，**不能在模板里直接调 `getSmoothSecs()`**——
   普通函数不进依赖收集，模板只会显示首次渲染的那个值。
+- **缓冲健康区（`healthZone`）按「有效可播」（MSE + 预取缓存）分档，不是按 MSE 前向**。
+  预取缓存里的分片由 `fLoader` 同步返回，不需要任何网络等待，所以它算真实可播；
+  而 MSE 前向自己有天花板（`maxBufferLength` / 浏览器 MSE 配额），深缓存时会长期停在几十秒的平台上，
+  那是稳态不是吃紧。按 MSE 分档踩过一次：有效可播 651s、真实卡顿 0 次仍判「吃紧」，
+  降速守卫等不到 `healthy` 就永不解除，自动最佳倍速被死锁在 1x。**只有跳片才看 MSE**，它自己量（`skipSegment`）。
 - **自动最佳倍速**（`useVideoAutoTune.applyEffectiveRate`）的上限是 `autoRateCap = max(2, desiredRate)`，
   **不是 `desiredRate` 本身**：后者默认 1，直接当上限会让「自动」永远只能取 1x，勾选框看着有效实际一步都迈不出去（踩过）。
-  提速要三条同时成立（带宽算得出 + `healthZone === 'healthy'` + 连续流畅 ≥20s），降速只要带宽持续不够 8s；
+  上限证据取「带宽模型」与「缓冲实况」中更宽松的一个——有效可播 ≥2×吃紧阈值且没在卡（`bufferRich`）
+  就直接按 `autoRateCap` 走，因为带宽模型在预取吃饱、测速采样变稀之后会明显偏保守。
+  提速另需 `healthZone === 'healthy'` + 连续流畅 ≥20s；降速只要目标持续低于当前 8s。
   任何一次调整后进 25s 惰性期（`RATE_HOLD_MS`）——倍速一变就要重排预取节奏，不停微调比慢一点更难受。
-  只有抗卡守卫（panic → `guardRateCeiling = 1`）能绕过惰性期立刻压回 1x。
+  两个例外可以绕过惰性期：抗卡守卫（panic → `guardRateCeiling = 1`）立刻压回 1x；
+  **用户动作**（勾开关 / 改倍速档位）走 nudge 通道**直接跳到目标值**，不走 0.25 台阶也不等流畅时长——
+  勾了要等 20s 才动第一步，用户只会认为开关坏了（踩过）。
 - `videoPlayer/useSegmentCache.ts`：模块级单例内存缓存，TTL 1 天 + 内存上限 LRU + seek 时批量 abort。
   只在「TTL 过期」或「切到别的视频」时清；跨组件卸载存活，但**刷新页面必然丢**（JS 堆机制）。
 - `videoPlayer/useM3u8.ts`：m3u8-parser 解析 + AES-128 密钥/IV（`keyIv` 为 null 时用媒体序列号 `sn` 推导）

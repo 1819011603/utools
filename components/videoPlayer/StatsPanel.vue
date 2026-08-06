@@ -5,11 +5,15 @@
       <UBadge :color="tierBadgeColor" variant="subtle" size="xs">
         服务器：{{ tierLabel }}{{ tierIsAuto ? '（自动）' : '（锁定）' }}
       </UBadge>
+      <!-- 判据写进 title：这个徽标曾被误读成「源站不行」，其实它只是把可播秒数跟档位阈值比了一下 -->
       <UBadge
         :color="strategy.healthZone === 'panic' ? 'red' : strategy.healthZone === 'low' ? 'amber' : 'green'"
         variant="subtle" size="xs"
+        :title="`判据：有效可播 ${strategy.playableSecs}s（MSE + 预取缓存）`
+          + ` vs 濒卡 <${effectiveTierParams.panicSecs}s / 吃紧 <${effectiveTierParams.lowSecs}s`"
       >
         {{ strategy.healthZone === 'panic' ? '濒卡' : strategy.healthZone === 'low' ? '吃紧' : '健康' }}
+        {{ strategy.playableSecs }}s
       </UBadge>
       <UBadge v-if="guardRateCeiling < 99" color="amber" variant="subtle" size="xs">抗卡降速中</UBadge>
       <UBadge :color="stall.stallCount.value > 0 ? 'red' : 'green'" variant="subtle" size="xs">
@@ -37,7 +41,12 @@
           :class="prefetchInfo.threads >= 5 ? 'text-red-500' : prefetchInfo.threads >= 3 ? 'text-amber-500' : 'text-green-500'"
         >{{ prefetchInfo.threads }} 线程</span>
       </div>
-      <div><span class="text-gray-500">缓冲健康：</span><span class="font-medium">{{ prefetchInfo.bufferSecs }} 秒</span></div>
+      <!-- 原来叫「缓冲健康」，和上面的健康区徽标是两码事。带上分母才看得出它是「到顶了」而不是「不够」 -->
+      <div :title="`hls.js 已 append 进 MSE 的前向秒数，上限被我们锁在 ${mseCeilingSecs}s（append 几百 MB 会触发浏览器 MSE 配额/驱逐 → 缓冲空洞）。`
+        + '大量预读在 JS 预取缓存里（=「已缓冲」那一项）。这个数到顶就不再涨，不代表吃紧。'">
+        <span class="text-gray-500">MSE 窗口：</span>
+        <span class="font-medium">{{ prefetchInfo.bufferSecs }} / {{ mseCeilingSecs }} 秒</span>
+      </div>
       <div><span class="text-gray-500">预取完成：</span><span class="font-medium">{{ prefetchInfo.cached }} 分片</span></div>
       <div><span class="text-gray-500">预取中：</span><span class="font-medium">{{ prefetchInfo.pending }} 分片</span></div>
     </div>
@@ -72,9 +81,12 @@
 
 <script setup lang="ts">
 const {
-  hlsStats, bufferedPercent, progressPercent, playbackRate, playbackDiag,
-  tierLabel, tierBadgeColor, tierIsAuto, guardRateCeiling,
+  hlsConfig, hlsStats, bufferedPercent, progressPercent, playbackRate, playbackDiag,
+  tierLabel, tierBadgeColor, tierIsAuto, guardRateCeiling, effectiveTierParams,
   strategy, stall, prefetchInfo, aggregateKBps, aggregateMbps,
   dualChannel, dualChannelUnavailable,
 } = useVideoPlayerCtx()
+
+// MSE 窗口上限：与 useVideoEngine 里给 hls.js 的 maxMaxBufferLength 同一个算式（那边是 append 的硬闸）
+const mseCeilingSecs = computed(() => Math.min(60, hlsConfig.value.maxMaxBufferLength))
 </script>

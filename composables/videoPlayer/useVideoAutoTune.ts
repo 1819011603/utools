@@ -55,9 +55,13 @@ export function useVideoAutoTune(deps: VideoAutoTuneDeps) {
 
   /**
    * 计算并应用「实际生效倍速」：
-   *  - 自动最佳倍速开启：在 [1, autoRateCap] 内朝「带宽可持续上限」逼近，每次一个 0.25x 台阶。
-   *    提速要三个条件同时成立（带宽够 + 缓冲健康 + 已连续流畅 20s），降速只要带宽持续不够 8s。
+   *  - 自动最佳倍速开启：在 [1, autoRateCap] 内逼近可持续上限，每次一个 0.25x 台阶。
+   *    上限取「带宽模型」与「缓冲实况」两者中更宽松的那个：缓冲已经很深（≥2×吃紧阈值且没在卡）
+   *    就直接按 autoRateCap 走——深缓冲是比带宽估算更硬的证据，估算保守时不该拖着不提速。
+   *    提速还要缓冲健康 + 已连续流畅 20s；降速只要目标持续低于当前 8s。
    *    任何一次调整后进入 25s 惰性期——不停微调比慢一点更难受，且倍速一变就要重排预取节奏。
+   *  - 用户刚勾上开关 / 刚改上限（nudge 额度内）：直接跳到目标值，不走台阶也不看流畅时长。
+   *    这是明确的用户动作，必须立刻有反应；后续再由闭环按缓冲实况上下调。
    *  - 关闭：完全用用户选择倍速（可 <1 手动慢放），立即生效。
    */
   const applyEffectiveRate = () => {
@@ -77,9 +81,14 @@ export function useVideoAutoTune(deps: VideoAutoTuneDeps) {
 
     const now = performance.now()
     const cur = playbackRate.value
-    // 目标 = min(自动上限, 带宽可持续, 守卫上限)，≥1，向下对齐 0.25 台阶（不过度承诺）
-    const max = strategy.value.maxFluentRate
-    const rawCeil = Math.min(autoRateCap.value, max > 0 ? max : 1, guard)
+    const s = strategy.value
+    // 缓冲实况：有效可播（MSE + 预取缓存）已远超吃紧阈值且没在卡 → 供给明显充裕，
+    // 带宽模型（实测每连接速度 × 并发 ÷ 码率）在预取已经吃饱、采样变稀时会偏保守，这时以实况为准。
+    const bufferRich = s.playableSecs >= Math.max(tier.effectiveTierParams.value.lowSecs * 2, 60)
+      && !stall.isStalling.value
+    const modelCeil = s.maxFluentRate > 0 ? s.maxFluentRate : 1
+    // 目标 = min(自动上限, 上限证据, 守卫上限)，≥1，向下对齐 0.25 台阶
+    const rawCeil = Math.min(autoRateCap.value, bufferRich ? autoRateCap.value : modelCeil, guard)
     const target = Math.max(1, Math.floor(rawCeil / RATE_STEP + 1e-6) * RATE_STEP)
 
     if (target < cur - 1e-6) {
@@ -93,17 +102,22 @@ export function useVideoAutoTune(deps: VideoAutoTuneDeps) {
     }
     downSince = 0
     if (target < cur + 1e-6) return                        // 已到位
-    // 提速：惰性期内不动；缓冲不健康就别提（带宽模型只看得到下载，看不到 append/解码）
+    // 用户刚勾开关/刚改上限：直接给到目标值，不看惰性期也不等流畅时长（点了必须马上有反应）
+    if (now <= nudgeUntil) {
+      nudgeUntil = 0
+      lastAutoRateAt = now
+      setRate(target)
+      return
+    }
+    // 自动提速：惰性期内不动；缓冲不健康就别提（带宽模型看不到 append/解码这一段）
     if (now - lastAutoRateAt < RATE_HOLD_MS) return
-    if (strategy.value.healthZone !== 'healthy') return
-    // 连续流畅够久才提；用户刚手动抬上限则给一次「立刻迈一步」的额度
-    if (stall.getSmoothSecs() < RATE_UP_SMOOTH_SECS && now > nudgeUntil) return
-    nudgeUntil = 0
+    if (s.healthZone !== 'healthy') return
+    if (stall.getSmoothSecs() < RATE_UP_SMOOTH_SECS) return
     lastAutoRateAt = now
     setRate(Math.min(target, cur + RATE_STEP))
   }
 
-  /** 用户主动改目标倍速：解除惰性期，允许立即迈一步（之后继续按 25s 节奏逼近） */
+  /** 用户主动改上限 / 刚勾上开关：解除惰性期，并给一次「立刻跳到目标」的额度 */
   const resetRateCooldown = () => {
     lastAutoRateAt = 0
     downSince = 0
@@ -119,8 +133,11 @@ export function useVideoAutoTune(deps: VideoAutoTuneDeps) {
       useToast().add({ title: `当前带宽最高流畅约 ${max}x，${rate}x 可能卡顿`, color: 'amber', timeout: 3000 })
     }
   })
-  // 带宽实测变化 / 开关切换 / 抗卡守卫变化 时，重新评估生效倍速
-  watch([strategy, autoBestRate, tier.guardRateCeiling], () => applyEffectiveRate())
+  // 勾选/取消「自动最佳倍速」是用户动作，必须立刻生效：走 nudge 通道直接跳到目标，
+  // 否则要等惰性期 + 连续流畅 20s 才动第一步，看着就像勾了没反应。
+  watch(autoBestRate, () => { resetRateCooldown(); applyEffectiveRate() })
+  // 带宽实测 / 缓冲实况 / 抗卡守卫变化时，重新评估生效倍速（每秒心跳都会刷新 strategy）
+  watch([strategy, tier.guardRateCeiling], () => applyEffectiveRate())
 
   let lastLearnSaveAt = 0
 

@@ -42,7 +42,8 @@ export interface StrategySnapshot {
   targetConn: number      // 当前目标并发
   maxFluentRate: number   // 当前带宽最高可流畅倍速
   aggregateScales: boolean // 聚合是否随线程增长（true=每连接限速可并行；false=每IP硬顶不可并行）
-  healthZone: HealthZone  // 基于真实 MSE 的缓冲健康区（panic 触发抗卡降速/跳片）
+  healthZone: HealthZone  // 缓冲健康区（按「有效可播」分档，panic 触发抗卡降速）
+  playableSecs: number    // 有效可播秒数（MSE + 预取缓存），倍速决策的经验依据
 }
 
 const MAX_CONN = 6               // 浏览器同 host 连接上限（HTTP/1.1，硬顶）
@@ -153,7 +154,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   // 早期靠「缓冲增长率」反推，但预取到「预加载时长」封顶后缓冲不再增长、增长率≈0，
   // 会把可持续倍速误判成 1x。改为纯带宽模型：满并发聚合带宽能喂几倍码率就是几倍。
 
-  const strategy = ref<StrategySnapshot>({ perConnKBps: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0, aggregateScales: true, healthZone: 'healthy' })
+  const strategy = ref<StrategySnapshot>({ perConnKBps: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0, aggregateScales: true, healthZone: 'healthy', playableSecs: 0 })
 
   // 并发上限：默认单 host 6；多 CDN（分片跨多个 host）时按 host 数放宽（每 host 6，封顶 12）
   let hostConcurrencyCap = MAX_CONN
@@ -161,7 +162,8 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   // 闭环控制状态：以「缓冲是否在掉」为反馈调并发，比开环测速更抗卡顿、天然适配倍速
   let ctrlConn = 0                        // 当前受控并发（0=未初始化）
   let lastAhead = -1                      // 上次的前向缓冲秒数
-  let lastHealthZone: HealthZone = 'healthy'  // 基于真实 MSE 的健康区（驱动 UI 与降速守卫）
+  let lastHealthZone: HealthZone = 'healthy'  // 健康区（驱动 UI 与降速守卫）
+  let lastPlayable = 0                    // 上次量到的有效可播秒数（MSE + 预取缓存）
 
   // 切换视频/CDN 时重置实测与控制器，避免用上个流的数据误判新流
   const resetStrategy = () => {
@@ -173,9 +175,10 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     ctrlConn = 0
     lastAhead = -1
     lastHealthZone = 'healthy'
+    lastPlayable = 0
     laneInflight.length = 0
     segInflightStart.clear()
-    strategy.value = { perConnKBps: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0, aggregateScales: true, healthZone: 'healthy' }
+    strategy.value = { perConnKBps: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0, aggregateScales: true, healthZone: 'healthy', playableSecs: 0 }
   }
 
   // 实测驱动的目标并发：需要带宽 = 码率 × 倍速 × 安全系数；并发 = ⌈需要 / 每连接速度⌉
@@ -202,6 +205,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
       maxFluentRate: sustainable,
       aggregateScales: getAggregateScales(),
       healthZone: lastHealthZone,
+      playableSecs: Math.round(lastPlayable),
     }
   }
 
@@ -247,17 +251,23 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     return Math.max(0, reach - ct)
   }
 
-  // 闭环控制步进（双指标各司其职）：
-  //   · 健康区(healthZone)：按「真实 MSE 前向可播」(mseAhead) 分档——濒卡/吃紧/健康，驱动降速守卫与跳片。
-  //   · 并发爬坡：按「有效已缓冲」(cachedAhead：MSE + 预取缓存) 决定下载激进度——
-  //     缓存很少→拉满猛下；偏低/在掉→+1；接近预取目标→−1 省带宽。
-  //   分开的原因：并发只影响「下载」，缓存足了再多线程也没用（如 MSE 小但缓存巨大时，瓶颈在 append 非下载）；
-  //   而卡不卡只看 MSE。阈值全取自当前档位。
+  // 闭环控制步进（两个指标都按「有效已缓冲」cachedAhead = MSE + 预取缓存 来判，但用途不同）：
+  //   · 健康区(healthZone)：濒卡/吃紧/健康，驱动降速守卫与双通道自动开。
+  //   · 并发爬坡：缓存很少→拉满猛下；偏低/在掉→+1；接近预取目标→−1 省带宽。
+  //
+  // 健康区曾按「真实 MSE 前向」(mseAhead) 分档，理由是「卡不卡只看 MSE」。**这是错的**：
+  // 预取缓存里的分片由 fLoader 同步返回，hls.js 拿到即 append，不需要任何网络等待。
+  // 而 MSE 前向本身有天花板（maxBufferLength / 浏览器 MSE 配额），深缓存时它会长期停在几十秒的平台上
+  // ——那是正常稳态，不是吃紧。按它分档的后果：有效可播 651s、真实卡顿 0 次的情况下仍判「吃紧」，
+  // 降速守卫永远等不到 healthy 就永远不解除，「自动最佳倍速」被死锁在 1x（踩过）。
+  // 真正只看 MSE 的是跳片，它自己量（见 skipSegment），不走健康区。
   const stepControl = (mseAhead: number, cachedAhead: number) => {
     if (ctrlConn === 0) ctrlConn = computeTargetConcurrency()   // 冷启动用实测估算作初值
     const t = tier()
-    // 健康区：真实可播秒数决定是否濒卡（触发降速/跳片，由 video-player 消费）
-    lastHealthZone = mseAhead < t.panicSecs ? 'panic' : (mseAhead < t.lowSecs ? 'low' : 'healthy')
+    // 有效可播秒数分档。mseAhead 参与取大只为兜底：无分片列表时 getCachedAhead 会退化成 MSE 读数
+    const playable = Math.max(mseAhead, cachedAhead)
+    lastPlayable = playable
+    lastHealthZone = playable < t.panicSecs ? 'panic' : (playable < t.lowSecs ? 'low' : 'healthy')
     // 并发爬坡：按有效缓存趋势
     const drained = lastAhead >= 0 && cachedAhead < lastAhead - 0.5
     lastAhead = cachedAhead
