@@ -57,10 +57,20 @@ async function fetchPage(url: string, cookie?: string): Promise<FetchedPage> {
     const res = await fetch(url, opts as RequestInit)
     return { status: res.status, body: await res.text() }
   } catch (e) {
-    // 原始报错只有一句 "fetch failed"，根本没法排查，把 cause 带出来
+    // 原始报错只有一句 "fetch failed"，根本没法排查，把 cause 带出来。
+    // 必须用 createError 而不是裸 Error：裸 Error 会被 h3 归成 500 +「internal server error」，
+    // statusMessage 到不了前端，界面上只剩一句 Internal Server Error，等于什么都没说。
     const err = e as Error & { cause?: { code?: string; message?: string } }
-    const cause = err.cause?.code || err.cause?.message || ''
-    throw new Error(cause ? `${err.message} (${cause})` : err.message)
+    const code = err.cause?.code || ''
+    const detail = code || err.cause?.message || err.message
+    // 连不上/超时/DNS 失败，本地开发最常见的原因就是 Node 不走系统代理（见 CLAUDE.md「本地开发注意」）
+    const unreachable = /TIMEOUT|ENOTFOUND|ECONNREFUSED|EAI_AGAIN|ECONNRESET|CERT/i.test(detail)
+    throw createError({
+      statusCode: 502,
+      statusMessage: unreachable
+        ? `服务端连不上 ${hostOf(url)}（${detail}）。本地开发请先设 HTTPS_PROXY 再起 dev；线上则是源站不可达`
+        : `抓取失败：${detail}`,
+    })
   }
 }
 
