@@ -49,9 +49,13 @@ export function useVideoProxy(opts: VideoProxyOptions) {
   const getProxyUrl = (url: string): string => {
     if (url.includes('/api/proxy?')) return url
 
-    // 伪装下载器：不发送 Origin/Referer，全程走代理（禁用 noseg）
+    // 伪装下载器：不发送 Origin/Referer 走代理。
+    // manifestOnly 在这里同样生效——「代理 manifest 补 CORS + 分片直连 CDN」是真实存在的组合
+    // （manifest 无 ACAO 头 / mixed content，但分片 CDN 开放；或分片端口非标、代理反而打不通）。
     if (disguiseAsDownloader.value) {
+      if (manifestOnly.value && !isHlsUrl(url)) return url
       const params = new URLSearchParams({ url, noref: '1' })
+      if (manifestOnly.value) params.set('noseg', '1')
       return '/api/proxy?' + params.toString()
     }
 

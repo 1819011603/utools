@@ -74,7 +74,18 @@ export interface LearnedProfile {
   bestConcurrency?: number
   dualChannelHelped?: boolean
   stallHistory?: number[]   // 最近若干次会话的卡顿次数（滚动，用于趋势）
+  // 连接可达性探测结果（useReachabilityProbe.ProbeResult）。自带 at 时间戳，
+  // 与 updatedAt 分开——档位是长期经验，可达性会随源站策略/签名变化，需独立的短 TTL。
+  reach?: { at: number; [k: string]: any }
   updatedAt?: number
+}
+
+// 可达性缓存有效期：与服务端 headerModeCache 的 30 分钟对齐
+export const REACH_TTL = 30 * 60 * 1000
+
+export function isReachFresh(profile: LearnedProfile | null | undefined): boolean {
+  const at = profile?.reach?.at
+  return typeof at === 'number' && Date.now() - at < REACH_TTL
 }
 
 const LEARNED_KEY = 'video-player-learned-profiles'
@@ -130,10 +141,9 @@ export const BUILTIN_RULES: SiteRule[] = [
     id: 'jisuzyv',
     name: '极速资源 (jisuzyv)',
     pattern: 'jisuzyv.com',
-    // 该 CDN 分片直连易 502，走全程代理更稳；限制并发避免互相堵塞
-    useProxy: false,
-    manifestOnly: false,
-    disguiseAsDownloader: false,
+    // 该 CDN 并发一高就互相堵塞（502），只压并发。
+    // 可达性交给探测——这里若写死 useProxy/manifestOnly 等字段会让规则「接管可达性」、整站跳过探测，
+    // 反而拿不到最优组合与双通道。
     playbackConcurrency: 2,
     downloadConcurrency: 4,
   },

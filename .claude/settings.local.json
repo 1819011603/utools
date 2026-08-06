@@ -15,7 +15,10 @@
       "Bash(kill 1587)",
       "Bash(pkill -f \"nuxt dev\")",
       "Bash(curl -s -A \"Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\) AppleWebKit/537.36 Chrome/120 Safari/537.36\" \"https://www.ncat22.com/play/357213-41-4502531.html\" -o /tmp/ncat.html -w \"HTTP %{http_code} size %{size_download}\\\\n\")",
-      "Bash(curl -sS -m 20 -A \"Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\) AppleWebKit/537.36 Chrome/120 Safari/537.36\" \"https://www.ncat22.com/play/357213-41-4502531.html\" -o /tmp/ncat.html -w \"HTTP %{http_code} size %{size_download}\\\\n\")"
+      "Bash(curl -sS -m 20 -A \"Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\) AppleWebKit/537.36 Chrome/120 Safari/537.36\" \"https://www.ncat22.com/play/357213-41-4502531.html\" -o /tmp/ncat.html -w \"HTTP %{http_code} size %{size_download}\\\\n\")",
+      "Bash(timeout 70 '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --headless=new --disable-gpu --no-sandbox --virtual-time-budget=15000 --dump-dom http://localhost:3000/__synctest.html)",
+      "Read(//private/tmp/**)",
+      "Bash(\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless=new --disable-gpu --no-sandbox --user-data-dir=/tmp/cprof --virtual-time-budget=60000 --dump-dom 'http://localhost:3000/__probe-test')"
     ],
     "ask": [
       "Bash(rm *)",

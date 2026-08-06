@@ -39,13 +39,13 @@
           <UCheckbox v-model="autoBestRate" label="自动最佳倍速（≥1x，按带宽提速不卡）" @change="saveState" />
         </div>
 
-        <!-- 连接策略：全自动（直连→代理→防盗链自动升级），可展开手动覆盖 -->
+        <!-- 连接策略：起播前实测探测「清单 / 分片」两轴各自能走哪条通道，可展开手动覆盖 -->
         <div class="flex gap-2 flex-wrap items-center text-sm">
-          <UBadge :color="manualStrategyOverride ? 'amber' : 'sky'" variant="soft" size="xs">
+          <UBadge :color="manualStrategyOverride ? 'amber' : (isProbing ? 'gray' : 'sky')" variant="soft" size="xs">
             连接策略：{{ strategyLabel }}
           </UBadge>
           <span class="text-xs text-gray-400">
-            {{ manualStrategyOverride ? '你已手动调整，改任一项即生效；点“恢复自动”交回引擎' : '直连/代理/防盗链由播放器自动选择，改任一项即转手动' }}
+            {{ manualStrategyOverride ? '你已手动调整，改任一项即生效；点“恢复自动”交回引擎' : '清单与分片各自实测直连/代理是否可达，改任一项即转手动' }}
           </span>
           <button v-if="manualStrategyOverride" class="text-xs text-violet-500 hover:text-violet-700" @click="resetToAuto">
             恢复自动
@@ -86,7 +86,7 @@
               v-model="manifestOnly"
               label="仅代理 Manifest"
               :disabled="manifestOnlyDisabled"
-              :title="manifestOnlyDisabled ? 'Origin/Referer 均为空时该选项只能解决 CORS 问题，解决不了防盗链 403' : ''"
+              :title="manifestOnlyDisabled ? '需先启用代理（伪装下载器或注入 Origin/Referer），否则代理不介入，此项无效' : '代理 manifest 补 CORS/绕防盗链，分片仍直连 CDN（更快、省服务器流量）'"
               @change="onManualProxyChange"
             />
           </UFormGroup>
@@ -95,10 +95,40 @@
               v-model="dualChannel"
               label="直连+代理双通道"
               :disabled="dualChannelUnavailable"
-              :title="dualChannelUnavailable ? '需直连可达才有效：走代理/注入头/伪装时直连通道会 403' : '分片在直连 CDN 与本站代理两个 origin 间分流，把并发从 6 提到 ~12（代价：占用服务器出口流量）'"
+              :title="dualChannelHint"
               @change="saveState"
             />
           </UFormGroup>
+
+          <!-- 可达性探测矩阵：排查源站为什么走这条路（✓ 通 / ✗ 不通 / ? 超时未判定）-->
+          <div v-if="probeRows.length" class="w-full pt-2 border-t border-gray-200 dark:border-gray-700">
+            <div class="flex items-center gap-2 mb-1.5">
+              <span class="text-xs font-medium text-gray-500 dark:text-gray-400">可达性探测</span>
+              <button class="text-xs text-violet-500 hover:text-violet-700" :disabled="isProbing" @click="reprobeNow">
+                {{ isProbing ? '探测中…' : '重新探测' }}
+              </button>
+            </div>
+            <div class="space-y-1">
+              <div v-for="row in probeRows" :key="row.name" class="flex items-center gap-2 text-xs">
+                <span class="w-8 text-gray-500 dark:text-gray-400">{{ row.name }}</span>
+                <span
+                  v-for="cell in row.cells"
+                  :key="cell.channel"
+                  class="px-1.5 py-0.5 rounded font-mono"
+                  :class="{
+                    'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300': cell.reach === 'ok',
+                    'bg-red-100 text-red-600 dark:bg-red-900/40 dark:text-red-300': cell.reach === 'fail',
+                    'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300': cell.reach === 'unknown',
+                    'bg-gray-100 text-gray-400 dark:bg-gray-700 dark:text-gray-500': cell.reach === 'skip',
+                  }"
+                  :title="cell.reach === 'unknown' ? '超时，未判定' : (cell.reach === 'skip' ? '未探测：已有更优通道可用' : '')"
+                >
+                  {{ cell.reach === 'ok' ? '✓' : cell.reach === 'fail' ? '✗' : cell.reach === 'unknown' ? '?' : '–' }} {{ cell.label }}
+                  <span v-if="cell.ms" class="opacity-60">{{ cell.ms }}ms</span>
+                </span>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- 片头片尾跳过设置 -->
@@ -181,6 +211,30 @@
           :multiple="true"
           @files="handleLocalFiles"
         />
+
+        <!-- URL 参数直链说明 -->
+        <div class="flex items-center gap-3 flex-wrap">
+          <details class="text-xs text-gray-500 dark:text-gray-400 flex-1 min-w-64">
+            <summary class="cursor-pointer hover:text-violet-500">URL 参数直链（地址栏双向同步，打开即播）</summary>
+            <div class="mt-2 space-y-1 pl-4">
+              <p><code>?url=</code> 视频地址，可重复传多个组成播放列表；<code>?urls=a|b</code> 一次传多个</p>
+              <p><code>&amp;index=1</code> 起播第几个（0 基）</p>
+              <p><code>&amp;origin=</code> <code>&amp;referer=</code> 注入防盗链头；<code>&amp;proxy=1</code> 全程代理；<code>&amp;noref=1</code> 伪装下载器；<code>&amp;manifestOnly=1</code> 仅代理 Manifest</p>
+              <p class="text-gray-400">
+                视频地址自带的 <code>?token=x&amp;sign=y</code> 无需编码，未识别的参数会自动接回视频地址；
+                若地址自带的参数名与本页参数重名，请用 <code>encodeURIComponent</code> 整串编码。
+              </p>
+              <p class="text-gray-400">
+                反向也成立：点「解析并播放」、切集、改手动连接策略后，地址栏会自动更新成对应直链（本地文件除外），复制即可分享。
+              </p>
+              <p class="break-all text-gray-400">例：<code>{{ sampleDeepLink }}</code></p>
+            </div>
+          </details>
+          <UButton size="xs" variant="soft" :color="deepLinkCopied ? 'green' : 'gray'" @click="copyDeepLink">
+            <UIcon :name="deepLinkCopied ? 'i-heroicons-check' : 'i-heroicons-link'" class="w-4 h-4 mr-1" />
+            {{ deepLinkCopied ? '已复制' : '复制当前直链' }}
+          </UButton>
+        </div>
 
         <!-- 示例链接 -->
         <div class="flex flex-wrap gap-2">
@@ -364,7 +418,7 @@
         >
           <div class="flex flex-col items-center gap-2">
             <UIcon name="i-heroicons-arrow-path" class="w-12 h-12 text-white animate-spin" />
-            <span class="text-white text-sm">加载中...</span>
+            <span class="text-white text-sm">{{ isProbing ? '正在探测连接方式...' : '加载中...' }}</span>
           </div>
         </div>
 
@@ -908,12 +962,84 @@
 import type HlsType from 'hls.js'
 import { onClickOutside } from '@vueuse/core'
 import type { SiteRule, ServerTier, TierParams } from '~/composables/videoSiteRules'
+import type { ProbeResult, ConnConfig, AxisProbe } from '~/composables/useReachabilityProbe'
 
 // 动态导入 hls.js（避免 SSR 问题）
 let Hls: typeof HlsType | null = null
 
-// 路由
-const route = useRoute()
+// ── URL 参数直链：/video-player?url=xxx 打开即播 ──
+// 支持的本页参数：
+//   url            视频地址，可重复传多个组成播放列表（?url=a&url=b）
+//   urls           一次传多个，用 | 或换行分隔
+//   index          起播第几个（0 基）
+//   origin/referer 注入的防盗链头；proxy=1 全程代理；noref=1 伪装下载器；manifestOnly=0/1
+// 关键坑：视频地址自带 query（?token=1&sign=2）时，未编码的 & 会被路由拆成独立参数，
+// 直接读 route.query.url 只能拿到 sign 之前的部分。所以这里从原始 search 串手工解析：
+// 凡「不是本页已知参数」的片段，一律原样回写进最近的那个视频地址。
+const PAGE_QUERY_KEYS = new Set([
+  'url', 'urls', 'index', 'origin', 'referer', 'proxy', 'noref', 'manifestOnly',
+])
+
+interface QueryVideoParams {
+  urls: string[]
+  index?: number
+  origin?: string
+  referer?: string
+  proxy?: boolean
+  noref?: boolean
+  manifestOnly?: boolean
+}
+
+const parseQueryVideoParams = (): QueryVideoParams => {
+  const result: QueryVideoParams = { urls: [] }
+  const raw = (typeof window === 'undefined' ? '' : window.location.search).replace(/^\?/, '')
+  if (!raw) return result
+
+  // 只做 percent 解码，不把 + 当空格：视频签名里常有裸 + 号，转成空格会直接 403
+  const dec = (v: string) => { try { return decodeURIComponent(v) } catch { return v } }
+  const isTrue = (v: string) => v === '' || v === '1' || v.toLowerCase() === 'true'
+  // 把「视频地址自带的 query 片段」接回最后一个地址
+  const appendToLastUrl = (part: string) => {
+    const i = result.urls.length - 1
+    if (i < 0) return
+    result.urls[i] += (result.urls[i].includes('?') ? '&' : '?') + part
+  }
+
+  for (const part of raw.split('&')) {
+    if (!part) continue
+    const eq = part.indexOf('=')
+    const key = eq === -1 ? part : part.slice(0, eq)
+    const val = eq === -1 ? '' : part.slice(eq + 1)
+
+    if (!PAGE_QUERY_KEYS.has(key)) {
+      appendToLastUrl(part)
+      continue
+    }
+
+    switch (key) {
+      case 'url': {
+        const u = dec(val).trim()
+        if (u) result.urls.push(u)
+        break
+      }
+      case 'urls':
+        dec(val).split(/[\n\r|]+/).map(s => s.trim()).filter(Boolean)
+          .forEach(u => result.urls.push(u))
+        break
+      case 'index': {
+        const n = Number.parseInt(dec(val), 10)
+        if (Number.isFinite(n)) result.index = n
+        break
+      }
+      case 'origin': result.origin = dec(val).trim(); break
+      case 'referer': result.referer = dec(val).trim(); break
+      case 'proxy': result.proxy = isTrue(val); break
+      case 'noref': result.noref = isTrue(val); break
+      case 'manifestOnly': result.manifestOnly = isTrue(val); break
+    }
+  }
+  return result
+}
 
 // 本地存储 key
 const STORAGE_KEY = 'video-player-state'
@@ -1015,15 +1141,31 @@ const dualChannel = ref(false)  // 直连+代理双通道：分片在「直连 C
 const { isHlsUrl, effectiveReferer, refererHelp, getProxyUrl, getProxyPassthroughUrl, isDirectMode } = useVideoProxy({
   requestOrigin, requestReferer, manifestOnly, disguiseAsDownloader, useProxy,
 })
-// 「仅代理 Manifest」只解决 CORS 问题，解决不了防盗链 403；Origin/Referer 都为空时禁用，避免误勾了没用的选项
-const manifestOnlyDisabled = computed(() => !requestOrigin.value.trim() && !requestReferer.value.trim())
-// 双通道需要「分片直连可达」才有分流的直连 lane。跟 getProxyUrl 对分片(.ts)的判定保持一致：
-//   伪装 → 全代理；注入头 → 仅 manifestOnly 时分片才直连；否则看 useProxy。分片非直连时置灰。
+// 「仅代理 Manifest」需要代理确实介入才有意义：伪装模式下它表示「代理 manifest 补 CORS + 分片直连」，
+// 注入头模式下表示「manifest 走防盗链 + 分片直连」。两者都没有时代理压根不会介入，勾了无效 → 禁用。
+const manifestOnlyDisabled = computed(() =>
+  !disguiseAsDownloader.value && !requestOrigin.value.trim() && !requestReferer.value.trim())
+// 双通道需要分片「直连」和「经代理」两条路都通。有探测结果就用实测，否则按当前配置推断。
 const dualChannelUnavailable = computed(() => {
-  if (disguiseAsDownloader.value) return true
+  const r = probeResult.value
+  if (r && !r.degraded) return !(r.segment.direct === 'ok' && r.segment.disguise === 'ok')
+  // 无探测数据（手动/规则/兜底阶梯）：跟 getProxyUrl 对分片(.ts)的判定保持一致——
+  // 分片走代理时直连 lane 必 403/CORS，没有分流可言。
+  if (disguiseAsDownloader.value) return !manifestOnly.value
   const hasHeaders = !!requestOrigin.value.trim() || !!requestReferer.value.trim()
   if (hasHeaders) return !manifestOnly.value
   return useProxy.value
+})
+const dualChannelHint = computed(() => {
+  if (!dualChannelUnavailable.value) {
+    return '分片在直连 CDN 与本站代理两个 origin 间分流，把并发从 6 提到 ~12（代价：占用服务器出口流量）'
+  }
+  const r = probeResult.value
+  if (r && !r.degraded) {
+    if (r.segment.direct !== 'ok') return '实测分片无法直连（须走代理）→ 直连通道会失败'
+    return '实测分片无法经代理获取（如源站端口非标被 CF 吞、服务器 IP 被封）→ 代理通道会失败'
+  }
+  return '需分片直连可达才有效：分片走代理时直连通道会 403'
 })
 // 聚合下载速度（估算）= 单连接实测速度 × 当前并发。perConnKBps 是当前并发下的实测值，
 // 故乘积能反映「加并发到底换没换来更多总带宽」：双通道真生效则随 6→12 翻倍，被 per-IP 限死则基本不变。
@@ -1343,6 +1485,21 @@ const exampleUrls = [
   { name: 'Tears of Steel (MP4)', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4' }
 ]
 
+// 直链示例（说明区展示用）
+const sampleDeepLink = '/video-player?url=https://cdn.example.com/a.m3u8?token=abc&sign=def&referer=https://example.com/'
+
+// 复制当前直链：地址栏已被 syncUrlToQuery 同步成直链，直接取 location.href
+const deepLinkCopied = ref(false)
+const copyDeepLink = async () => {
+  try {
+    await navigator.clipboard.writeText(window.location.href)
+    deepLinkCopied.value = true
+    setTimeout(() => { deepLinkCopied.value = false }, 1500)
+  } catch {
+    errorMessage.value = '复制失败，请手动复制地址栏'
+  }
+}
+
 // 控制栏隐藏定时器
 let controlsTimer: ReturnType<typeof setTimeout> | null = null
 let playIconTimer: ReturnType<typeof setTimeout> | null = null
@@ -1410,31 +1567,74 @@ const { isDownloading, downloadProgress, downloadVideo, cancelDownload } = useVi
   getDownloadConcurrency: () => activeRule.value?.downloadConcurrency ?? 6,
 })
 
+// ── 反向同步：把当前播放列表/策略写回地址栏，地址栏本身就是可分享的直链 ──
+// 用原生 history.replaceState 而非 router.replace：本页只从 window.location.search 读参数，
+// 不经 vue-router，避免 query 变化触发路由重解析；replace 也不会污染后退栈。
+const syncUrlToQuery = () => {
+  if (typeof window === 'undefined') return
+
+  const urls = playlist.value
+  // 本地文件是 blob: 地址，换个浏览器/刷新就失效，没法用链接表达 → 清空 query 而不是写进去
+  // 放行 //host/path（parseAndLoad 也接受这种协议相对写法）
+  const shareable = urls.length > 0 && urls.every(u => /^(https?:)?\/\//i.test(u))
+  const parts: string[] = []
+
+  if (shareable) {
+    // 多个地址用 urls=a|b 而不是重复 url=，省地址栏长度
+    parts.push(urls.length === 1
+      ? 'url=' + encodeURIComponent(urls[0])
+      : 'urls=' + urls.map(u => encodeURIComponent(u)).join('|'))
+    if (currentIndex.value > 0) parts.push('index=' + currentIndex.value)
+    // 只写手动策略：自动阶梯是引擎实时试探的，写进地址栏会把中间态固化，下次进来反而绕远
+    if (manualStrategyOverride.value) {
+      if (requestOrigin.value.trim()) parts.push('origin=' + encodeURIComponent(requestOrigin.value.trim()))
+      if (requestReferer.value.trim()) parts.push('referer=' + encodeURIComponent(requestReferer.value.trim()))
+      if (useProxy.value) parts.push('proxy=1')
+      if (disguiseAsDownloader.value) parts.push('noref=1')
+      parts.push('manifestOnly=' + (manifestOnly.value ? '1' : '0'))
+    }
+  }
+
+  let search = parts.length ? '?' + parts.join('&') : ''
+  // 长播放列表会把地址栏顶爆（部分浏览器 2000 字符上界）→ 退化成只带当前这一集
+  if (search.length > 2000 && shareable) {
+    const cur = urls[Math.min(Math.max(currentIndex.value, 0), urls.length - 1)]
+    search = '?url=' + encodeURIComponent(cur)
+  }
+
+  if (window.location.search === search) return
+  window.history.replaceState(window.history.state, '', window.location.pathname + search + window.location.hash)
+}
+
 // 解析多行输入并加载
-const parseAndLoad = async () => {
+// startIndex 只由代码调用时传（?index=N）；模板里当事件回调用，首参是 Event，故做类型判断
+const parseAndLoad = async (startIndex?: number | Event) => {
   const input = videoUrlInput.value.trim()
   if (!input) return
-  
+
   // 按换行符分割，过滤空行
   const urls = input
     .split(/[\n\r]+/)
     .map(line => line.trim())
     .filter(line => line.length > 0 && (line.startsWith('http') || line.startsWith('//')))
-  
+
   if (urls.length === 0) {
     errorMessage.value = '未找到有效的视频链接'
     return
   }
-  
+
   // 设置播放列表
   playlist.value = urls
-  currentIndex.value = 0
-  
+  const from = typeof startIndex === 'number' && startIndex >= 0 && startIndex < urls.length
+    ? startIndex
+    : 0
+  currentIndex.value = from
+
   // 保存状态
   saveState()
-  
-  // 播放第一个
-  await playByIndex(0)
+
+  // 播放指定集（默认第一个）
+  await playByIndex(from)
 }
 
 // 按索引播放
@@ -1449,10 +1649,11 @@ const playByIndex = async (index: number) => {
   
   // 重置片头跳过标记
   hasSkippedIntro.value = false
-  
+
   // 保存状态
   saveState()
-  
+  syncUrlToQuery()   // 地址栏跟着当前集数走，随时可复制分享
+
   // 切换集数时标记需要自动播放（MP4 在 onCanPlay 中触发，HLS 在 MANIFEST_PARSED 中已有）
   isRestoringFromSaved.value = true
   
@@ -1484,6 +1685,7 @@ const clearPlaylist = () => {
   playlist.value = []
   currentIndex.value = 0
   videoUrlInput.value = ''
+  syncUrlToQuery()
 }
 
 // 加载视频
@@ -1518,10 +1720,19 @@ const markDataReceived = () => {
   clearLoadTimeout()
 }
 
-// ── 自动可达性策略阶梯（用户无需指定代理/防盗链，引擎自己试）──
-// step 0 直连 → 1 代理+伪装(不发头) → 2 代理+注入 Origin/Referer(防盗链)
+// ── 自动可达性：起播前实测探测两轴（manifest / 分片），见 useReachabilityProbe ──
+// 过去是「直连 → 失败重载 → 代理 → 失败重载 → 代理+防盗链」的线性盲试，两个毛病：
+// 一是把 manifest 和分片当成一个维度（它们常在不同 host，CORS/防盗链/端口各自独立），
+// 二是靠失败反应式升级，最多黑屏重载 3 次。现在改成起播前几个小请求把矩阵测出来，一次到位。
+const probeResult = ref<ProbeResult | null>(null)
+const isProbing = ref(false)
+let probeSeq = 0              // 竞态守卫：连点/切集时只认最后一次探测
+let reprobedFor = ''          // 该地址是否已因加载失败重探过（避免无限重探）
+
+// 线性阶梯只保留为「探测拿不到结论」（断网/全超时）时的兜底
 const autoStrategyStep = ref(0)
-const MAX_STRATEGY_STEP = 2
+const MAX_STRATEGY_STEP = 3
+const ladderMode = ref(false)
 let lastStrategyUrl = ''
 
 // 规则是否显式接管可达性（任一代理相关字段有值）；有则用规则，跳过自动阶梯
@@ -1529,24 +1740,104 @@ const ruleControlsReachability = (r: SiteRule | null): boolean =>
   !!r && (r.useProxy !== undefined || r.manifestOnly !== undefined ||
     r.disguiseAsDownloader !== undefined || r.origin !== undefined || r.referer !== undefined)
 
-// 应用阶梯第 step 级配置（写回 ref，getProxyUrl 随即生效）
+// 应用阶梯第 step 级配置（写回 ref，getProxyUrl 随即生效）。
+// 每一级都必须把四个 ref 全写一遍——漏写任何一个都会让上一级的残留值改变本级语义
+// （典型：忘了关 manifestOnly，「全程代理」就悄悄变成「分片直连」）。
+const STRATEGY_STEP_LABELS = ['直连', '代理清单·分片直连', '代理·伪装', '代理·防盗链']
 const applyReachabilityStep = (step: number) => {
   let host = ''
   try { host = new URL(videoUrl.value.startsWith('//') ? 'https:' + videoUrl.value : videoUrl.value).origin } catch {}
-  if (step <= 0) {                     // 直连：最快，CORS 开放站点直接用（manifestOnly 也要关，否则会去代理 manifest）
-    useProxy.value = false; disguiseAsDownloader.value = false
+  useProxy.value = false
+  if (step <= 0) {                     // 直连：最快，CORS 开放站点直接用
+    disguiseAsDownloader.value = false
     requestOrigin.value = ''; requestReferer.value = ''; manifestOnly.value = false
-  } else if (step === 1) {             // 代理+伪装：服务端补 CORS、不发 Origin/Referer
-    useProxy.value = false; disguiseAsDownloader.value = true
-    requestOrigin.value = ''; requestReferer.value = ''
+  } else if (step === 1) {             // 代理 manifest 补 CORS，分片仍直连 CDN（比全代理快得多）
+    disguiseAsDownloader.value = true
+    requestOrigin.value = ''; requestReferer.value = ''; manifestOnly.value = true
+  } else if (step === 2) {             // 代理+伪装全程：服务端补 CORS、不发 Origin/Referer
+    disguiseAsDownloader.value = true
+    requestOrigin.value = ''; requestReferer.value = ''; manifestOnly.value = false
   } else {                             // 代理+注入 Origin/Referer：防盗链站点，全程代理
-    useProxy.value = false; disguiseAsDownloader.value = false
+    disguiseAsDownloader.value = false
     requestOrigin.value = host; requestReferer.value = host ? host + '/' : ''; manifestOnly.value = false
   }
 }
 
-// 决定本次加载策略：换新地址重置阶梯；规则接管则用规则，否则走自动阶梯
-const applyStrategy = (url: string) => {
+// 探测结论 → 写回连接 ref（getProxyUrl 随即生效）
+const applyConnConfig = (cfg: ConnConfig) => {
+  useProxy.value = false
+  disguiseAsDownloader.value = cfg.disguiseAsDownloader
+  requestOrigin.value = cfg.requestOrigin
+  requestReferer.value = cfg.requestReferer
+  manifestOnly.value = cfg.manifestOnly
+  dualChannel.value = cfg.dualChannel
+}
+// 连接配置指纹：后台复验时用来判断「结论有没有变」，没变就绝不动 ref（连接策略只在加载时生效，
+// 播放中改它只会让 UI 和实际请求对不上）
+const connSignature = (c: ConnConfig) =>
+  [c.disguiseAsDownloader, c.requestOrigin, c.requestReferer, c.manifestOnly, c.dualChannel].join('|')
+const currentConnSignature = () =>
+  [disguiseAsDownloader.value, requestOrigin.value, requestReferer.value, manifestOnly.value, dualChannel.value].join('|')
+
+const selfOriginOf = (url: string): string => {
+  try { return new URL(url.startsWith('//') ? 'https:' + url : url).origin } catch { return '' }
+}
+// blob:/file: 是本地资源，没有可达性可言，一律跳过探测
+const isProbeable = (url: string): boolean => /^https?:\/\//i.test(url) || url.startsWith('//')
+
+// 跑一次探测并套用结论。返回结果；没结论（degraded）时落回线性阶梯兜底。
+const runProbe = async (url: string, blocking: boolean): Promise<ProbeResult | null> => {
+  const seq = ++probeSeq
+  if (blocking) isProbing.value = true
+  try {
+    const r = await probeReachability(url)
+    if (seq !== probeSeq) return null            // 已被更新的一次探测取代，丢弃
+    probeResult.value = r
+    saveLearnedProfile(hostOf(url), { reach: r as any })
+    const cfg = resolveConnConfig(r, selfOriginOf(url))
+    if (cfg) {
+      ladderMode.value = false
+      applyConnConfig(cfg)
+      console.log('可达性探测:', describeProbe(r), r)
+    } else {
+      ladderMode.value = true                     // 三条路都没测通 → 交回阶梯继续盲试
+      applyReachabilityStep(autoStrategyStep.value)
+      console.warn('可达性探测无结论，退回线性阶梯', r)
+    }
+    return r
+  } catch (e) {
+    console.error('可达性探测异常:', e)
+    ladderMode.value = true
+    applyReachabilityStep(autoStrategyStep.value)
+    return null
+  } finally {
+    if (seq === probeSeq) isProbing.value = false
+  }
+}
+
+// 命中缓存时的后台静默复验：结论一致就什么都不做，变了才提示 + 重载一次。
+// 每个 host 一轮会话只复验一次——否则「复验 → 重载 → 又命中刚写的缓存 → 又复验」会白跑一圈。
+const revalidatedHosts = new Set<string>()
+const revalidateInBackground = (url: string) => {
+  const host = hostOf(url)
+  if (revalidatedHosts.has(host)) return
+  revalidatedHosts.add(host)
+  probeReachability(url).then(r => {
+    if (videoUrl.value.trim() !== url) return     // 用户已切走
+    probeResult.value = r
+    saveLearnedProfile(hostOf(url), { reach: r as any })
+    const cfg = resolveConnConfig(r, selfOriginOf(url))
+    if (!cfg || connSignature(cfg) === currentConnSignature()) return
+    console.log('连接方式已变化，重新套用:', describeProbe(r))
+    applyConnConfig(cfg)
+    useToast().add({ title: '连接方式已更新', description: describeProbe(r), color: 'blue', timeout: 2500 })
+    loadVideo()
+  }).catch(() => {})
+}
+
+// 决定本次加载策略。同步部分（规则/档位记忆）总是跑；可达性部分可能 await 探测。
+// 优先级不变：手动 > 站点规则 > 自动探测。
+const applyStrategy = async (url: string) => {
   const rule = matchSiteRule(url, userSiteRules.value)
   activeRule.value = rule
   // 按 host 记忆：auto 模式下用学到的档位起步（第二遍即最优，不再从冷启动乐观值试探）
@@ -1556,7 +1847,13 @@ const applyStrategy = (url: string) => {
   guardRateCeiling.value = Infinity   // 新流解除上一流的降速守卫
   // 双通道：规则可指定；手动模式保留用户当前设置（dualChannel 与可达性无关，单独套用）
   if (!manualStrategyOverride.value && rule?.dualChannel !== undefined) dualChannel.value = rule.dualChannel
-  if (url !== lastStrategyUrl) { autoStrategyStep.value = 0; lastStrategyUrl = url }
+  if (url !== lastStrategyUrl) {
+    autoStrategyStep.value = 0
+    ladderMode.value = false
+    reprobedFor = ''
+    probeResult.value = null
+    lastStrategyUrl = url
+  }
   if (manualStrategyOverride.value) return  // 手动模式：保留用户当前代理设置，不自动改
   if (ruleControlsReachability(rule)) {
     if (rule!.useProxy !== undefined) useProxy.value = rule!.useProxy
@@ -1564,19 +1861,45 @@ const applyStrategy = (url: string) => {
     if (rule!.disguiseAsDownloader !== undefined) disguiseAsDownloader.value = rule!.disguiseAsDownloader
     if (rule!.origin !== undefined) requestOrigin.value = rule!.origin
     if (rule!.referer !== undefined) requestReferer.value = rule!.referer
-  } else {
-    applyReachabilityStep(autoStrategyStep.value)
+    return
   }
+  if (ladderMode.value || !isProbeable(url)) {
+    applyReachabilityStep(autoStrategyStep.value)
+    return
+  }
+  // 缓存新鲜（同 host 30 分钟内探过）→ 直接套用秒起播，后台静默复验；
+  // 否则阻塞探一次，一步到位，不做「先播再重载」的抖动。
+  const cached = isReachFresh(learned) ? (learned!.reach as unknown as ProbeResult) : null
+  if (cached) {
+    probeResult.value = cached
+    const cfg = resolveConnConfig(cached, selfOriginOf(url))
+    if (cfg) {
+      applyConnConfig(cfg)
+      revalidateInBackground(url)
+      return
+    }
+  }
+  await runProbe(url, true)
 }
 
-// 当前策略加载失败时，自动升级到下一级并重载（规则接管或已到顶则不再升级）
+// 加载失败时的恢复：先重探一次（结论可能过期，比如签名换了 / 源站改策略），
+// 重探还救不回来才退回线性阶梯继续盲试。
 const escalateStrategyAndReload = (): boolean => {
   if (manualStrategyOverride.value) return false
   if (ruleControlsReachability(activeRule.value)) return false
+  const url = videoUrl.value.trim()
+  if (url && isProbeable(url) && !ladderMode.value && reprobedFor !== url) {
+    reprobedFor = url
+    console.log('加载失败，重新探测连接方式')
+    errorMessage.value = '加载失败，正在重新探测连接方式...'
+    runProbe(url, true).then(() => loadVideo())
+    return true
+  }
   if (autoStrategyStep.value >= MAX_STRATEGY_STEP) return false
+  ladderMode.value = true
   autoStrategyStep.value++
-  console.log('当前策略加载失败，自动升级可达性 → step', autoStrategyStep.value)
-  errorMessage.value = `直连失败，正在自动尝试${autoStrategyStep.value === 1 ? '代理' : '代理+防盗链'}...`
+  console.log('探测未能救回，退回线性阶梯 → step', autoStrategyStep.value)
+  errorMessage.value = `正在自动尝试「${STRATEGY_STEP_LABELS[autoStrategyStep.value]}」...`
   loadVideo()
   return true
 }
@@ -1585,7 +1908,27 @@ const escalateStrategyAndReload = (): boolean => {
 const strategyLabel = computed(() => {
   if (manualStrategyOverride.value) return '手动'
   if (ruleControlsReachability(activeRule.value)) return `规则(${activeRule.value?.name})`
-  return ['直连', '代理·伪装', '代理·防盗链'][autoStrategyStep.value] ?? '直连'
+  if (isProbing.value) return '探测中…'
+  if (probeResult.value && !probeResult.value.degraded) return describeProbe(probeResult.value)
+  return STRATEGY_STEP_LABELS[autoStrategyStep.value] ?? '直连'
+})
+
+// 探测矩阵读数（展开设置里展示，排查源站用）
+const probeRows = computed(() => {
+  const r = probeResult.value
+  if (!r) return []
+  const axes: Array<{ name: string; axis: AxisProbe }> = r.isHls
+    ? [{ name: '清单', axis: r.manifest }, { name: '分片', axis: r.segment }]
+    : [{ name: '视频', axis: r.segment }]
+  return axes.map(({ name, axis }) => ({
+    name,
+    cells: CHANNEL_ORDER.map(c => ({
+      channel: c,
+      label: CHANNEL_LABEL[c],
+      reach: axis[c],
+      ms: axis.ms[c],
+    })),
+  }))
 })
 
 // 用户改动任一连接设置 → 转手动（引擎不再覆盖可达性；并发/预取仍全自动）
@@ -1595,16 +1938,62 @@ const onManualProxyChange = () => {
   manualStrategyOverride.value = true
   rememberHeaders()   // 记住本次 Origin/Referer 供下拉复用
   saveState()
+  syncUrlToQuery()    // 手动策略要能随链接带走
   if (videoUrl.value) loadVideo()
 }
 
-// 交回引擎全自动
+// 交回引擎全自动：顺带作废该 host 的可达性缓存，强制重探一次
+// （用户点这个按钮多半就是因为觉得当前选择不对）
 const resetToAuto = () => {
   manualStrategyOverride.value = false
   autoStrategyStep.value = 0
+  ladderMode.value = false
+  reprobedFor = ''
+  probeResult.value = null
+  lastStrategyUrl = ''
+  if (currentHost.value) {
+    saveLearnedProfile(currentHost.value, { reach: undefined })
+    revalidatedHosts.delete(currentHost.value)
+  }
   saveState()
+  syncUrlToQuery()    // 策略参数从地址栏摘掉
   if (videoUrl.value) loadVideo()
 }
+
+// 手动重探（作废缓存，重新实测一遍并按结论重载）
+const reprobeNow = async () => {
+  const url = videoUrl.value.trim()
+  if (!url || !isProbeable(url) || isProbing.value) return
+  ladderMode.value = false
+  reprobedFor = ''
+  const before = currentConnSignature()
+  await runProbe(url, true)
+  if (currentConnSignature() !== before) loadVideo()
+}
+
+// __TEMP_VERIFY__ 临时验证钩子（验完删除）
+if (typeof window !== 'undefined' && location.search.includes('__verify=1')) {
+  onMounted(() => {
+    const snap = () => JSON.stringify({
+      strategyLabel: strategyLabel.value,
+      isProbing: isProbing.value,
+      probe: probeResult.value && {
+        manifest: probeResult.value.manifest, segment: probeResult.value.segment,
+        manCh: probeResult.value.manifestChannel, segCh: probeResult.value.segmentChannel,
+        dual: probeResult.value.dualChannel, degraded: probeResult.value.degraded,
+      },
+      refs: { disguise: disguiseAsDownloader.value, origin: requestOrigin.value, manifestOnly: manifestOnly.value, dualChannel: dualChannel.value, useProxy: useProxy.value },
+      dualUnavailable: dualChannelUnavailable.value,
+      isVideoLoaded: isVideoLoaded.value, errorMessage: errorMessage.value,
+      duration: duration.value, currentTime: currentTime.value, isPlaying: isPlaying.value,
+      buffered: bufferedPercent.value, prefetch: prefetchInfo.value,
+      sampleLaneUrls: probeResult.value?.segmentUrl ? getLaneUrlsForVerify(probeResult.value.segmentUrl) : null,
+    }, null, 1)
+    setTimeout(() => { fetch('http://127.0.0.1:8899/result', { method: 'POST', mode: 'no-cors', body: snap() }).catch(() => {}) }, 20000)
+  })
+}
+const getLaneUrlsForVerify = (u: string) =>
+  dualChannel.value && isDirectMode(u) ? [u, getProxyPassthroughUrl(u)] : [getProxyUrl(u)]
 
 // 内置规则（只读展示用）
 const builtinRules = BUILTIN_RULES
@@ -1642,14 +2031,18 @@ const loadVideo = async () => {
   isVideoLoaded.value = true
   isLocalFile.value = false  // URL 加载不是本地文件
   destroyHls()
-  
-  // 启动加载超时检测
-  startLoadTimeout()
-  
+
   const url = videoUrl.value.trim()
   // 按视频切换缓存：同一视频（重播/点回去）保留内存缓存，换了视频才清空旧的
   useCacheForVideo(url)
-  applyStrategy(url)  // 自动决定直连/代理/防盗链 + 站点规则并发
+  // 可达性探测可能阻塞（首访该 host 时约 0.5-3s）——必须在 startLoadTimeout 之前 await，
+  // 否则探测耗时会被算进加载超时，慢源直接被误判成「加载超时」。
+  await applyStrategy(url)
+  if (videoUrl.value.trim() !== url) return   // 探测期间用户切了地址 → 放弃本次加载
+
+  // 启动加载超时检测
+  startLoadTimeout()
+
   isHls.value = isHlsUrl(url)
 
   console.log('开始加载视频:', url, '是否HLS:', isHls.value, '使用代理:', useProxy.value, '站点规则:', activeRule.value?.name ?? '无')
@@ -2010,7 +2403,8 @@ const handleLocalFiles = async (files: File[]) => {
   
   playlist.value = urls
   currentIndex.value = 0
-  
+  syncUrlToQuery()   // blob 地址没法分享：清掉地址栏上一个直链的残留参数
+
   // 播放第一个
   isLoading.value = true
   videoUrl.value = videoFiles[0].name
@@ -2563,6 +2957,9 @@ onMounted(async () => {
   userSiteRules.value = loadUserSiteRules()
   loadHeaderHistory()
 
+  // URL 参数优先于本地存储：外部直链打开时不该被上次的地址/播放列表覆盖
+  const queryParams = parseQueryVideoParams()
+
   // 加载保存的状态
   const savedState = loadSavedState()
   if (savedState) {
@@ -2589,21 +2986,33 @@ onMounted(async () => {
     if (savedState.tierOverrides) tierOverrides.value = { ...savedState.tierOverrides }
 
     // 如果没有 URL 参数，恢复保存的视频地址
-    const urlParam = route.query.url as string
-    if (!urlParam && savedState.videoUrlInput) {
+    if (!queryParams.urls.length && savedState.videoUrlInput) {
       videoUrlInput.value = savedState.videoUrlInput
       playlist.value = savedState.playlist || []
       currentIndex.value = savedState.currentIndex ?? 0
     }
   }
-  
+
   // 检查 URL 参数，支持 ?url=xxx 直接播放
-  const urlParam = route.query.url as string
-  if (urlParam) {
-    console.log('从 URL 参数加载视频:', urlParam)
-    videoUrlInput.value = urlParam
+  if (queryParams.urls.length) {
+    console.log('从 URL 参数加载视频:', queryParams)
+    videoUrlInput.value = queryParams.urls.join('\n')
+    // 连接策略随参数一起带过来时转手动，避免自动阶梯把注入的 Origin/Referer 冲掉
+    const hasStrategyParam = queryParams.origin !== undefined || queryParams.referer !== undefined
+      || queryParams.proxy !== undefined || queryParams.noref !== undefined
+      || queryParams.manifestOnly !== undefined
+    if (hasStrategyParam) {
+      if (queryParams.origin !== undefined) requestOrigin.value = queryParams.origin
+      if (queryParams.referer !== undefined) requestReferer.value = queryParams.referer
+      if (queryParams.proxy !== undefined) useProxy.value = queryParams.proxy
+      if (queryParams.noref !== undefined) disguiseAsDownloader.value = queryParams.noref
+      if (queryParams.manifestOnly !== undefined) manifestOnly.value = queryParams.manifestOnly
+      manualStrategyOverride.value = true
+      showAdvancedProxy.value = true
+    }
     await nextTick()
-    parseAndLoad()
+    // playByIndex 内部会置 isRestoringFromSaved，直链进来即自动起播
+    await parseAndLoad(queryParams.index)
   } else if (savedState?.playlist?.length) {
     // 刷新后恢复：有保存的播放列表且为 URL 链接（非本地 blob），自动加载并播放
     const idx = savedState.currentIndex ?? 0
