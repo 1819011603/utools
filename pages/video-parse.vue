@@ -255,53 +255,6 @@ const parseHistory = ref(getHistory())
 
 const formatWhen = (ts: number) => new Date(ts).toLocaleString('zh-CN', { hour12: false })
 
-const callResolve = (step: string, cookie: string, line?: number, offset?: number) =>
-  $fetch<any>('/api/resolve', {
-    query: {
-      step,
-      url: inputUrl.value.trim(),
-      ...(cookie ? { cookie } : {}),
-      ...(line !== undefined ? { line } : {}),
-      ...(offset ? { offset } : {}),
-      ...(userRules.value.length ? { rules: JSON.stringify(userRules.value) } : {}),
-    },
-  })
-
-// 续拉轮数上限：单批 40 集，20 轮足够 800 集，纯粹防死循环
-const MAX_BATCHES = 20
-
-/**
- * 长剧要分多批才拉得完（单请求的子请求数有上限）。
- * 首批回来后，只要 remaining > 0 就继续带 offset 拉下一批，把地址合并进已有结构。
- */
-const fetchRemainingBatches = async (first: ParseResult, cookie: string, line?: number) => {
-  const lineIdx = first.activeLineIndex
-  const episodes = first.lines[lineIdx]?.episodes ?? []
-  const total = episodes.length
-  let next = first
-
-  for (let round = 0; round < MAX_BATCHES && next.remaining > 0; round++) {
-    stage.value = `正在解析选集 ${next.batchTo}/${total}…`
-    const batch: ParseResult = await callResolve('extract', cookie, line, next.batchTo)
-
-    // 每批返回的都是完整选集结构，但只有本批那几集带 videoUrl，按下标合并进来
-    const got = batch.lines[batch.activeLineIndex]?.episodes ?? []
-    for (let i = batch.batchFrom; i < batch.batchTo && i < total; i++) {
-      if (!got[i]) continue
-      episodes[i].videoUrl = got[i].videoUrl
-      episodes[i].error = got[i].error
-    }
-
-    next = batch
-    // 触发重渲染：改的是嵌套数组元素，Vue 3 的深层响应能覆盖，这里只更新进度字段
-    result.value = { ...first, batchTo: batch.batchTo, remaining: batch.remaining }
-  }
-
-  if (next.remaining > 0) {
-    toast.add({ title: `已解析 ${next.batchTo}/${total} 集`, description: '剩余集数过多，已停在安全上限', color: 'orange' })
-  }
-}
-
 const startResolve = async (line?: number) => {
   const url = inputUrl.value.trim()
   if (!url || busy.value) return
@@ -312,24 +265,22 @@ const startResolve = async (line?: number) => {
   stage.value = '正在获取页面…'
 
   try {
-    let res = await callResolve(powCookie.value ? 'extract' : 'challenge', powCookie.value, line)
+    // 工作量证明 + 分批续拉都在 useResolvePlaylist 里，与播放器的「刷新链接」共用同一套
+    const { result: res, cookie } = await resolvePlaylist({
+      pageUrl: url,
+      line,
+      cookie: powCookie.value,
+      rules: userRules.value,
+      onStage: t => { stage.value = t },
+      onPow: n => { powTried.value = n },
+    })
+    powCookie.value = cookie
+    result.value = res
 
-    // 站点要求先过工作量证明 → 本地算 nonce 再重试
-    if (res?.needPow) {
-      stage.value = '正在计算站点校验…'
-      const pow = await solvePow(res.c, res.n1, res.target, {
-        onProgress: n => { powTried.value = n },
-      })
-      powCookie.value = pow.cookie
-      stage.value = `校验通过（${pow.tried} 次 / ${pow.ms}ms），正在解析选集…`
-      res = await callResolve('extract', pow.cookie, line)
-    } else {
-      stage.value = '正在解析选集…'
+    if (res.remaining > 0) {
+      const total = res.lines[res.activeLineIndex]?.episodes.length ?? 0
+      toast.add({ title: `已解析 ${res.batchTo}/${total} 集`, description: '剩余集数过多，已停在安全上限', color: 'orange' })
     }
-
-    result.value = res as ParseResult
-    // 首批只覆盖前 40 集，长剧要继续把后面的批次拉完
-    if (res.remaining > 0) await fetchRemainingBatches(res as ParseResult, powCookie.value, line)
 
     // 换了片子就把上一部的死线路记录清掉（线路序号只在同一部片子里有意义）
     if (res.pageUrl !== lastParsedUrl.value) {
@@ -448,7 +399,13 @@ const playAll = (startIndex = 0) => {
   // （短列表的地址仍走 urls=，那样的链接可以直接复制给别人；交接槽是本机 localStorage，分享不了）
   let handoffOk = true
   try {
-    localStorage.setItem(HANDOFF_KEY, JSON.stringify({ urls, names, index: idx, at: Date.now() }))
+    // 剧名一起带过去，播放器用它顶掉「播放器」「播放列表」这两个泛标题；
+    // source 让播放器能在链接过期时就地重新解析（带签名的地址活不久）
+    const title = result.value?.title
+    const source = result.value
+      ? { pageUrl: result.value.pageUrl, line: result.value.activeLineIndex }
+      : undefined
+    localStorage.setItem(HANDOFF_KEY, JSON.stringify({ urls, names, title, source, index: idx, at: Date.now() }))
   } catch (e) {
     handoffOk = false
     console.error('写入播放列表交接槽失败:', e)

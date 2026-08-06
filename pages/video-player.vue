@@ -166,59 +166,70 @@
         <!-- 播放列表 -->
         <div v-if="playlist.length > 1" class="space-y-2">
           <div class="flex items-center justify-between">
-            <span class="text-sm font-medium text-gray-700 dark:text-gray-300">播放列表</span>
+            <span class="text-sm font-medium text-gray-700 dark:text-gray-300 truncate">
+              {{ playlistTitle || '播放列表' }}
+              <span v-if="playlistTitle" class="font-normal text-gray-400">· 共 {{ playlist.length }} 集</span>
+            </span>
             <div class="flex gap-2">
+              <!-- 带签名的地址会过期，用交接槽里的来源就地重解析，不用回解析页 -->
+              <UButton
+                v-if="playlistSource"
+                size="xs"
+                variant="soft"
+                color="violet"
+                icon="i-heroicons-arrow-path"
+                :loading="isRefreshingLinks"
+                title="链接过期播不了时，用同一来源和线路重新解析并替换"
+                @click="refreshPlaylistLinks"
+              >
+                刷新链接
+              </UButton>
               <UButton size="xs" variant="soft" @click="clearAllProgress">清除进度</UButton>
               <UButton size="xs" variant="ghost" color="red" @click="clearPlaylist">清空列表</UButton>
             </div>
           </div>
-          <div class="max-h-40 overflow-y-auto space-y-1 p-2 bg-gray-50 dark:bg-gray-800 rounded-lg">
-            <div
-              v-for="(item, index) in playlist"
-              :key="index"
-              class="flex items-center gap-2 p-2 rounded cursor-pointer transition-colors text-sm group/item"
-              :class="index === currentIndex ? 'bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300' : 'hover:bg-gray-100 dark:hover:bg-gray-700'"
-              @click="playByIndex(index)"
-            >
-              <UIcon 
-                :name="index === currentIndex && isPlaying ? 'i-heroicons-speaker-wave' : 'i-heroicons-play'" 
-                class="w-4 h-4 shrink-0"
-              />
-              <span class="flex-1 truncate">{{ getVideoName(item, index) }}</span>
-              <span v-if="getSavedProgress(item) > 0" class="text-xs text-gray-400">
-                {{ formatTime(getSavedProgress(item)) }}
-              </span>
-              <button
-                v-if="item.startsWith('http') && !isDownloading"
-                class="opacity-0 group-hover/item:opacity-100 p-1 rounded hover:bg-violet-500/30 transition-all shrink-0"
-                title="下载"
-                @click.stop="downloadVideo(item)"
+          <!-- 网格排布：几十集竖着列要滚很久，横着摆一眼能扫到目标集 -->
+          <div class="max-h-64 overflow-y-auto p-2 bg-gray-50 dark:bg-gray-800 rounded-lg">
+            <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2">
+              <div
+                v-for="(item, index) in playlist"
+                :key="index"
+                class="relative group/item rounded cursor-pointer transition-colors text-sm text-center px-2 py-2 truncate"
+                :class="[
+                  index === currentIndex
+                    ? 'bg-violet-500 text-white font-medium'
+                    : 'bg-white dark:bg-gray-700 hover:bg-violet-100 dark:hover:bg-gray-600',
+                  // 看过的（有进度记录）标成琥珀色，跟没看过的区分开
+                  index !== currentIndex && getSavedProgress(item) > 0
+                    ? 'text-amber-600 dark:text-amber-400'
+                    : '',
+                ]"
+                :title="getSavedProgress(item) > 0
+                  ? `${getVideoName(item, index)}（看到 ${formatTime(getSavedProgress(item))}）`
+                  : getVideoName(item, index)"
+                @click="playByIndex(index)"
               >
-                <UIcon name="i-heroicons-arrow-down-tray" class="w-4 h-4" />
-              </button>
-              <UBadge v-if="index === currentIndex" color="violet" variant="soft" size="xs">当前</UBadge>
+                <UIcon
+                  v-if="index === currentIndex && isPlaying"
+                  name="i-heroicons-speaker-wave"
+                  class="w-3.5 h-3.5 inline-block mr-1 align-text-bottom"
+                />
+                {{ getVideoName(item, index) }}
+                <!-- 下载按钮压在右上角，hover 才出现，免得占掉格子宽度 -->
+                <button
+                  v-if="item.startsWith('http') && !isDownloading"
+                  class="absolute -top-1 -right-1 opacity-0 group-hover/item:opacity-100 p-1 rounded-full bg-violet-500 text-white shadow transition-opacity"
+                  title="下载这一集"
+                  @click.stop="downloadVideo(item)"
+                >
+                  <UIcon name="i-heroicons-arrow-down-tray" class="w-3 h-3 block" />
+                </button>
+              </div>
             </div>
           </div>
         </div>
 
-        <!-- URL 参数直链说明 -->
-        <div class="flex items-center gap-3 flex-wrap">
-          <details class="text-xs text-gray-500 dark:text-gray-400 flex-1 min-w-64">
-            <summary class="cursor-pointer hover:text-violet-500">URL 参数直链（地址栏双向同步，打开即播）</summary>
-            <div class="mt-2 space-y-1 pl-4">
-              <p><code>?url=</code> 视频地址，可重复传多个组成播放列表；<code>?urls=a|b</code> 一次传多个</p>
-              <p><code>&amp;index=1</code> 起播第几个（0 基）</p>
-              <p><code>&amp;origin=</code> <code>&amp;referer=</code> 注入防盗链头；<code>&amp;proxy=1</code> 全程代理；<code>&amp;noref=1</code> 伪装下载器；<code>&amp;manifestOnly=1</code> 仅代理 Manifest</p>
-              <p class="text-gray-400">
-                视频地址自带的 <code>?token=x&amp;sign=y</code> 无需编码，未识别的参数会自动接回视频地址；
-                若地址自带的参数名与本页参数重名，请用 <code>encodeURIComponent</code> 整串编码。
-              </p>
-              <p class="text-gray-400">
-                反向也成立：点「解析并播放」、切集、改手动连接策略后，地址栏会自动更新成对应直链（本地文件除外），复制即可分享。
-              </p>
-              <p class="break-all text-gray-400">例：<code>{{ sampleDeepLink }}</code></p>
-            </div>
-          </details>
+        <div class="flex justify-end">
           <UButton size="xs" variant="soft" :color="deepLinkCopied ? 'green' : 'gray'" @click="copyDeepLink">
             <UIcon :name="deepLinkCopied ? 'i-heroicons-check' : 'i-heroicons-link'" class="w-4 h-4 mr-1" />
             {{ deepLinkCopied ? '已复制' : '复制当前直链' }}
@@ -241,112 +252,17 @@
       </div>
     </UCard>
 
-    <!-- 站点规则 -->
-    <UCard>
-      <template #header>
-        <div class="flex items-center justify-between">
-          <div class="flex items-center gap-2">
-            <UIcon name="i-heroicons-adjustments-horizontal" class="w-5 h-5 text-sky-500" />
-            <span class="font-semibold">站点规则</span>
-            <UBadge v-if="activeRule" color="green" variant="soft" size="xs">
-              已套用：{{ activeRule.name }}
-            </UBadge>
-          </div>
-          <div class="flex gap-2">
-            <UButton size="xs" variant="soft" icon="i-heroicons-plus" @click="addSiteRule">添加规则</UButton>
-            <UButton size="xs" color="primary" variant="soft" icon="i-heroicons-check" @click="applyRulesAndReload">保存并应用</UButton>
-          </div>
-        </div>
-      </template>
-
-      <div class="space-y-4">
-        <p class="text-xs text-gray-500 dark:text-gray-400">
-          按视频域名自动套用一套代理/防盗链/并发配置，解决部分站点播放慢或 403 的问题。
-          匹配用 <code>host 子串</code> 或 <code>/正则/</code>；用户规则优先于内置规则。
-        </p>
-
-        <!-- 用户自定义规则 -->
-        <div v-if="userSiteRules.length" class="space-y-3">
-          <div
-            v-for="rule in userSiteRules"
-            :key="rule.id"
-            class="p-3 rounded-lg border border-gray-200 dark:border-gray-700 space-y-2"
-          >
-            <div class="flex gap-2 items-end flex-wrap">
-              <UFormGroup label="规则名" class="w-40">
-                <UInput v-model="rule.name" size="xs" @change="applyRulesAndReload" />
-              </UFormGroup>
-              <UFormGroup label="匹配 (host 或 /正则/)" class="flex-1 min-w-48">
-                <UInput v-model="rule.pattern" size="xs" placeholder="jisuzyv.com" @change="applyRulesAndReload" />
-              </UFormGroup>
-              <UButton size="xs" color="red" variant="ghost" icon="i-heroicons-trash" @click="removeSiteRule(rule.id)" />
-            </div>
-            <div class="flex gap-4 flex-wrap items-center text-xs">
-              <UCheckbox v-model="rule.useProxy" label="跨域代理" @change="applyRulesAndReload" />
-              <UCheckbox
-                v-model="rule.manifestOnly"
-                label="仅代理 Manifest"
-                :disabled="!rule.origin?.trim() && !rule.referer?.trim()"
-                :title="(!rule.origin?.trim() && !rule.referer?.trim()) ? 'Origin/Referer 均为空时该选项只能解决 CORS 问题，解决不了防盗链 403' : ''"
-                @change="applyRulesAndReload"
-              />
-              <UCheckbox v-model="rule.disguiseAsDownloader" label="伪装下载器" @change="applyRulesAndReload" />
-              <UCheckbox
-                v-model="rule.dualChannel"
-                label="直连+代理双通道"
-                title="分片在直连 CDN 与本站代理两个 origin 间分流，把并发从 6 提到 ~12（仅直连可达的源有效）"
-                @change="applyRulesAndReload"
-              />
-              <div class="flex items-center gap-1">
-                <span class="text-gray-500">服务器档位</span>
-                <USelect
-                  v-model="rule.serverTier"
-                  :options="serverTierOptions"
-                  value-attribute="value"
-                  option-attribute="label"
-                  size="xs"
-                  class="w-20"
-                  placeholder="自动"
-                  title="好=单连接就够（低并发）；中=单连接慢但可并行（多线程）；差=带宽硬顶（双通道+快跳片）；自动=按实测分档"
-                  @change="applyRulesAndReload"
-                />
-              </div>
-              <div class="flex items-center gap-1">
-                <span class="text-gray-500">预取并发</span>
-                <UInput v-model.number="rule.playbackConcurrency" type="number" :min="1" :max="3" size="xs" class="w-16" @change="applyRulesAndReload" />
-              </div>
-              <div class="flex items-center gap-1">
-                <span class="text-gray-500">下载并发</span>
-                <UInput v-model.number="rule.downloadConcurrency" type="number" :min="1" :max="16" size="xs" class="w-16" @change="applyRulesAndReload" />
-              </div>
-            </div>
-            <div class="flex gap-2 flex-wrap">
-              <UInput v-model="rule.origin" size="xs" placeholder="Origin（可选）" class="flex-1 min-w-40" @change="applyRulesAndReload" />
-              <UInput v-model="rule.referer" size="xs" placeholder="Referer（可选）" class="flex-1 min-w-40" @change="applyRulesAndReload" />
-            </div>
-          </div>
-        </div>
-        <p v-else class="text-sm text-gray-400">暂无自定义规则，点击「添加规则」新建。</p>
-
-        <!-- 内置规则（只读参考） -->
-        <div class="pt-2 border-t border-gray-200 dark:border-gray-700">
-          <span class="text-xs text-gray-500">内置规则：</span>
-          <div class="flex flex-wrap gap-2 mt-1">
-            <UBadge v-for="r in builtinRules" :key="r.id" color="gray" variant="soft" size="xs">
-              {{ r.name }} · {{ r.pattern }}
-            </UBadge>
-          </div>
-        </div>
-      </div>
-    </UCard>
-
     <!-- 播放器 -->
     <UCard v-if="isVideoLoaded" class="overflow-hidden">
       <template #header>
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-2">
             <UIcon name="i-heroicons-play-circle" class="w-5 h-5 text-emerald-500" />
-            <span class="font-semibold">播放器</span>
+            <!-- 解析页会把剧名一起带过来（交接槽的 title），有就顶掉「播放器」这个泛标题 -->
+            <span class="font-semibold truncate">{{ playlistTitle || '播放器' }}</span>
+            <UBadge v-if="playlistTitle && playlist.length > 1" color="violet" variant="soft" size="xs">
+              {{ getVideoName(videoUrl, currentIndex) }}
+            </UBadge>
             <UBadge :color="isHls ? 'violet' : 'blue'" variant="soft" size="xs">
               {{ isHls ? 'HLS/M3U8' : 'MP4' }}
             </UBadge>
@@ -382,7 +298,7 @@
           :key="videoKey"
           class="max-w-full max-h-full"
           :class="isFullscreen ? 'w-auto h-full' : 'w-full aspect-video'"
-          :crossorigin="isLocalFile ? undefined : 'anonymous'"
+          crossorigin="anonymous"
           playsinline
           @timeupdate="onTimeUpdate"
           @loadedmetadata="onLoadedMetadata"
@@ -979,9 +895,18 @@ const HANDOFF_TTL = 24 * 60 * 60 * 1000
 interface HandoffPayload {
   urls: string[]
   names?: string[]   // 集名（「第 12 集」这类），与 urls 同下标；解析页知道，光看 URL 猜不出来
+  title?: string     // 剧名，同理
+  // 来源：解析页地址 + 线路序号。带签名的地址会过期，靠这个能就地重新解析换新链接
+  source?: { pageUrl: string; line: number }
   index?: number
   at: number
 }
+
+// 剧名，来自交接槽。播放器和播放列表的标题位都用它顶掉泛称。
+const playlistTitle = ref('')
+// 播放列表的来源，有值才显示「刷新链接」
+const playlistSource = ref<{ pageUrl: string; line: number } | null>(null)
+const isRefreshingLinks = ref(false)
 
 // 播放列表的显示名，来自交接槽；查不到时 getVideoName 退回从 URL 猜文件名。
 // 长剧每一集的地址都叫 index.m3u8，光看文件名分不清第几集。
@@ -1017,7 +942,9 @@ const writeHandoff = (urls: string[], index: number) => {
     // 名字要一起写回去，否则本页每次同步地址栏都会把交接槽里的集名冲掉
     const picked = urls.map(u => playlistNames.value[u] ?? '')
     const names = picked.every(Boolean) ? picked : undefined
-    localStorage.setItem(HANDOFF_KEY, JSON.stringify({ urls, names, index, at: Date.now() } as HandoffPayload))
+    const title = playlistTitle.value || undefined
+    const source = playlistSource.value ?? undefined
+    localStorage.setItem(HANDOFF_KEY, JSON.stringify({ urls, names, title, source, index, at: Date.now() } as HandoffPayload))
   } catch (e) {
     console.error('写入播放列表交接槽失败:', e)
   }
@@ -1086,6 +1013,8 @@ const parseQueryVideoParams = (): QueryVideoParams => {
         if (!p) break
         p.urls.forEach(u => result.urls.push(u))
         setPlaylistNames(p.urls, p.names)
+        if (p.title) playlistTitle.value = p.title
+        if (p.source) playlistSource.value = p.source
         // ?index= 若显式给了以它为准，所以只在没给时才用槽里的
         if (result.index === undefined && Number.isFinite(p.index)) result.index = p.index
         break
@@ -1099,6 +1028,8 @@ const parseQueryVideoParams = (): QueryVideoParams => {
     const p = readHandoff()
     if (p && p.urls.length === result.urls.length && p.urls.every((u, i) => u === result.urls[i])) {
       setPlaylistNames(p.urls, p.names)
+      if (p.title) playlistTitle.value = p.title
+      if (p.source) playlistSource.value = p.source
     }
   }
 
@@ -1176,7 +1107,7 @@ const saveState = () => {
 
 // 保存当前视频进度
 const saveCurrentProgress = () => {
-  if (videoUrl.value && currentTime.value > 0 && !isLocalFile.value) {
+  if (videoUrl.value && currentTime.value > 0) {
     savedProgress.value[videoUrl.value] = currentTime.value
     saveState()
   }
@@ -1192,7 +1123,6 @@ const videoUrl = ref('')
 const videoUrlInput = ref('')  // 多行输入
 const isVideoLoaded = ref(false)
 const isHls = ref(false)
-const isLocalFile = ref(false)
 const errorMessage = ref('')
 const isLoading = ref(false)
 const useProxy = ref(false)
@@ -1235,8 +1165,8 @@ const dualChannelHint = computed(() => {
 // 故乘积能反映「加并发到底换没换来更多总带宽」：双通道真生效则随 6→12 翻倍，被 per-IP 限死则基本不变。
 const aggregateKBps = computed(() => Math.round(strategy.value.perConnKBps * strategy.value.targetConn))
 const aggregateMbps = computed(() => Math.round((aggregateKBps.value * 8 / 1024) * 10) / 10)
-// 站点规则：用户自定义规则 + 当前 URL 命中的规则（供代理/预取/下载并发读取）
-const userSiteRules = ref<SiteRule[]>([])
+// 当前 URL 命中的内置站点规则（供代理/预取/下载并发和档位读取）。
+// 自定义规则的编辑界面已移除，这里只吃 videoSiteRules.ts 里的内置表。
 const activeRule = ref<SiteRule | null>(null)
 
 // ── 服务器档位（好/中/差）+ 抗卡自愈 ──
@@ -1549,8 +1479,6 @@ const exampleUrls = [
   { name: 'Tears of Steel (MP4)', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4' }
 ]
 
-// 直链示例（说明区展示用）
-const sampleDeepLink = '/video-player?url=https://cdn.example.com/a.m3u8?token=abc&sign=def&referer=https://example.com/'
 
 // 复制当前直链：地址栏已被 syncUrlToQuery 同步成直链，直接取 location.href
 const deepLinkCopied = ref(false)
@@ -1616,9 +1544,9 @@ const getVideoName = (url: string, index: number): string => {
   return `视频 ${index + 1}`
 }
 
-// 是否可下载（仅网络视频，本地文件无需下载）
+// 是否可下载（仅网络视频）
 const canDownload = computed(() => 
-  isVideoLoaded.value && !isLocalFile.value && videoUrl.value && (videoUrl.value.startsWith('http') || videoUrl.value.startsWith('//'))
+  isVideoLoaded.value && videoUrl.value && (videoUrl.value.startsWith('http') || videoUrl.value.startsWith('//'))
 )
 
 // 视频下载（HLS 分片并发+AES解密+ffmpeg合并 / MP4 直下），逻辑抽到 useVideoDownload
@@ -1751,9 +1679,65 @@ const clearAllProgress = () => {
 }
 
 // 清空播放列表
+/**
+ * 就地重新解析当前播放列表，换成新链接。
+ *
+ * 动机：部分线路给的是带签名的地址（`?sign=…&timestamp=…`），过一阵会失效，
+ * 表现为好好播着突然 403。此时不必回解析页重来一遍，用交接槽里带过来的
+ * 「源页面地址 + 线路」原地重解析即可。
+ *
+ * 三个要点：
+ *   · 按集名认当前集，不按下标——重解析后可能多出或少掉几集，下标会错位
+ *   · 播放进度是按 URL 存的，地址一换就查不到了，所以要手动搬到新地址上
+ *   · 只有当前这一集需要重载；其余集的新地址进列表即可，切过去时自然生效
+ */
+const refreshPlaylistLinks = async () => {
+  const src = playlistSource.value
+  if (!src || isRefreshingLinks.value) return
+
+  isRefreshingLinks.value = true
+  const toast = useToast()
+  try {
+    const { result } = await resolvePlaylist({ pageUrl: src.pageUrl, line: src.line })
+    const { urls, names } = toPlaylist(result)
+    if (!urls.length) throw new Error('没有解析出可播放的地址')
+
+    // 认名字而不是下标：集数可能变了
+    const curUrl = playlist.value[currentIndex.value] ?? ''
+    const curName = playlistNames.value[curUrl] ?? ''
+    const hit = curName ? names.indexOf(curName) : -1
+    const nextIndex = hit >= 0 ? hit : Math.min(currentIndex.value, urls.length - 1)
+
+    // 进度按 URL 存，换地址等于丢进度 → 先把当前时间搬到新地址上，
+    // 后面 loadVideo 里的 getSavedProgress 就能原位续播
+    const pos = videoEl.value?.currentTime ?? currentTime.value
+    if (pos > 0) savedProgress.value[urls[nextIndex]] = pos
+
+    playlist.value = urls
+    setPlaylistNames(urls, names)
+    if (result.title) playlistTitle.value = result.title
+    currentIndex.value = nextIndex
+
+    videoUrl.value = urls[nextIndex]
+    isRestoringFromSaved.value = true
+    saveState()
+    syncUrlToQuery()
+    await loadVideo()
+
+    toast.add({ title: `已刷新 ${urls.length} 集的链接`, color: 'green', timeout: 2500 })
+  } catch (e: any) {
+    const msg = e?.statusMessage || e?.data?.statusMessage || e?.message || '刷新失败'
+    toast.add({ title: '刷新链接失败', description: msg, color: 'red' })
+  } finally {
+    isRefreshingLinks.value = false
+  }
+}
+
 const clearPlaylist = () => {
   playlist.value = []
   playlistNames.value = {}
+  playlistTitle.value = ''
+  playlistSource.value = null
   currentIndex.value = 0
   videoUrlInput.value = ''
   syncUrlToQuery()
@@ -1909,7 +1893,7 @@ const revalidateInBackground = (url: string) => {
 // 决定本次加载策略。同步部分（规则/档位记忆）总是跑；可达性部分可能 await 探测。
 // 优先级不变：手动 > 站点规则 > 自动探测。
 const applyStrategy = async (url: string) => {
-  const rule = matchSiteRule(url, userSiteRules.value)
+  const rule = matchSiteRule(url)
   activeRule.value = rule
   // 按 host 记忆：auto 模式下用学到的档位起步（第二遍即最优，不再从冷启动乐观值试探）
   currentHost.value = hostOf(url)
@@ -2042,24 +2026,6 @@ const reprobeNow = async () => {
   if (currentConnSignature() !== before) loadVideo()
 }
 
-// 内置规则（只读展示用）
-const builtinRules = BUILTIN_RULES
-
-// 站点规则编辑
-const addSiteRule = () => {
-  userSiteRules.value.push({ id: `u-${Date.now()}`, name: '新规则', pattern: '', manifestOnly: false })
-}
-const removeSiteRule = (id: string) => {
-  userSiteRules.value = userSiteRules.value.filter(r => r.id !== id)
-  saveUserSiteRules(userSiteRules.value)
-}
-// 保存规则并对当前视频重新套用（若正在播放则重载）
-const applyRulesAndReload = () => {
-  saveUserSiteRules(userSiteRules.value)
-  if (videoUrl.value) loadVideo()
-  else useToast().add({ title: '站点规则已保存', color: 'green', timeout: 2000 })
-}
-
 const loadVideo = async () => {
   if (!videoUrl.value.trim()) return
 
@@ -2076,7 +2042,6 @@ const loadVideo = async () => {
   videoKey.value++
   
   isVideoLoaded.value = true
-  isLocalFile.value = false  // URL 加载不是本地文件
   destroyHls()
 
   const url = videoUrl.value.trim()
@@ -2417,57 +2382,6 @@ const destroyHls = () => {
   stall.reset()
   guardRateCeiling.value = Infinity   // 解除抗卡降速守卫
   cancelDownload()
-}
-
-// 本地文件 URL 映射
-const localFileUrls = new Map<string, string>()
-
-// 处理本地文件（支持多选）
-const handleLocalFiles = async (files: File[]) => {
-  // 过滤掉 m3u8 文件
-  const videoFiles = files.filter(f => !f.name.endsWith('.m3u8'))
-  
-  if (videoFiles.length === 0) {
-    errorMessage.value = '本地 M3U8 文件需要通过 URL 加载，请使用视频地址输入'
-    return
-  }
-  
-  destroyHls()
-  errorMessage.value = ''
-  isLocalFile.value = true
-  
-  // 清理旧的 URL
-  localFileUrls.forEach(url => URL.revokeObjectURL(url))
-  localFileUrls.clear()
-  
-  // 创建播放列表
-  const urls: string[] = []
-  for (const file of videoFiles) {
-    const url = URL.createObjectURL(file)
-    localFileUrls.set(file.name, url)
-    urls.push(url)
-  }
-  
-  playlist.value = urls
-  currentIndex.value = 0
-  syncUrlToQuery()   // blob 地址没法分享：清掉地址栏上一个直链的残留参数
-
-  // 播放第一个
-  isLoading.value = true
-  videoUrl.value = videoFiles[0].name
-  isHls.value = false
-  isVideoLoaded.value = true
-  
-  await nextTick()
-  await new Promise(resolve => setTimeout(resolve, 50))
-  
-  if (videoEl.value) {
-    videoEl.value.src = urls[0]
-    videoEl.value.preload = 'auto'
-    videoEl.value.load()
-    console.log('本地文件已加载:', videoFiles[0].name)
-  }
-  isLoading.value = false
 }
 
 // 加载示例
@@ -3000,8 +2914,6 @@ onMounted(async () => {
   document.addEventListener('keydown', handleKeydown)
   document.addEventListener('fullscreenchange', handleFullscreenChange)
 
-  // 加载用户自定义站点规则 + Origin/Referer 历史
-  userSiteRules.value = loadUserSiteRules()
   loadHeaderHistory()
 
   // URL 参数优先于本地存储：外部直链打开时不该被上次的地址/播放列表覆盖
@@ -3094,10 +3006,6 @@ onUnmounted(() => {
   if (progressSaveTimer) clearTimeout(progressSaveTimer)
   if (delayedPlayTimer) clearTimeout(delayedPlayTimer)
   if (seekBufferingTimer) clearTimeout(seekBufferingTimer)
-  
-  // 清理本地文件 URL
-  localFileUrls.forEach(url => URL.revokeObjectURL(url))
-  localFileUrls.clear()
 })
 </script>
 

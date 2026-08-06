@@ -30,7 +30,7 @@ npm run deploy     # generate + wrangler pages deploy .output/public
 ```
 pages/          12 个工具页，一页一工具，逻辑基本自包含
 composables/    跨页复用的处理引擎（视频/PDF/GIF/TIFF/历史）
-components/     FileUpload（拖拽上传）、ColorModeButton
+components/     FileUpload（拖拽上传，播放器已不用，其余工具页仍在用）、ColorModeButton
 layouts/default.vue   侧边栏导航（新增页面需在此 + pages/index.vue 各登记一次）
 server/api/proxy.ts   唯一服务端接口：视频跨域/防盗链代理
 ```
@@ -46,7 +46,7 @@ server/api/proxy.ts   唯一服务端接口：视频跨域/防盗链代理
 | `image-convert.vue` | `/image-convert` | 格式互转（含 SVG 输入），Canvas 实现 |
 | `video-to-gif.vue` | `/video-to-gif` | 视频抽帧 → gif.js 编码，可选抖动算法/调色板（quantize）/帧率/裁剪 |
 | `audio-convert.vue` | `/audio-convert` | WebAudio 解码 + OfflineAudioContext 重采样，采样率/位深可调 |
-| `video-player.vue` | `/video-player` | M3U8/MP4 播放器，见下节（本项目最复杂的一页，105K） |
+| `video-player.vue` | `/video-player` | M3U8/MP4 播放器，见下节（本项目最复杂的一页） |
 | `video-parse.vue` | `/video-parse` | 粘贴视频站播放页地址 → 解析整季选集的真实 m3u8 → 一键送进播放器，见下节 |
 | `json-format.vue` | `/json-format` | 格式化 + 语法高亮 + 树形视图 + 智能解析（从任意文本里捞 JSON、递归去转义最多 3 层）+ 路径删除/撤销 |
 | `json-diff.vue` | `/json-diff` | 两份 JSON 差异对比，可指定字段做数组匹配键，差异分组排序可配 |
@@ -74,7 +74,8 @@ server/api/proxy.ts   唯一服务端接口：视频跨域/防盗链代理
 
 1. **自动可达性探测**（`composables/useReachabilityProbe.ts`）：起播前用几个小请求把
    **manifest 轴**和**分片轴**各自的可达性实测出来，再决策。取代了早先「直连→失败重载→代理→失败重载→代理+防盗链」的线性盲试。
-2. **站点规则**（`composables/videoSiteRules.ts`）：按 host 子串或 `/正则/` 匹配，内置 jisuzyv/xhscdn/huyall 三条，用户规则存 localStorage 且优先。
+2. **站点规则**（`composables/videoSiteRules.ts`）：按 host 子串或 `/正则/` 匹配，内置 jisuzyv/xhscdn/huyall 三条。
+   **只剩内置表**——用户自定义规则的编辑界面已移除（`matchSiteRule(url)` 不再传用户规则），加规则直接改这个文件。
    注意：规则里只要写了 `useProxy`/`manifestOnly`/`disguiseAsDownloader`/`origin`/`referer` 任一字段就算「接管可达性」，会整站跳过探测——只想调并发就别写这些字段。
 3. **手动**：用户改任一连接设置即置 `manualStrategyOverride`，引擎不再覆盖（改动必须 `loadVideo()` 重载——连接策略只在加载时生效）
 
@@ -149,7 +150,7 @@ manifest 不过代理就没法把分片指向代理）；**分片可直连 → m
 `onManualProxyChange` / `resetToAuto` 里调用，把当前播放列表 + 集数 + 手动策略写回地址栏。
 - 用原生 `history.replaceState` 而非 `router.replace`——本页只读 `window.location.search`，
   不经 vue-router，避免 query 变化触发路由重解析，也不污染后退栈
-- 本地文件是 `blob:` 地址，不可分享 → 清空 query 而不是写进去
+- 播放器已移除本地文件（拖拽上传）功能：只放网络地址，`crossorigin` 恒为 `anonymous`
 - 只写手动策略；自动阶梯是引擎实时试探的，固化中间态反而让下次进来绕远
 - 多个地址用 `urls=a|b` 省长度；超 2000 字符退化成只带当前这一集
 - 入向的非规范写法（未编码的 `&`）会在出向被自动规范成 percent 编码
@@ -198,6 +199,20 @@ ncat 系挂了 cdndefend：首访返回 **HTTP 850** + 挑战页，要求暴力�
 - **线路上的集数徽标不等于实际能解析的集数**：徽标是站点自报的 `source-item-num`，
   真实集数以解析出的 `episode-item` 锚点数为准（同一部片子各线路可能不同，实测 40 / 53 / 73 都有）
 
+### 刷新链接（就地重新解析）
+
+部分线路给的是带签名的地址（`?sign=…&timestamp=…`），过一阵会失效，表现为播着播着 403。
+播放列表上的「刷新链接」按钮用交接槽里的 `source`（源页面地址 + 线路序号）原地重解析并替换，不用回解析页。
+
+完整解析流程（工作量证明 + 分批续拉 + cookie 复用）抽在 `composables/useResolvePlaylist.ts`，
+`/video-parse` 和播放器共用同一份——两处各写一份必然漂移，尤其是分批合并那段，漏一轮会静默少几集。
+
+刷新时三个要点：
+- **按集名认当前集，不按下标**：重解析后集数可能变，下标会错位
+- **播放进度是按 URL 存的**，地址一换就查不到 → 先把 `currentTime` 搬到新地址的 `savedProgress` 上，
+  后面 `loadVideo` 里的 `getSavedProgress` 才能原位续播
+- 只需重载当前这一集；其余集的新地址进列表即可，切过去时自然生效
+
 ### 分批解析（长剧）
 
 单请求最多解析 40 集（`MAX_EPISODES`）——CF 免费版单请求 50 subrequest 硬顶，留出主页面那一发和余量。
@@ -218,7 +233,9 @@ ncat 系挂了 cdndefend：首访返回 **HTTP 850** + 挑战页，要求暴力�
 
 现改走 **localStorage 交接槽**（key `video-player-handoff`，槽由 `video-player.vue` 持有，任何页面都能当生产者）：
 
-- 载荷 `{ urls, names, index, at }`，TTL 1 天（防止半个月前的残留列表被翻出来）
+- 载荷 `{ urls, names, title, source, index, at }`，TTL 1 天（防止半个月前的残留列表被翻出来）
+- `title` 是剧名，播放器用它顶掉「播放器」「播放列表」这两个泛标题
+- `source` 是 `{ pageUrl, line }`，即解析来源。有它播放列表才显示「刷新链接」按钮
 - 长列表：video-parse 整份写槽 + 跳 `?handoff=1`；video-player 的 `syncUrlToQuery` 超长时也写槽并把地址栏收敛成 `?handoff=1`
   （比原来退化成单集更好：刷新后整个列表还在，因为 query 优先级高于 savedState）
 - 短列表：地址仍走 `urls=`（这样的链接能直接分享，交接槽是本机存储分享不了），
@@ -263,8 +280,7 @@ CF Pages 上没有这些变量，出口直连，不受影响。
 | key | 用途 |
 | --- | --- |
 | `video-player-state` | 播放器全量状态（地址/播放列表/进度/音量/倍速/代理设置/HLS 配置/档位覆盖） |
-| `video-player-site-rules` | 用户自定义站点规则 |
-| `video-parse-rules` | 用户自定义解析规则（`/video-parse`，与站点规则分开存，别混用） |
+| `video-parse-rules` | 用户自定义解析规则（`/video-parse`） |
 | `video-player-learned-profiles` | 按 host 学到的服务器档位 + 可达性探测结果（`reach`，TTL 30 分钟） |
 | `video-player-handoff` | 长播放列表交接槽 `{ urls, names, index, at }`，TTL 1 天，`/video-parse` → `/video-player` 传值 |
 | `video-player-origin-history` / `-referer-history` | Origin/Referer 输入历史（下拉复用） |
