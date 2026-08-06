@@ -125,12 +125,12 @@
         />
 
         <UAlert
-          v-if="result.truncated"
+          v-if="result.remaining > 0 && !busy"
           color="orange"
           variant="soft"
-          icon="i-heroicons-scissors"
-          :title="`本线路共 ${(currentLine?.episodes.length || 0)} 集，本次只解析了前 ${(currentLine?.episodes.length || 0) - result.truncated} 集`"
-          description="单次请求的子请求数有上限，剩余集数请切换线路后再解析或分批处理。"
+          icon="i-heroicons-exclamation-circle"
+          :title="`还有 ${result.remaining} 集未解析（共 ${currentLine?.episodes.length || 0} 集）`"
+          description="解析中断了，重新点「解析」可以继续。"
         />
 
         <UAlert
@@ -252,16 +252,52 @@ const parseHistory = ref(getHistory())
 
 const formatWhen = (ts: number) => new Date(ts).toLocaleString('zh-CN', { hour12: false })
 
-const callResolve = (step: string, cookie: string, line?: number) =>
+const callResolve = (step: string, cookie: string, line?: number, offset?: number) =>
   $fetch<any>('/api/resolve', {
     query: {
       step,
       url: inputUrl.value.trim(),
       ...(cookie ? { cookie } : {}),
       ...(line !== undefined ? { line } : {}),
+      ...(offset ? { offset } : {}),
       ...(userRules.value.length ? { rules: JSON.stringify(userRules.value) } : {}),
     },
   })
+
+// 续拉轮数上限：单批 40 集，20 轮足够 800 集，纯粹防死循环
+const MAX_BATCHES = 20
+
+/**
+ * 长剧要分多批才拉得完（单请求的子请求数有上限）。
+ * 首批回来后，只要 remaining > 0 就继续带 offset 拉下一批，把地址合并进已有结构。
+ */
+const fetchRemainingBatches = async (first: ParseResult, cookie: string, line?: number) => {
+  const lineIdx = first.activeLineIndex
+  const episodes = first.lines[lineIdx]?.episodes ?? []
+  const total = episodes.length
+  let next = first
+
+  for (let round = 0; round < MAX_BATCHES && next.remaining > 0; round++) {
+    stage.value = `正在解析选集 ${next.batchTo}/${total}…`
+    const batch: ParseResult = await callResolve('extract', cookie, line, next.batchTo)
+
+    // 每批返回的都是完整选集结构，但只有本批那几集带 videoUrl，按下标合并进来
+    const got = batch.lines[batch.activeLineIndex]?.episodes ?? []
+    for (let i = batch.batchFrom; i < batch.batchTo && i < total; i++) {
+      if (!got[i]) continue
+      episodes[i].videoUrl = got[i].videoUrl
+      episodes[i].error = got[i].error
+    }
+
+    next = batch
+    // 触发重渲染：改的是嵌套数组元素，Vue 3 的深层响应能覆盖，这里只更新进度字段
+    result.value = { ...first, batchTo: batch.batchTo, remaining: batch.remaining }
+  }
+
+  if (next.remaining > 0) {
+    toast.add({ title: `已解析 ${next.batchTo}/${total} 集`, description: '剩余集数过多，已停在安全上限', color: 'orange' })
+  }
+}
 
 const startResolve = async (line?: number) => {
   const url = inputUrl.value.trim()
@@ -289,6 +325,9 @@ const startResolve = async (line?: number) => {
     }
 
     result.value = res as ParseResult
+    // 首批只覆盖前 40 集，长剧要继续把后面的批次拉完
+    if (res.remaining > 0) await fetchRemainingBatches(res as ParseResult, powCookie.value, line)
+
     // 换了片子就把上一部的死线路记录清掉（线路序号只在同一部片子里有意义）
     if (res.pageUrl !== lastParsedUrl.value) {
       deadLines.value = new Set()

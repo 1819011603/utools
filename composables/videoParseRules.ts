@@ -136,7 +136,11 @@ export interface ParseResult {
   currentVideoUrl?: string
   lines: ParsedLine[]
   activeLineIndex: number
-  truncated?: number     // 因上限被丢弃的集数，>0 时前端要提示
+  // 分批解析：单请求有子请求上限，长剧要多批才拉得完。
+  // 前端拿到 remaining > 0 就带 offset=batchTo 继续请求下一批，把结果合并进来。
+  batchFrom: number
+  batchTo: number
+  remaining: number
   lineUnsupported?: boolean  // 该线路页面不给直链（src 渲染成空串），整条线路都取不到
   referer?: string
 }

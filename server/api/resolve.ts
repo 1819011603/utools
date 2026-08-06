@@ -22,8 +22,9 @@ import { getSiteDispatcher } from '../utils/siteFetch'
 // 与 proxy.ts:63 保持一致：源站普遍按 UA 做粗筛
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
 
-// 单次请求最多解析多少集。CF 免费版单请求 50 subrequest 硬顶，
-// 留出主页面那一发和余量，取 40。超出部分不静默丢弃，用 truncated 回报给前端。
+// 单次请求最多解析多少集。CF 免费版单请求 50 subrequest 硬顶，留出主页面那一发和余量，取 40。
+// 超出的不丢弃也不截断：用 offset 分批，前端拿到 remaining>0 就继续拉下一批，
+// 每批各自是一次独立请求，各自的 subrequest 预算互不叠加，所以多少集都能解析完。
 const MAX_EPISODES = 40
 // 解析各集的并发。太高会被源站限流，也更容易撞 CF 的并发子请求限制。
 const EPISODE_CONCURRENCY = 4
@@ -249,7 +250,10 @@ export default defineEventHandler(async (event): Promise<ParseResult | { needPow
     : (activeIndex >= 0 ? activeIndex : 0)
 
   const target = lines[targetIndex]
-  let truncated = 0
+  const offsetParam = query.offset !== undefined ? Number.parseInt(query.offset as string, 10) : 0
+  const offset = Number.isFinite(offsetParam) && offsetParam > 0 ? offsetParam : 0
+  let batchTo = offset
+  let remaining = 0
   let lineUnsupported = false
 
   if (target?.episodes.length) {
@@ -273,23 +277,29 @@ export default defineEventHandler(async (event): Promise<ParseResult | { needPow
       }
     }
 
-    let todo = target.episodes
-    if (todo.length > MAX_EPISODES) {
-      truncated = todo.length - MAX_EPISODES
-      todo = todo.slice(0, MAX_EPISODES)
-      console.log(`[resolve] ${host} 选集 ${target.episodes.length} 集超过上限，本次只解析前 ${MAX_EPISODES} 集`)
+    const todo = target.episodes.slice(offset, offset + MAX_EPISODES)
+    batchTo = offset + todo.length
+    remaining = target.episodes.length - batchTo
+    if (remaining > 0) {
+      console.log(`[resolve] ${host} 线路「${target.name}」共 ${target.episodes.length} 集，本批 ${offset}~${batchTo}，还剩 ${remaining} 集`)
     }
 
     // 有些线路（如「4K」）的页面把 playSource.src 渲染成空串，地址由前端运行时另取，
     // 服务端拿不到。这类线路整条都取不到，先探第一集，不行就立刻收工——
     // 否则要白白等完剩下几十集的请求才知道结果是空的。
-    await resolveOne(todo[0])
-    if (!todo[0].videoUrl) {
-      lineUnsupported = true
-      for (let i = 1; i < todo.length; i++) todo[i].error = '该线路未给出直链'
-      console.log(`[resolve] ${host} 线路「${target.name}」不提供直链，跳过其余 ${todo.length - 1} 集`)
+    // 只在第一批探：后续批次已经知道这条线路是好的，不必再多花一个来回。
+    if (offset === 0 && todo.length) {
+      await resolveOne(todo[0])
+      if (!todo[0].videoUrl) {
+        lineUnsupported = true
+        remaining = 0   // 整条线路都取不到，别让前端再去拉后续批次
+        for (let i = 1; i < todo.length; i++) todo[i].error = '该线路未给出直链'
+        console.log(`[resolve] ${host} 线路「${target.name}」不提供直链，跳过其余 ${target.episodes.length - 1} 集`)
+      } else {
+        await pool(todo.slice(1), EPISODE_CONCURRENCY, resolveOne)
+      }
     } else {
-      await pool(todo.slice(1), EPISODE_CONCURRENCY, resolveOne)
+      await pool(todo, EPISODE_CONCURRENCY, resolveOne)
     }
   }
 
@@ -302,7 +312,9 @@ export default defineEventHandler(async (event): Promise<ParseResult | { needPow
     currentVideoUrl,
     lines,
     activeLineIndex: targetIndex,
-    truncated: truncated || undefined,
+    batchFrom: offset,
+    batchTo,
+    remaining,
     lineUnsupported: lineUnsupported || undefined,
     referer: rule.referer,
   }
