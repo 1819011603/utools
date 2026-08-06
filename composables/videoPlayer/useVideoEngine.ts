@@ -122,8 +122,8 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   let hlsTickTimer: ReturnType<typeof setInterval> | null = null
   const startHlsTick = () => {
     if (hlsTickTimer) return
-    stall.bind()   // 心跳启动时 video 已就绪，绑定卡顿监听（幂等）
     hlsTickTimer = setInterval(() => {
+      stall.tick()   // 绑定/改绑卡顿监听（幂等）+ 刷新连续流畅读数
       prefetchTick()
       updateHlsStats()
       tickHook?.()

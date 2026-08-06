@@ -5,7 +5,7 @@
  * waiting/stalled（数据不够停播）进入停顿，playing / timeupdate 前进退出停顿。
  * 排除 seek 和用户 pause 引起的等待（那不是卡顿）。
  *
- * 暴露：isStalling / stallCount / stallMsTotal / lastStallAt（响应式，供面板展示），
+ * 暴露：isStalling / stallCount / stallMsTotal / lastStallAt / smoothSecs（响应式，供面板展示），
  * getSmoothSecs()（连续流畅秒数）/ stallCountInWindow(ms)（窗口内卡顿次数，供自愈判据）。
  */
 export function useStallTracker(getVideo: () => HTMLVideoElement | undefined) {
@@ -13,6 +13,9 @@ export function useStallTracker(getVideo: () => HTMLVideoElement | undefined) {
   const stallCount = ref(0)      // 本会话累计卡顿次数
   const stallMsTotal = ref(0)    // 本会话累计卡顿时长（ms）
   const lastStallAt = ref(0)     // 上次卡顿开始时刻（performance.now）
+  // 连续流畅秒数的响应式镜像：由 tick() 每秒刷新。
+  // 面板不能直接调 getSmoothSecs()——它是普通函数，不进依赖收集，模板里只会显示第一次渲染时的值。
+  const smoothSecs = ref(0)
 
   const stalls: { at: number; ms: number }[] = []  // 明细，用于窗口统计
   let stallStart = 0             // 本次停顿开始时刻
@@ -79,13 +82,17 @@ export function useStallTracker(getVideo: () => HTMLVideoElement | undefined) {
     ['timeupdate', onTimeUpdate as EventListener],
   ]
 
+  // 幂等：同一元素重复调无副作用；元素换了（videoKey++ 重建 <video>）则自动改绑到新元素。
+  // 心跳每秒调一次，不能只在起播时调一次——起播那一刻 videoEl 可能还指着上一轮被卸载的旧元素
+  // （loadVideo 里 videoKey++ 要等 Vue 打补丁后 ref 才更新），绑到旧元素上等于一个事件都收不到，
+  // 表现是「卡顿恒 0 次、连续流畅恒 0s」，且从统计面板完全看不出原因。
   const bind = (video?: HTMLVideoElement) => {
     const v = video ?? getVideo()
     if (!v || bound === v) return
     unbind()
     bound = v
     for (const [ev, fn] of EVENTS) v.addEventListener(ev, fn)
-    smoothSince = now()
+    smoothSince = v.paused ? 0 : now()   // 还没起播就先不计时，等 playing/timeupdate 开表
     lastCurrentTime = v.currentTime
   }
 
@@ -103,12 +110,19 @@ export function useStallTracker(getVideo: () => HTMLVideoElement | undefined) {
     lastStallAt.value = 0
     stalls.length = 0
     stallStart = 0
-    smoothSince = now()
+    smoothSince = 0
+    smoothSecs.value = 0
     lastCurrentTime = getVideo()?.currentTime ?? 0
   }
 
   // 连续流畅秒数：卡顿中为 0，否则 = 距上次恢复的秒数
   const getSmoothSecs = (): number => (isStalling.value || smoothSince === 0) ? 0 : (now() - smoothSince) / 1000
+
+  /** 心跳每秒调：改绑（元素可能刚被重建）+ 刷新响应式读数 */
+  const tick = () => {
+    bind()
+    smoothSecs.value = Math.round(getSmoothSecs())
+  }
 
   // 最近 windowMs 内的卡顿次数（自愈判据用）
   const stallCountInWindow = (windowMs: number): number => {
@@ -126,9 +140,11 @@ export function useStallTracker(getVideo: () => HTMLVideoElement | undefined) {
     stallCount,
     stallMsTotal,
     lastStallAt,
+    smoothSecs,
     bind,
     unbind,
     reset,
+    tick,
     getSmoothSecs,
     stallCountInWindow,
   }

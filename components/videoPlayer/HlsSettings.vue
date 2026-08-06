@@ -56,14 +56,10 @@
           <UFormGroup label="并发下限" help="起播即保证的最小并行连接数">
             <UInput v-model.number="tierOverrides.concurrencyFloor" type="number" :min="1" :max="6" size="xs" :placeholder="String(tierDefaults.concurrencyFloor)" />
           </UFormGroup>
-          <UFormGroup label="对冲延迟(ms)" help="关键分片超此→追加竞速连接">
-            <UInput v-model.number="tierOverrides.hedgeMs" type="number" :min="1000" :max="15000" :step="500" size="xs" :placeholder="String(tierDefaults.hedgeMs)" />
-          </UFormGroup>
+          <!-- 对冲延迟(hedgeMs)/竞速上限(maxRacers) 不开放覆盖：调它们只是在换「多快开始浪费连接」，
+               实际抗卡效果由档位预设 + 并发爬坡决定，逐项手调帮不上忙，反倒占满这一屏。 -->
           <UFormGroup label="跳片超时(ms)" help="关键分片超此→跳过（先降速后才跳）">
             <UInput v-model.number="tierOverrides.skipMs" type="number" :min="5000" :max="60000" :step="1000" size="xs" :placeholder="String(tierDefaults.skipMs)" />
-          </UFormGroup>
-          <UFormGroup label="竞速上限" help="单个关键分片最多并行竞速连接数">
-            <UInput v-model.number="tierOverrides.maxRacers" type="number" :min="1" :max="8" size="xs" :placeholder="String(tierDefaults.maxRacers)" />
           </UFormGroup>
         </div>
       </div>

@@ -31,13 +31,50 @@
           </div>
         </UFormGroup>
 
-        <div class="flex items-center gap-2 flex-wrap text-sm">
-          <UBadge v-if="matchedRule" color="green" variant="soft" size="xs">
-            规则：{{ matchedRule.name }}
-          </UBadge>
-          <UBadge v-else-if="inputUrl.trim()" color="orange" variant="soft" size="xs">
-            没有匹配的解析规则
-          </UBadge>
+        <!-- 支持的站点：既是清单，也是「我这个地址支不支持」的即时反馈——
+             命中的那条高亮，没命中就整排保持静默，不用再单开一块说明区 -->
+        <div class="space-y-2">
+          <div class="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+            <UIcon name="i-heroicons-check-badge" class="w-4 h-4 shrink-0" />
+            <span>
+              目前支持 {{ supportedSites.length }} 个站点
+              <template v-if="!matchedRule">，点站名打开首页，进任意影片的<b>播放页</b>后复制地址栏</template>
+            </span>
+          </div>
+
+          <div class="flex flex-wrap gap-2">
+            <UTooltip
+              v-for="site in supportedSites"
+              :key="site.id"
+              :text="site.note || (site.custom ? '自定义规则' : '')"
+              :prevent="!site.note && !site.custom"
+            >
+              <component
+                :is="site.homepage ? 'a' : 'span'"
+                v-bind="site.homepage ? { href: site.homepage, target: '_blank', rel: 'noopener noreferrer' } : {}"
+                class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs transition-colors"
+                :class="matchedRule?.id === site.id
+                  ? 'border-green-500 bg-green-50 text-green-700 dark:bg-green-500/10 dark:text-green-400'
+                  : 'border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:border-violet-400 hover:text-violet-600 dark:hover:text-violet-400'"
+              >
+                <UIcon
+                  :name="matchedRule?.id === site.id ? 'i-heroicons-check-circle' : 'i-heroicons-globe-alt'"
+                  class="w-3.5 h-3.5 shrink-0"
+                />
+                <span>{{ site.name }}</span>
+                <UIcon v-if="site.note" name="i-heroicons-information-circle" class="w-3.5 h-3.5 shrink-0 opacity-50" />
+              </component>
+            </UTooltip>
+          </div>
+
+          <div v-if="matchedRule" class="flex items-center gap-1.5 text-xs text-green-600 dark:text-green-400">
+            <UIcon name="i-heroicons-check-circle" class="w-4 h-4 shrink-0" />
+            <span>已匹配「{{ matchedRule.name }}」，可以解析</span>
+          </div>
+          <div v-else-if="inputUrl.trim()" class="flex items-center gap-1.5 text-xs text-orange-500">
+            <UIcon name="i-heroicons-exclamation-triangle" class="w-4 h-4 shrink-0" />
+            <span>这个地址不在支持列表里，解析多半会失败</span>
+          </div>
         </div>
 
         <!-- 进度 -->
@@ -252,6 +289,8 @@ const powCookie = ref('')
 const lastParsedUrl = ref('')
 
 const userRules = ref<ParseRule[]>([])
+// 清单从规则表现算，不硬编码站名：加站点只需改 videoParseRules.ts 的两张表，这里自动跟上
+const supportedSites = computed(() => listParseSites(userRules.value))
 const matchedRule = computed(() => {
   const u = inputUrl.value.trim()
   if (!u) return null

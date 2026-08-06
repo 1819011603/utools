@@ -26,7 +26,11 @@
           解析并播放
         </UButton>
         <UCheckbox v-model="autoFullscreen" label="加载后自动全屏" />
-        <UCheckbox v-model="autoBestRate" label="自动最佳倍速（≥1x，按带宽提速不卡）" @change="saveState" />
+        <UCheckbox
+          v-model="autoBestRate"
+          :label="`自动最佳倍速（1x ~ ${autoRateCap}x，流畅就提速，卡了就降回）`"
+          @change="saveState"
+        />
       </div>
 
       <!-- 连接策略：起播前实测探测「清单 / 分片」两轴各自能走哪条通道，可展开手动覆盖 -->
@@ -165,7 +169,7 @@
 <script setup lang="ts">
 // 解构出来当顶层 setup 绑定：模板里自动解包 ref，v-model 也能直接写
 const {
-  videoUrlInput, isLoading, autoFullscreen, autoBestRate, showAdvancedProxy,
+  videoUrlInput, isLoading, autoFullscreen, autoBestRate, autoRateCap, showAdvancedProxy,
   requestOrigin, requestReferer, manifestOnly, dualChannel, skipIntro, skipOutro,
   manualStrategyOverride, isProbing, strategyLabel, probeRows,
   manifestOnlyDisabled, dualChannelUnavailable, dualChannelHint,

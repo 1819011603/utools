@@ -11,9 +11,19 @@ import type { VideoServerTier } from './useVideoServerTier'
 import type { VideoConnStrategy } from './useVideoConnStrategy'
 import type { VideoEngine } from './useVideoEngine'
 
-// 自动最佳倍速：每步最大幅度与两次调整的最小间隔（避免频繁抖动来回调）
+// ── 自动最佳倍速的调参常数 ──
 const RATE_STEP = 0.25
-const RATE_COOLDOWN_MS = 10000
+// 自动模式默认最高提到 2x。倍速菜单里选了更高的档位就以那个为上限（见 autoRateCap）——
+// 「自动」的语义是「在 [1, 上限] 内按带宽取值」，而 desiredRate 默认是 1，
+// 若直接拿它当上限，上限就恒等于 1，勾选框看着有效实际一步都迈不出去（这就是原来「失效」的原因）。
+const AUTO_RATE_CEILING = 2
+// 惰性期：任何一次自动调整后至少保持这么久再考虑下一次，避免倍速被实测带宽抖动带着来回蹭
+const RATE_HOLD_MS = 25000
+// 提速的附加门槛：必须已经连续流畅这么久（真实无停顿）。带宽算得出来 ≠ 播得稳
+const RATE_UP_SMOOTH_SECS = 20
+// 降速确认期：带宽算出「撑不住当前倍速」要连续这么久才真降（瞬时掉速不动，等它自己回来）
+const RATE_DOWN_CONFIRM_MS = 8000
+
 const SMOOTH_RELAX_SECS = 30   // 连续流畅超此秒数 → 放松（解除降速守卫、可回收资源）
 
 export interface VideoAutoTuneDeps {
@@ -28,47 +38,77 @@ export function useVideoAutoTune(deps: VideoAutoTuneDeps) {
   const { isHls, videoEl, playbackRate, desiredRate, autoBestRate } = media
   const { strategy, stall } = engine
 
-  let lastAutoRateAt = 0
+  let lastAutoRateAt = 0     // 上次自动调整时刻（惰性期起点）
+  let downSince = 0          // 「带宽撑不住」持续起点（0=当前撑得住）
+  let nudgeUntil = 0         // 用户刚改上限：这之前的一次提速可跳过「连续流畅」门槛（点了要有反应）
+
+  /**
+   * 自动模式的倍速上限：默认 2x；用户在倍速菜单里选了更高的档位就以那个为准。
+   * 选 ≤1 的档位（0.5x 之类）不参与——自动模式只在 ≥1 里取值，想慢放请关掉自动。
+   */
+  const autoRateCap = computed(() => Math.max(AUTO_RATE_CEILING, desiredRate.value))
+
+  const setRate = (r: number) => {
+    playbackRate.value = r
+    if (videoEl.value) videoEl.value.playbackRate = r
+  }
 
   /**
    * 计算并应用「实际生效倍速」：
-   *  - 自动最佳倍速开启：在 [1, 用户选择倍速] 内朝「带宽可持续上限」逼近，但每次最多迈一个
-   *    0.25x 台阶（升/降都是），且两次调整间隔必须 ≥10s。
+   *  - 自动最佳倍速开启：在 [1, autoRateCap] 内朝「带宽可持续上限」逼近，每次一个 0.25x 台阶。
+   *    提速要三个条件同时成立（带宽够 + 缓冲健康 + 已连续流畅 20s），降速只要带宽持续不够 8s。
+   *    任何一次调整后进入 25s 惰性期——不停微调比慢一点更难受，且倍速一变就要重排预取节奏。
    *  - 关闭：完全用用户选择倍速（可 <1 手动慢放），立即生效。
    */
   const applyEffectiveRate = () => {
     const guard = tier.guardRateCeiling.value   // 抗卡守卫上限（PANIC=1，否则 Infinity）
-    // 抗卡阶梯第一步「先降速」：生效倍速高于守卫上限时立即压下（绕过冷却/步进，保命优先）
+    // 抗卡阶梯第一步「先降速」：生效倍速高于守卫上限时立即压下（绕过惰性期/步进，保命优先）
     if (isHls.value && guard < playbackRate.value - 1e-6) {
-      const g = Math.max(1, guard)
-      playbackRate.value = g
-      if (videoEl.value) videoEl.value.playbackRate = g
+      setRate(Math.max(1, guard))
+      lastAutoRateAt = performance.now()
+      downSince = 0
       return
     }
-    if (autoBestRate.value && isHls.value) {
-      // 目标倍速 = min(所选, 可持续, 守卫上限)，≥1，对齐到 0.25 台阶
-      const max = strategy.value.maxFluentRate
-      const rawCeil = Math.min(desiredRate.value, max > 0 ? max : desiredRate.value, guard)
-      const target = Math.max(1, Math.round(rawCeil / RATE_STEP) * RATE_STEP)
-      const cur = playbackRate.value
-      if (Math.abs(target - cur) < 1e-6) return           // 已到位
-      const now = performance.now()
-      if (now - lastAutoRateAt < RATE_COOLDOWN_MS) return // 冷却中：本次不动
-      const next = target > cur ? Math.min(target, cur + RATE_STEP) : Math.max(target, cur - RATE_STEP)
-      lastAutoRateAt = now
-      playbackRate.value = next
-      if (videoEl.value) videoEl.value.playbackRate = next
-    } else {
+    if (!autoBestRate.value || !isHls.value) {
       const eff = Math.min(desiredRate.value, guard)      // 手动：听用户，但仍受抗卡守卫钳制
-      if (eff !== playbackRate.value) {
-        playbackRate.value = eff
-        if (videoEl.value) videoEl.value.playbackRate = eff
-      }
+      if (eff !== playbackRate.value) setRate(eff)
+      return
     }
+
+    const now = performance.now()
+    const cur = playbackRate.value
+    // 目标 = min(自动上限, 带宽可持续, 守卫上限)，≥1，向下对齐 0.25 台阶（不过度承诺）
+    const max = strategy.value.maxFluentRate
+    const rawCeil = Math.min(autoRateCap.value, max > 0 ? max : 1, guard)
+    const target = Math.max(1, Math.floor(rawCeil / RATE_STEP + 1e-6) * RATE_STEP)
+
+    if (target < cur - 1e-6) {
+      // 降速：先确认这不是一瞬间的掉速
+      if (!downSince) downSince = now
+      if (now - downSince < RATE_DOWN_CONFIRM_MS) return
+      downSince = 0
+      lastAutoRateAt = now
+      setRate(Math.max(target, cur - RATE_STEP))
+      return
+    }
+    downSince = 0
+    if (target < cur + 1e-6) return                        // 已到位
+    // 提速：惰性期内不动；缓冲不健康就别提（带宽模型只看得到下载，看不到 append/解码）
+    if (now - lastAutoRateAt < RATE_HOLD_MS) return
+    if (strategy.value.healthZone !== 'healthy') return
+    // 连续流畅够久才提；用户刚手动抬上限则给一次「立刻迈一步」的额度
+    if (stall.getSmoothSecs() < RATE_UP_SMOOTH_SECS && now > nudgeUntil) return
+    nudgeUntil = 0
+    lastAutoRateAt = now
+    setRate(Math.min(target, cur + RATE_STEP))
   }
 
-  /** 用户主动改目标倍速：允许立即迈一步（仍是 0.25 台阶，之后继续按 10s 节奏逼近） */
-  const resetRateCooldown = () => { lastAutoRateAt = 0 }
+  /** 用户主动改目标倍速：解除惰性期，允许立即迈一步（之后继续按 25s 节奏逼近） */
+  const resetRateCooldown = () => {
+    lastAutoRateAt = 0
+    downSince = 0
+    nudgeUntil = performance.now() + 5000   // 只给 5s 额度，用不上就作废，别留着日后突然提速
+  }
 
   // 倍速变化：立即顶格补取；若超出当前带宽可流畅倍速，提示（不拦截）
   watch(playbackRate, (rate) => {
@@ -131,7 +171,7 @@ export function useVideoAutoTune(deps: VideoAutoTuneDeps) {
     }
   }
 
-  return { applyEffectiveRate, resetRateCooldown, selfHeal }
+  return { applyEffectiveRate, resetRateCooldown, autoRateCap, selfHeal }
 }
 
 export type VideoAutoTune = ReturnType<typeof useVideoAutoTune>

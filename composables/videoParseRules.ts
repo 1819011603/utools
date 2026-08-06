@@ -19,6 +19,9 @@ export interface ParseRule {
   pattern: string
   challenge?: ChallengeKind
 
+  /** 站点首页。界面上的「支持的站点」清单靠它给出可点的入口，用户自定义规则可以不填 */
+  homepage?: string
+
   /** 提取当前集播放地址，取第 1 个捕获组 */
   sourceRe: string
 
@@ -52,6 +55,7 @@ export const BUILTIN_PARSE_RULES: ParseRule[] = [
     name: '网飞猫 (ncat)',
     // 站点会换域名（ncat22 / ncat23 …），用正则兜住数字后缀
     pattern: '/ncat\\d*\\.(com|app|net)/',
+    homepage: 'https://www.ncat22.com/',
     challenge: 'cdndefend',
     // 地址明文写在内联脚本的 xgplayer 播放源里，没有二次解析接口
     sourceRe: 'playSource\\s*=\\s*\\{[^}]*?src:\\s*"([^"]+)"',
@@ -74,6 +78,10 @@ export interface CodedParseSite {
   id: string
   name: string
   pattern: string
+  /** 站点首页，同 ParseRule.homepage */
+  homepage?: string
+  /** 一句话说明这个站的特殊之处（限流、要登录…），只用于界面提示 */
+  note?: string
 }
 
 export const CODED_PARSE_SITES: CodedParseSite[] = [
@@ -82,8 +90,39 @@ export const CODED_PARSE_SITES: CodedParseSite[] = [
     name: '4k影视 (4kvm)',
     // 站点会换域名后缀，用正则兜住
     pattern: '/4kvm\\d*\\.(org|com|net|cc|top)/',
+    homepage: 'https://4kvm.org/',
+    note: '源站限流，按需取址：解析只取当前一集，其余播到哪集取哪集',
   },
 ]
+
+/** 「支持的站点」清单里一条的形状 */
+export interface ParseSiteInfo {
+  id: string
+  name: string
+  pattern: string
+  homepage?: string
+  note?: string
+  /** 用户自定义规则 vs 内置，界面上要区分 */
+  custom?: boolean
+}
+
+/**
+ * 界面用：把两张表（+ 用户规则）合成一份可展示的清单。
+ * 顺序与 matchParseSite 的优先级一致，这样「清单里排前面的先命中」不会与实际行为打架。
+ */
+export function listParseSites(userRules: ParseRule[] = []): ParseSiteInfo[] {
+  return [
+    ...userRules.map(r => ({ id: r.id, name: r.name, pattern: r.pattern, homepage: r.homepage, custom: true })),
+    ...CODED_PARSE_SITES.map(s => ({ id: s.id, name: s.name, pattern: s.pattern, homepage: s.homepage, note: s.note })),
+    ...BUILTIN_PARSE_RULES.map(r => ({
+      id: r.id,
+      name: r.name,
+      pattern: r.pattern,
+      homepage: r.homepage,
+      note: r.challenge === 'cdndefend' ? '有反爬校验，首次解析需在浏览器里算几十毫秒的工作量证明' : undefined,
+    })),
+  ]
+}
 
 const LS_KEY = 'video-parse-rules'
 

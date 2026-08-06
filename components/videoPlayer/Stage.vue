@@ -181,11 +181,11 @@
               <div ref="speedMenuRef" class="relative">
                 <button
                   class="text-white hover:text-violet-400 transition-colors px-2 py-1 rounded text-sm font-medium"
-                  :title="autoBestRate && playbackRate !== desiredRate
-                    ? `目标 ${desiredRate}x，带宽受限实际 ${playbackRate}x` : ''"
+                  :title="autoBestRate && playbackRate !== autoRateCap
+                    ? `自动最佳倍速：上限 ${autoRateCap}x，当前带宽下实际 ${playbackRate}x` : ''"
                   @click="showSpeedMenu = !showSpeedMenu"
                 >
-                  {{ playbackRate }}x<span v-if="autoBestRate && playbackRate !== desiredRate" class="text-white/50">/{{ desiredRate }}</span>
+                  {{ playbackRate }}x<span v-if="autoBestRate && playbackRate !== autoRateCap" class="text-white/50">/{{ autoRateCap }}</span>
                 </button>
                 <Transition name="fade">
                   <div v-if="showSpeedMenu" class="absolute bottom-full right-0 mb-2 bg-black/90 rounded-lg overflow-hidden min-w-[80px]">
@@ -239,7 +239,7 @@ const {
   videoEl, playerContainer, progressBar, speedMenuRef, videoKey, videoUrl,
   isHls, isPlaying, isBuffering, isResolvingUrl, isProbing, isFullscreen,
   showControls, showPlayIcon, showSpeedMenu,
-  currentTime, duration, volume, playbackRate, desiredRate, autoBestRate,
+  currentTime, duration, volume, playbackRate, desiredRate, autoBestRate, autoRateCap,
   progressPercent, bufferedPercent, seekPreviewTime, seekPreviewPercent, hoverTime, hoverPercent,
   hlsStats, playlist, currentIndex, playlistTitle, hasPrev, hasNext,
   getVideoName, volumeIcon, supportsPiP, canDownload,

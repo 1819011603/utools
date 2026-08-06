@@ -183,6 +183,16 @@ manifest 不过代理就没法把分片指向代理）；**分片可直连 → m
   可自动分档（`classifyTier`）或站点规则锁定；页面「抗卡策略」区可逐项覆盖。
   分档结果按 host 学习并持久化（`loadLearnedProfile`/`saveLearnedProfile`），下次进同站直接从最优起步。
 - `videoPlayer/useStallTracker.ts`：以 `<video>` 真实停顿（waiting/stalled）为地面真值反馈调参，排除 seek 和用户 pause。
+  **必须每次心跳都调一次 `tick()`（内含幂等 `bind()`）**：`loadVideo` 里 `videoKey++` 会重建 `<video>`，
+  而 `videoEl` ref 要等 Vue 打完补丁才指向新元素——只在起播时 bind 一次会绑到已卸载的旧元素上，
+  一个事件都收不到，表现是统计面板「卡顿恒 0 次 / 连续流畅恒 0s」，且从面板完全看不出是绑错了。
+  另外「连续流畅」只能读响应式的 `smoothSecs`，**不能在模板里直接调 `getSmoothSecs()`**——
+  普通函数不进依赖收集，模板只会显示首次渲染的那个值。
+- **自动最佳倍速**（`useVideoAutoTune.applyEffectiveRate`）的上限是 `autoRateCap = max(2, desiredRate)`，
+  **不是 `desiredRate` 本身**：后者默认 1，直接当上限会让「自动」永远只能取 1x，勾选框看着有效实际一步都迈不出去（踩过）。
+  提速要三条同时成立（带宽算得出 + `healthZone === 'healthy'` + 连续流畅 ≥20s），降速只要带宽持续不够 8s；
+  任何一次调整后进 25s 惰性期（`RATE_HOLD_MS`）——倍速一变就要重排预取节奏，不停微调比慢一点更难受。
+  只有抗卡守卫（panic → `guardRateCeiling = 1`）能绕过惰性期立刻压回 1x。
 - `videoPlayer/useSegmentCache.ts`：模块级单例内存缓存，TTL 1 天 + 内存上限 LRU + seek 时批量 abort。
   只在「TTL 过期」或「切到别的视频」时清；跨组件卸载存活，但**刷新页面必然丢**（JS 堆机制）。
 - `videoPlayer/useM3u8.ts`：m3u8-parser 解析 + AES-128 密钥/IV（`keyIv` 为 null 时用媒体序列号 `sn` 推导）

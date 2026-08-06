@@ -17,7 +17,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   const { media, autoTune } = deps
   const {
     videoEl, playerContainer, progressBar, isPlaying, isVideoLoaded, duration,
-    volume, isMuted, desiredRate, isFullscreen, showControls, showPlayIcon, showSpeedMenu,
+    volume, isMuted, desiredRate, autoBestRate, isFullscreen, showControls, showPlayIcon, showSpeedMenu,
     seekPreviewTime, seekPreviewPercent, isSeeking, hoverTime, hoverPercent, preloadStrategy,
   } = media
 
@@ -108,9 +108,11 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     videoEl.value.muted = isMuted.value
   }
 
-  /** 用户选择的是「目标倍速」（上限），实际生效由 autoTune.applyEffectiveRate 决定 */
+  /** 用户选择的是「目标倍速」（自动模式下当上限），实际生效由 autoTune.applyEffectiveRate 决定 */
   const setPlaybackRate = (rate: number) => {
     desiredRate.value = rate
+    // 自动模式只在 ≥1 里取值，选慢放显然是要慢放 → 直接退出自动，否则这一次点击看着毫无反应
+    if (rate < 1 && autoBestRate.value) autoBestRate.value = false
     autoTune.resetRateCooldown()
     autoTune.applyEffectiveRate()
     showSpeedMenu.value = false

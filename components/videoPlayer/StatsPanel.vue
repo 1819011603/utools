@@ -15,7 +15,7 @@
       <UBadge :color="stall.stallCount.value > 0 ? 'red' : 'green'" variant="subtle" size="xs">
         卡顿 {{ stall.stallCount.value }} 次 / {{ (stall.stallMsTotal.value / 1000).toFixed(1) }}s
       </UBadge>
-      <UBadge color="gray" variant="subtle" size="xs">连续流畅 {{ stall.getSmoothSecs().toFixed(0) }}s</UBadge>
+      <UBadge color="gray" variant="subtle" size="xs">连续流畅 {{ stall.smoothSecs.value }}s</UBadge>
       <UBadge :color="strategy.aggregateScales ? 'green' : 'red'" variant="subtle" size="xs">
         {{ strategy.aggregateScales ? '可并行' : '带宽硬顶' }}
       </UBadge>
