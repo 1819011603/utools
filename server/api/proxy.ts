@@ -18,6 +18,8 @@
  *   - 二进制响应通过 Web ReadableStream（response.body）流式转发
  */
 
+import { isM3u8Url } from '../../utils/mediaUrl'
+
 // 动态获取 undici Dispatcher（仅在 Node 可用）。
 // 用变量包裹 specifier + @vite-ignore 防止 Vite/Nitro 在 CF 构建时静态解析。
 let _dispatcher: any = undefined
@@ -96,10 +98,12 @@ export default defineEventHandler(async (event) => {
   const contentType = response.headers.get('content-type') ?? ''
 
   // ── m3u8：改写内部 URL ──
+  // 判据用 isM3u8Url 而不是 includes('.m3u8')：分片路径里可能带 .m3u8 目录名，
+  // 误判会让二进制分片走下面的 response.text()，返回乱码（见 utils/mediaUrl.ts）
   if (
     contentType.includes('mpegurl') ||
     contentType.includes('x-mpegurl') ||
-    targetUrl.includes('.m3u8')
+    isM3u8Url(targetUrl)
   ) {
     const text = await response.text()
     const baseUrl = targetUrl.replace(/\/[^/?#]*(\?.*)?$/, '/')
@@ -305,13 +309,13 @@ function rewriteM3u8(
       if (trimmed.startsWith('#')) {
         return line.replace(/URI="([^"]+)"/g, (_, uri) => {
           const abs = resolveUrl(baseUrl, uri)
-          if (noseg && !abs.includes('.m3u8')) return `URI="${abs}"`
+          if (noseg && !isM3u8Url(abs)) return `URI="${abs}"`
           return `URI="${buildProxyUrl(abs, origin, referer, noref, noseg)}"`
         })
       }
 
       const abs = resolveUrl(baseUrl, trimmed)
-      if (noseg && !abs.includes('.m3u8')) return abs
+      if (noseg && !isM3u8Url(abs)) return abs
       return buildProxyUrl(abs, origin, referer, noref, noseg)
     })
     .join('\n')

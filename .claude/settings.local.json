@@ -24,7 +24,11 @@
       "Bash(cd /tmp)",
       "Bash(curl -sS -m 30 -x http://127.0.0.1:7897 -c jar.txt -o page2.html -w \"page %{http_code}\\\\n\" -H \"user-agent: Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\) AppleWebKit/537.36 \\(KHTML, like Gecko\\) Chrome/151.0.0.0 Safari/537.36\" \"https://4kvm.org/play/cgzq7f3ub\")",
       "Bash(curl -sS -m 30 -x http://127.0.0.1:7897 -c jar2.txt -o home.html -D headers.txt -w \"home %{http_code}\\\\n\" -H \"user-agent: Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\) AppleWebKit/537.36 \\(KHTML, like Gecko\\) Chrome/151.0.0.0 Safari/537.36\" \"https://4kvm.org/\")",
-      "Bash(grep -o -E \"SITE_TOTAL_ID[^\\\\\"';]{0,60}\" home.html app.js)"
+      "Bash(grep -o -E \"SITE_TOTAL_ID[^\\\\\"';]{0,60}\" home.html app.js)",
+      "Bash(npx --yes tsx tmp-check.ts)",
+      "Bash(curl -sS -m 40 -x http://127.0.0.1:7897 -o h.html -H \"user-agent: Mozilla/5.0\" \"https://4kvm.org/\")",
+      "Bash(node -e ' *)",
+      "Bash(npm run *)"
     ],
     "ask": [
       "Bash(rm *)",

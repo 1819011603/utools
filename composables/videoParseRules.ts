@@ -198,6 +198,12 @@ export interface WasmSignerTask {
   base: string
   /** 每集一组实参，与 lines[activeLineIndex].episodes 下标严格一一对应 */
   argsList: string[][]
+  /**
+   * 站点限流，不许一次把整季都取完 —— 改成「播到哪集才取哪集」。
+   * 打开后解析阶段只取当前这一集（验证链路 + 给个能复制的地址），
+   * 其余集在播放器里按需现取，见 video-player.vue 的 resolveLazyUrl。
+   */
+  lazy?: boolean
   /** wasm 要读页面上某个 <meta id=…> 的 content 当时间戳时，填它的 id */
   timestampMetaId?: string
   /** 接口 JSON → 播放地址 */

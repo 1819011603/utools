@@ -143,7 +143,7 @@ export async function probeReachability(
   }
 
   async function runProbe(): Promise<ProbeResult> {
-  const isHls = url.includes('.m3u8') || url.includes('m3u8')
+  const isHls = isM3u8Url(url)
 
   // 防盗链通道的默认注入值：源站自己的 origin（与旧阶梯 step2 一致）
   let selfOrigin = opts.origin ?? ''

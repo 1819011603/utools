@@ -74,18 +74,25 @@
             <UButton size="xs" variant="ghost" icon="i-heroicons-share" title="复制带地址和线路的本页链接" @click="copyPageLink">
               分享本页
             </UButton>
-            <UButton size="xs" variant="soft" icon="i-heroicons-clipboard" @click="copyAll">
+            <!-- 按需取址的站点这里只有当前一集的地址，复制「全部」会误导 -->
+            <UButton
+              v-if="!isLazy"
+              size="xs"
+              variant="soft"
+              icon="i-heroicons-clipboard"
+              @click="copyAll"
+            >
               复制全部地址
             </UButton>
             <!-- 解析未完成时禁用：长剧要分多批拉，中途点会只把已解析的那部分带过去 -->
             <UButton
               size="xs"
               icon="i-heroicons-play"
-              :disabled="!resolvedCount || busy"
+              :disabled="!playableCount || busy"
               :title="busy ? '正在解析，稍候' : ''"
               @click="playAll()"
             >
-              播放全部 ({{ resolvedCount }}<template v-if="busy">…</template>)
+              播放全部 ({{ playableCount }}<template v-if="busy">…</template>)
             </UButton>
           </div>
         </div>
@@ -144,10 +151,20 @@
           description="地址里含 sign/timestamp，过一段时间会失效，届时重新解析即可。不建议长期收藏或分享。"
         />
 
+        <UAlert
+          v-if="isLazy"
+          color="blue"
+          variant="soft"
+          icon="i-heroicons-bolt"
+          title="该站点按需取址"
+          description="源站限流，不能一次把整季的地址都取下来（会被判为请求过于频繁）。这里只取了当前这一集，其余集在播放器里切到哪集就取哪集，正常播放即可。"
+        />
+
         <!-- 选集 -->
         <div class="space-y-2">
           <div class="text-sm font-medium text-gray-700 dark:text-gray-300">
-            选集（{{ resolvedCount }}/{{ currentLine?.episodes.length || 0 }} 解析成功）
+            <template v-if="isLazy">选集（共 {{ currentLine?.episodes.length || 0 }} 集，播到哪集取哪集）</template>
+            <template v-else>选集（{{ resolvedCount }}/{{ currentLine?.episodes.length || 0 }} 解析成功）</template>
           </div>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
             <div
@@ -156,14 +173,14 @@
               class="flex items-center gap-2 p-2 rounded-lg text-sm bg-gray-50 dark:bg-gray-800"
             >
               <UIcon
-                :name="ep.videoUrl ? 'i-heroicons-check-circle' : 'i-heroicons-x-circle'"
+                :name="ep.videoUrl ? 'i-heroicons-check-circle' : isLazy ? 'i-heroicons-bolt' : 'i-heroicons-x-circle'"
                 class="w-4 h-4 shrink-0"
-                :class="ep.videoUrl ? 'text-green-500' : 'text-gray-400'"
+                :class="ep.videoUrl ? 'text-green-500' : isLazy ? 'text-blue-400' : 'text-gray-400'"
               />
               <div class="min-w-0 flex-1">
                 <div class="font-medium truncate">{{ ep.title || `第 ${i + 1} 集` }}</div>
                 <div class="text-xs text-gray-400 truncate">
-                  {{ ep.videoUrl || ep.error || '未解析' }}
+                  {{ ep.videoUrl || ep.error || (isLazy ? '播放时现取地址' : '未解析') }}
                 </div>
               </div>
               <UButton
@@ -174,8 +191,9 @@
                 title="复制地址"
                 @click="copyOne(ep.videoUrl)"
               />
+              <!-- 按需取址时每一集都能播（地址由播放器现取），不能按 videoUrl 判 -->
               <UButton
-                v-if="ep.videoUrl"
+                v-if="ep.videoUrl || isLazy"
                 size="2xs"
                 variant="ghost"
                 icon="i-heroicons-play"
@@ -243,6 +261,13 @@ const matchedRule = computed(() => {
 const currentLine = computed(() => result.value?.lines[result.value.activeLineIndex] ?? null)
 const resolvedEpisodes = computed(() => (currentLine.value?.episodes || []).filter(e => e.videoUrl))
 const resolvedCount = computed(() => resolvedEpisodes.value.length)
+
+// 按需取址的站点：站点限流，不许一次把整季取完，所以这里只取了当前这一集，
+// 其余集在播放器里播到哪集才取哪集。界面上要按「全部可播」来呈现，不能按已解析数算
+const isLazy = computed(() => !!result.value?.clientTask?.lazy)
+const playableCount = computed(() =>
+  isLazy.value ? (currentLine.value?.episodes.length ?? 0) : resolvedCount.value,
+)
 const hasSignedUrl = computed(() =>
   // Expires/Signature 是 S3 风格预签名地址的标志（4kvm 的部分集数走网盘直链就是这种）
   resolvedEpisodes.value.some(e => /[?&](sign|signature|timestamp|token|auth_key|expires)=/i.test(e.videoUrl || '')),
@@ -385,12 +410,13 @@ const HANDOFF_KEY = 'video-player-handoff'
 
 const playAll = (startIndex = 0) => {
   const eps = currentLine.value?.episodes || []
-  // 播放列表只装解析成功的，索引要按过滤后的位置重新算
-  const playable = eps.filter(e => e.videoUrl)
+  // 按需取址的站点整份带走（列表里是占位地址，下标必须与作业单对齐）；
+  // 其余站点只装解析成功的，索引按过滤后的位置重新算
+  const playable = isLazy.value ? eps : eps.filter(e => e.videoUrl)
   if (!playable.length) return
   const clicked = eps[startIndex]
   const idx = Math.max(0, playable.findIndex(e => e === clicked))
-  const urls = playable.map(e => e.videoUrl!) as string[]
+  const urls = playable.map(e => (isLazy.value ? e.pageUrl : e.videoUrl!)) as string[]
   // 集名一并带过去：长剧每集的地址都叫 index.m3u8，播放器光看 URL 认不出第几集
   const names = playable.map((e, i) => e.title || `第 ${i + 1} 集`)
 
@@ -406,13 +432,23 @@ const playAll = (startIndex = 0) => {
     const source = result.value
       ? { pageUrl: result.value.pageUrl, line: result.value.activeLineIndex }
       : undefined
-    localStorage.setItem(HANDOFF_KEY, JSON.stringify({ urls, names, title, source, index: idx, at: Date.now() }))
+    // 按需取址的站点必须把作业单一起交接：列表里是占位地址，没有它播放器一集都取不到
+    const lazy = isLazy.value ? result.value?.clientTask : undefined
+    localStorage.setItem(HANDOFF_KEY, JSON.stringify({ urls, names, title, source, lazy, index: idx, at: Date.now() }))
   } catch (e) {
     handoffOk = false
     console.error('写入播放列表交接槽失败:', e)
   }
 
-  if (urls.join('|').length > MAX_QUERY_LEN) {
+  // 按需取址的列表无论多短都只能走交接槽：urls= 里是源站播放页地址占位，
+  // 没有随槽带过去的作业单，播放器拿到的就是一堆播不了的链接
+  if (isLazy.value) {
+    if (!handoffOk) {
+      toast.add({ title: '浏览器存储不可用，该站点无法送进播放器', color: 'red' })
+      return
+    }
+    params.set('handoff', '1')
+  } else if (urls.join('|').length > MAX_QUERY_LEN) {
     if (handoffOk) {
       // 几十集拼进 query 会顶爆地址栏。以前是截成 31 集的窗口——等于偷偷丢集数，
       // 现在整份走交接槽，一集不少

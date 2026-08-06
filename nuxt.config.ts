@@ -24,6 +24,12 @@ export default defineNuxtConfig({
     preference: 'light'
   },
 
+  // Nuxt 默认只扫 composables/ 顶层和 composables/*/index.ts，
+  // 按页面分的子目录（如播放器那一整套）要在这里显式登记，否则自动导入认不到。
+  imports: {
+    dirs: ['composables/videoPlayer']
+  },
+
   vite: {
     optimizeDeps: {
       exclude: ['@ffmpeg/ffmpeg', '@ffmpeg/util']

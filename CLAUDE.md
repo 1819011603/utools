@@ -29,8 +29,11 @@ npm run deploy     # generate + wrangler pages deploy .output/public
 
 ```
 pages/          12 个工具页，一页一工具，逻辑基本自包含
-composables/    跨页复用的处理引擎（视频/PDF/GIF/TIFF/历史）
+composables/    跨页复用的处理引擎（PDF/GIF/TIFF/历史/解析）
+composables/videoPlayer/   播放器这一页的全部逻辑模块，见「视频播放器」一节
 components/     FileUpload（拖拽上传，播放器已不用，其余工具页仍在用）、ColorModeButton
+components/videoPlayer/    播放器这一页的 UI 分块（自动导入名带 VideoPlayer 前缀）
+utils/          前后端共用的纯函数（如 mediaUrl.ts 的「是不是 m3u8 清单」判据）
 layouts/default.vue   侧边栏导航（新增页面需在此 + pages/index.vue 各登记一次）
 server/api/proxy.ts   视频跨域/防盗链代理（也给解析链路取站点自己的 js/wasm/接口用）
 server/api/resolve.ts 播放页解析接口，薄壳；站点策略在 server/parsers/ 下
@@ -38,6 +41,21 @@ server/parsers/       每站一个策略，见「视频解析」一节
 ```
 
 新增工具页的落地点有三处，别漏：`pages/新页.vue`、`pages/index.vue` 的 `categories`、`layouts/default.vue` 的 `toolCategories`。
+
+### 文件拆分约定
+
+**单文件不超过 500 行**，超了就按功能模块拆。页面文件（`pages/*.vue`）只留装配：
+建控制器 → `provide` → 接生命周期；逻辑进 `composables/<页面名>/`，UI 分块进 `components/<页面名>/`。
+播放器（`/video-player`）是这个约定的样板，新页面长大了照它拆。
+
+两个必须记得的配套动作：
+
+- **`composables/` 的子目录要在 `nuxt.config.ts` 的 `imports.dirs` 里登记**。Nuxt 默认只扫
+  `composables/` 顶层和 `composables/*/index.ts`，漏登记的表现是「一堆 xxx is not defined」。
+- **别把数组常量和别的导出混在一个文件里**：unimport 的导出扫描踩过一次——
+  `export const PLAYBACK_RATES = [...]` 后面紧跟的那个导出被静默漏掉，自动导入里查无此名，
+  而 tsc 又能过（tsc 走的是真实 import）。展示常量单独放（见 `composables/videoPlayer/display.ts`），
+  或者就近放进用它的那个组件。
 
 ## 工具清单
 
@@ -58,7 +76,42 @@ server/parsers/       每站一个策略，见「视频解析」一节
 
 ## 视频播放器（重点模块）
 
-`pages/video-player.vue` + 8 个 composable + `server/api/proxy.ts`。核心难点是**跨域、防盗链、慢速源站**。
+核心难点是**跨域、防盗链、慢速源站**。
+
+### 模块划分
+
+`pages/video-player.vue` 只有装配（建控制器 → provide → 生命周期），逻辑全在 `composables/videoPlayer/`：
+
+| 文件 | 负责 |
+| --- | --- |
+| `types.ts` | 跨模块共享的数据形状（`SavedState` / `HandoffPayload` / `HlsTuning` / query 参数名） |
+| `display.ts` | 纯展示常量与格式化（倍速档位、`formatTime`） |
+| `useVideoMediaState.ts` | **裸状态**：只有 ref，没有逻辑。存在的唯一目的是打断模块间依赖环 |
+| `useVideoHandoff.ts` | 交接槽读写、剧名/集名、按需取址作业单（全部**按 URL 存**，见下） |
+| `useVideoServerTier.ts` | 服务器档位（好/中/差）与抗卡参数覆盖 |
+| `useVideoConnStrategy.ts` | 可达性探测 → 结论套用 / 线性阶梯兜底 / 站点规则 / Origin-Referer 历史 |
+| `useVideoPlaylistCtl.ts` | 播放列表、切集、进度记忆、刷新链接、按需取址 |
+| `useVideoEngine.ts` | hls.js 生命周期、预取/缓存/卡顿三件套装配、加载超时、每秒心跳 |
+| `useVideoAutoTune.ts` | 自愈调参环：自动分档 + 抗卡阶梯 + 生效倍速 + 按 host 记忆 |
+| `useVideoEvents.ts` | `<video>` 事件回调 + 起播预缓冲 |
+| `useVideoUiControls.ts` | 播放/进度条/音量/全屏/画中画/控制栏显隐/快捷键 |
+| `useVideoDeepLink.ts` | 地址栏双向同步 |
+| `useVideoPlayerController.ts` | **装配层**：接线 + 持久化 + 挂载/卸载 |
+| `useVideoProxy.ts` / `useReachabilityProbe.ts` / `useHlsPrefetch.ts` / `useSegmentCache.ts` / `useStallTracker.ts` / `useM3u8.ts` / `useVideoDownload.ts` / `videoDiag.ts` | 底层引擎，见后续各节 |
+
+UI 分块在 `components/videoPlayer/`：`SourceCard`（输入+连接策略+探测矩阵）、`PlaylistPanel`、
+`Stage`（播放器+控制栏）、`HlsSettings`、`StatsPanel`、`PreloadSettings`、`Shortcuts`。
+自动导入名带前缀，如 `<VideoPlayerStage />`。
+
+**依赖方向是单向的**：`engine/events/controls → conn/tier/playlist → media/handoff`。
+反向的需求（conn 要能重载视频、engine 心跳要跑自愈环）一律用**回调/钩子**：
+`deps.reload`、`registerTickHook`、`registerDestroyHook`、`registerAutoPlayHook`。
+所以不要在底层模块里 import 上层模块——会立刻转成循环依赖。
+
+**子组件不传 props**，各自 `useVideoPlayerCtx()` 解构自己要的那几项（控制器把所有模块平铺成一层）。
+因此**各模块返回的键名不能重复**，新增导出时注意。解构出来才能在模板里自动解包 ref、直接写 `v-model`。
+
+`videoPlayer/useHlsPrefetch.ts` 目前 620 行，仍超 500 行约定——它是热路径且调参密集，暂未拆。
 
 ### 代理与防盗链
 
@@ -74,7 +127,7 @@ server/parsers/       每站一个策略，见「视频解析」一节
 
 页面侧有三层策略，优先级 **手动 > 站点规则 > 自动探测**：
 
-1. **自动可达性探测**（`composables/useReachabilityProbe.ts`）：起播前用几个小请求把
+1. **自动可达性探测**（`composables/videoPlayer/useReachabilityProbe.ts`）：起播前用几个小请求把
    **manifest 轴**和**分片轴**各自的可达性实测出来，再决策。取代了早先「直连→失败重载→代理→失败重载→代理+防盗链」的线性盲试。
 2. **站点规则**（`composables/videoSiteRules.ts`）：按 host 子串或 `/正则/` 匹配，内置 jisuzyv/xhscdn/huyall 三条。
    **只剩内置表**——用户自定义规则的编辑界面已移除（`matchSiteRule(url)` 不再传用户规则），加规则直接改这个文件。
@@ -124,16 +177,16 @@ manifest 不过代理就没法把分片指向代理）；**分片可直连 → m
 
 ### 并发预取与抗卡
 
-- `useHlsPrefetch.ts`：自定义 hls.js `fLoader`，命中预取缓存即时返回；按缓冲健康度动态调并发。
+- `videoPlayer/useHlsPrefetch.ts`：自定义 hls.js `fLoader`，命中预取缓存即时返回；按缓冲健康度动态调并发。
   浏览器同 host 只给 6 条连接（`MAX_CONN`），所以有**双通道**——同一分片给出「直连 CDN」和「/api/proxy」两个 origin 的 URL，并发提到 ~12。
 - **服务器档位** good/medium/bad（`SERVER_TIERS`）：一套抗卡参数（濒卡/吃紧阈值、安全系数、并发下限、对冲延迟、跳片超时、竞速上限）。
   可自动分档（`classifyTier`）或站点规则锁定；页面「抗卡策略」区可逐项覆盖。
   分档结果按 host 学习并持久化（`loadLearnedProfile`/`saveLearnedProfile`），下次进同站直接从最优起步。
-- `useStallTracker.ts`：以 `<video>` 真实停顿（waiting/stalled）为地面真值反馈调参，排除 seek 和用户 pause。
-- `useSegmentCache.ts`：模块级单例内存缓存，TTL 1 天 + 内存上限 LRU + seek 时批量 abort。
+- `videoPlayer/useStallTracker.ts`：以 `<video>` 真实停顿（waiting/stalled）为地面真值反馈调参，排除 seek 和用户 pause。
+- `videoPlayer/useSegmentCache.ts`：模块级单例内存缓存，TTL 1 天 + 内存上限 LRU + seek 时批量 abort。
   只在「TTL 过期」或「切到别的视频」时清；跨组件卸载存活，但**刷新页面必然丢**（JS 堆机制）。
-- `useM3u8.ts`：m3u8-parser 解析 + AES-128 密钥/IV（`keyIv` 为 null 时用媒体序列号 `sn` 推导）
-- `useVideoDownload.ts`：分片并发拉取 → AES 解密 → ffmpeg.wasm 合并 MP4（core 从 unpkg 拉）
+- `videoPlayer/useM3u8.ts`：m3u8-parser 解析 + AES-128 密钥/IV（`keyIv` 为 null 时用媒体序列号 `sn` 推导）
+- `videoPlayer/useVideoDownload.ts`：分片并发拉取 → AES 解密 → ffmpeg.wasm 合并 MP4（core 从 unpkg 拉）
 
 ### URL 参数直链（地址栏双向同步）
 
@@ -243,6 +296,25 @@ ncat 系挂了 cdndefend：首访返回 **HTTP 850** + 挑战页，要求暴力�
 怎么从接口 JSON 里挑地址（`JsonUrlPick`：`listPath`+`urlKey`+`skipFlags`+`rankKey`）全由服务端下发。
 接一个同类站点只写服务端那半边，前端一行不用改。
 
+### 按需取址（`clientTask.lazy`）
+
+**站点限流，不许一次把整季取完**——4kvm 实测一口气取 185 集，打到第 186 发就开始回
+「请求过于频繁，请稍后再试」。站点自己就是「点一集才给一集」，我们照做：
+
+- **解析页**只取传入的那一集（验证链路能通 + 给个能复制的真实地址），其余集不动
+- **播放列表里存的是源站播放页地址占位**，不是真实地址；播放器 `playByIndex` 切到哪集，
+  `resolveLazyUrl` 才现取哪集。整条链路一部剧只发 2（wasm）+ 1/集 发请求
+- **占位地址不替换成取到的真实地址**：真实地址带时效签名，存下来下次进来就是死链；
+  而占位地址永远有效，还天然当了进度和集名的稳定键
+- 因此**进度不能按 `videoUrl` 存**（每次现取的地址都不同，等于每次都查不到）。
+  `progressKey()` 统一取 `playlist[currentIndex]`，普通列表下它就等于 `videoUrl`，行为不变
+- **必须走交接槽**，再短的列表也不能写进 `urls=`：query 里只有占位地址，
+  没有随槽带过去的作业单，分享出去就是一堆打不开的链接。`syncUrlToQuery` 对 lazy 强制 `?handoff=1`
+- 作业单里的令牌是源站按次渲染的、会过期 → 取址失败时用 `playlistSource` 重解析一次拿新作业单再试，
+  **只重试一次**（真失效和真限流的表现一样，无限重试只会把限流坐实）
+- **源站的 `/play/<slug>` 会轮换**：实测隔一阵旧 slug 直接 404。所以过期的交接列表最终会整份失效，
+  这时只能回解析页重来——这是站点行为，兜不住
+
 **我们只加载并调用站点公开导出的函数，不复刻它的算法**——所以站点换签名方案时前端不用动，
 只要页面上还能读到模块地址就继续能用。
 
@@ -265,6 +337,8 @@ ncat 系挂了 cdndefend：首访返回 **HTTP 850** + 挑战页，要求暴力�
 - **同一部片子里各集的地址不一定同源**：实测大部分是 `oss.douyinbit.com` 的 m3u8，
   最新一集却是天翼云盘的**预签名 mp4**（带 `Expires`/`Signature`）。所以「带时效签名」的提示
   要连 `expires`/`signature` 一起判，不能只看 `sign`/`timestamp`
+- **一次取满整季必被限流**：186 发之后接口开始回「请求过于频繁，请稍后再试」，
+  所以这个站点必须 `lazy: true`，见上一节
 
 ### 刷新链接（就地重新解析）
 
@@ -307,9 +381,11 @@ ncat 系挂了 cdndefend：首访返回 **HTTP 850** + 挑战页，要求暴力�
 
 现改走 **localStorage 交接槽**（key `video-player-handoff`，槽由 `video-player.vue` 持有，任何页面都能当生产者）：
 
-- 载荷 `{ urls, names, title, source, index, at }`，TTL 1 天（防止半个月前的残留列表被翻出来）
+- 载荷 `{ urls, names, title, source, lazy, index, at }`，TTL 1 天（防止半个月前的残留列表被翻出来）
 - `title` 是剧名，播放器用它顶掉「播放器」「播放列表」这两个泛标题
 - `source` 是 `{ pageUrl, line }`，即解析来源。有它播放列表才显示「刷新链接」按钮
+- `lazy` 是按需取址的作业单（见上一节）。有它时 `urls` 里装的是**源站播放页地址占位**，
+  作业单必须跟着列表一起交接，漏了就一集都播不了
 - 长列表：video-parse 整份写槽 + 跳 `?handoff=1`；video-player 的 `syncUrlToQuery` 超长时也写槽并把地址栏收敛成 `?handoff=1`
   （比原来退化成单集更好：刷新后整个列表还在，因为 query 优先级高于 savedState）
 - 短列表：地址仍走 `urls=`（这样的链接能直接分享，交接槽是本机存储分享不了），
@@ -356,7 +432,7 @@ CF Pages 上没有这些变量，出口直连，不受影响。
 | `video-player-state` | 播放器全量状态（地址/播放列表/进度/音量/倍速/代理设置/HLS 配置/档位覆盖） |
 | `video-parse-rules` | 用户自定义解析规则（`/video-parse`） |
 | `video-player-learned-profiles` | 按 host 学到的服务器档位 + 可达性探测结果（`reach`，TTL 30 分钟） |
-| `video-player-handoff` | 长播放列表交接槽 `{ urls, names, index, at }`，TTL 1 天，`/video-parse` → `/video-player` 传值 |
+| `video-player-handoff` | 长播放列表交接槽 `{ urls, names, title, source, lazy, index, at }`，TTL 1 天，`/video-parse` → `/video-player` 传值 |
 | `video-player-origin-history` / `-referer-history` | Origin/Referer 输入历史（下拉复用） |
 | `json-format-settings` / `json-diff-settings` / `json-extract-settings` / `content-diff-settings` / `timestamp-settings` | 各页设置 |
 | `json-extract-import` | json-format → json-extract 的跨页传值 |
@@ -367,6 +443,13 @@ CF Pages 上没有这些变量，出口直连，不受影响。
 - **CF Workers 无 `process`**：服务端代码判空后再动态 `import('undici')`，specifier 必须用变量 + `@vite-ignore` 包住，否则 Vite 会在 CF 构建时静态解析报错
 - **`@ffmpeg/*` 必须 `optimizeDeps.exclude`**（已在 nuxt.config.ts）
 - **206 Range 响应不可缓存**，见上
+- **判断「是不是 m3u8 清单」绝不能用 `url.includes('.m3u8')`**，一律走 `utils/mediaUrl.ts` 的 `isM3u8Url()`。
+  有的站点把 `.m3u8` 当**目录名**：`https://cdn/video/xxx/20241110HVeUlTF2index.m3u8/0000000.ts`
+  （实测 `feikuai.in` → `p.bvvvvvvvvv1f.com` 这条链路）。全串匹配会把 ts 分片判成清单，两处同时坏掉：
+  ① `/api/proxy` 对二进制分片走 `response.text()`，回一堆乱码 + `application/vnd.apple.mpegurl`；
+  ② `noseg=1` 失效，分片被逐个改写成代理地址，分片直连的优化全丢。
+  表现是**页面反复闪动、「已缓冲」一直涨但永远播不了**，而可达性探测每一路都是 200，从探测结果完全看不出问题。
+  判据是「看路径最后一段的扩展名」，不是全串搜索。
 - **改连接策略必须重载视频**，否则 hls.js 还在用上次解析出的分片 URL，看起来「改了没生效」
 - **CF Workers 会静默吞掉非标端口**：`wrangler.json` 的 `compatibility_date` 必须 ≥ `2024-09-02`，
   否则线上 `fetch('https://host:999/x.ts')` 被降级成 `:443`，`/api/proxy` 拉这类分片必然失败，而本地 Node/undici 一切正常 —— 极难排查。

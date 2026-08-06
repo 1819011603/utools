@@ -26,10 +26,9 @@ export function useVideoProxy(opts: VideoProxyOptions) {
     'https://api.allorigins.win/raw?url=',
   ]
 
-  // 检测是否为 HLS
-  const isHlsUrl = (url: string): boolean => {
-    return url.includes('.m3u8') || url.includes('m3u8')
-  }
+  // 检测是否为 HLS。判据收在 utils/mediaUrl.ts：分片路径里带 .m3u8 目录名时，
+  // 松散匹配会把 ts 分片当清单，manifestOnly 下连分片都被塞进代理。
+  const isHlsUrl = (url: string): boolean => isM3u8Url(url)
 
   // 实际生效的 Referer：用户填了就用用户的，否则 origin 非空时自动补 /
   const effectiveReferer = computed(() => {

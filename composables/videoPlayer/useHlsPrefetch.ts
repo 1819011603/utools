@@ -1,6 +1,6 @@
 import type HlsType from 'hls.js'
 import type { useSegmentCache } from './useSegmentCache'
-import { SERVER_TIERS, DEFAULT_TIER, type ServerTier, type TierParams } from './videoSiteRules'
+import { SERVER_TIERS, DEFAULT_TIER, type ServerTier, type TierParams } from '../videoSiteRules'
 
 export type HealthZone = 'panic' | 'low' | 'healthy'
 

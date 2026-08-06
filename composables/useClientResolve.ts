@@ -28,3 +28,20 @@ export async function runClientResolve(
   if (!run) throw new Error(`不支持的取址方式：${task.kind}，请更新页面后重试`)
   await run(task, episodes, opts)
 }
+
+/** 只保留选中下标的作业单，用于按需取址（task.lazy）时一次只做一集 */
+export function sliceClientTask(task: ClientResolveTask, indices: number[]): ClientResolveTask {
+  return { ...task, argsList: indices.map(i => task.argsList[i]).filter(Boolean) }
+}
+
+/**
+ * 取单集地址。按需取址的站点（task.lazy）在真正要播那一集时才调这个。
+ * 拿不到就抛错——调用方要把原因显示出来，静默失败会表现成「点了没反应」。
+ */
+export async function resolveOneUrl(task: ClientResolveTask, index: number): Promise<string> {
+  if (!task.argsList[index]) throw new Error('这一集没有取址参数，请重新解析')
+  const ep: ParsedEpisode = { title: '', pageUrl: '' }
+  await runClientResolve(sliceClientTask(task, [index]), [ep])
+  if (!ep.videoUrl) throw new Error(ep.error || '未取到播放地址')
+  return ep.videoUrl
+}

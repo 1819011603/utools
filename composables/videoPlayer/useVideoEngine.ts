@@ -1,0 +1,401 @@
+/**
+ * 播放引擎：hls.js 生命周期、预取/缓存/卡顿三件套的装配、实时心跳、自愈调参、加载超时。
+ *
+ * 依赖方向单向：engine → (media, conn, tier, playlist)。反向的「重载视频」是通过
+ * 各模块 deps 里的 reload 回调回调进来的，不能在这里 import 它们。
+ */
+import type HlsType from 'hls.js'
+import type { VideoMediaState } from './useVideoMediaState'
+import type { VideoConnStrategy } from './useVideoConnStrategy'
+import type { VideoServerTier } from './useVideoServerTier'
+
+export interface VideoEngineDeps {
+  media: VideoMediaState
+  conn: VideoConnStrategy
+  tier: VideoServerTier
+  /** 进度存取的稳定键（按需取址的站点真实地址每次都变，不能用 videoUrl） */
+  progressKey: () => string
+  getSavedProgress: (url: string) => number
+}
+
+// 加载超时：走服务端代理时需要更长，统一 15s
+//（代理要先请求远端再返回，3s 往往不够，会误触 destroyHls 取消所有请求）
+const LOAD_TIMEOUT = 15000
+const MAX_HLS_RETRY = 3
+
+// 动态导入 hls.js（避免 SSR 问题），模块级缓存一次
+let Hls: typeof HlsType | null = null
+
+export function useVideoEngine(deps: VideoEngineDeps) {
+  const { media, conn, tier } = deps
+  const {
+    videoUrl, videoEl, isHls, isLoading, isBuffering, isPlaying, isVideoLoaded,
+    errorMessage, currentTime, duration, bufferedPercent, videoKey,
+    hlsConfig, hlsStats, playbackDiag, playbackRate, desiredRate, autoBestRate, volume, isMuted,
+  } = media
+
+  let hls: HlsType | null = null
+  const hlsRetryCount = ref(0)
+
+  let loadTimeoutTimer: ReturnType<typeof setTimeout> | null = null
+  let hasReceivedData = false
+
+  /**
+   * 起播锚点：刷新/恢复进度起播时，播放头还停在 0、但要起播的位置在 pendingStartPos。
+   * 预取以此为起点（见 useHlsPrefetch 的 getStartPosition）——起播即在正确位置全力并行预取，
+   * 既不浪费带宽下开头，也不会退化成「只有 hls.js 串行下 1 片」。到位/用户跳转后清 0。
+   */
+  let pendingStartPos = 0
+  let startAnchorActive = false
+  const clearStartAnchor = () => { startAnchorActive = false; pendingStartPos = 0 }
+  const isArrivingAtStart = (ct: number) => startAnchorActive && Math.abs(ct - pendingStartPos) < 3
+
+  // ── 预取缓存 + 自适应预取 + 卡顿记录 ──
+  const segmentCache = useSegmentCache({ getMaxBufferSizeMB: () => hlsConfig.value.maxBufferSizeMB })
+  const { prefetchInfo, useCacheForVideo, abortAllPrefetches, startPrefetchCleanup, stopPrefetchCleanup } = segmentCache
+
+  const prefetch = useHlsPrefetch({
+    getHls: () => hls,
+    getVideoEl: () => videoEl.value,
+    getProxyUrl: conn.getProxyUrl,
+    cache: segmentCache,
+    // 站点规则 playbackConcurrency 作并发下限（默认 1）；引擎按实测+倍速动态往上算
+    getConcurrencyCap: () => conn.activeRule.value?.playbackConcurrency ?? 1,
+    getPlaybackRate: () => playbackRate.value,
+    // 「预加载时长」= 往后预取多少秒就够了，到量即停（0/负数视为不限）
+    getPrefetchTargetSecs: () => {
+      const t = hlsConfig.value.maxBufferLength
+      return t && t > 0 ? t : Infinity
+    },
+    // 起播锚点：定位未到位前，预取从 pendingStartPos 起（而非 currentTime=0）
+    getStartPosition: () => (startAnchorActive ? pendingStartPos : 0),
+    // 直连+代理双通道：仅在「开启 + 该分片直连可达」时加一条本站代理 lane（不同 origin → 各享 6 连接）。
+    // 需注入头/走代理的源直连 lane 会 403，退回单 lane。
+    getLaneUrls: (url: string) => {
+      if (conn.dualChannel.value && conn.isDirectMode(url)) return [url, conn.getProxyPassthroughUrl(url)]
+      return [conn.getProxyUrl(url)]
+    },
+    // 服务器档位参数（好/中/差预设 + 页面覆盖）：抗卡阈值/超时/安全系数/并发下限/预取深度全从这里读
+    getTierParams: () => tier.effectiveTierParams.value,
+  })
+  const {
+    getAheadBuffered, getCachedAhead, createHlsFragLoader, triggerAdaptivePrefetch,
+    startOnePrefetch, strategy, resetStrategy, tick: prefetchTick, primePrefetch, getStuckSegment,
+  } = prefetch
+
+  // 卡顿记录器：以 <video> 真实停顿为地面真值，喂给自愈调参环（selfHeal）
+  const stall = useStallTracker(() => videoEl.value)
+
+  // 聚合下载速度（估算）= 单连接实测速度 × 当前并发。perConnKBps 是当前并发下的实测值，
+  // 故乘积能反映「加并发到底换没换来更多总带宽」：双通道真生效则随 6→12 翻倍，被 per-IP 限死则基本不变。
+  const aggregateKBps = computed(() => Math.round(strategy.value.perConnKBps * strategy.value.targetConn))
+  const aggregateMbps = computed(() => Math.round((aggregateKBps.value * 8 / 1024) * 10) / 10)
+
+  // ── 加载超时 ──
+  const clearLoadTimeout = () => {
+    if (loadTimeoutTimer) { clearTimeout(loadTimeoutTimer); loadTimeoutTimer = null }
+  }
+  const startLoadTimeout = () => {
+    clearLoadTimeout()
+    hasReceivedData = false
+    loadTimeoutTimer = setTimeout(() => {
+      if (!hasReceivedData && isLoading.value) {
+        errorMessage.value = '加载超时，视频链接可能已过期或无法访问（403/404）'
+        isLoading.value = false
+        isBuffering.value = false
+        isVideoLoaded.value = false
+        destroyHls()
+      }
+    }, LOAD_TIMEOUT)
+  }
+  const markDataReceived = () => {
+    hasReceivedData = true
+    clearLoadTimeout()
+  }
+
+  // ── 实时心跳的外挂钩子 ──
+  // 自愈调参环（useVideoAutoTune.selfHeal）由装配层登记进来，引擎不反向依赖它
+  let tickHook: (() => void) | null = null
+  const registerTickHook = (fn: () => void) => { tickHook = fn }
+
+  // ── 实时心跳：每秒刷新缓冲读数 + 跑闭环预取控制（不依赖 FRAG_BUFFERED，卡顿时也持续工作） ──
+  let hlsTickTimer: ReturnType<typeof setInterval> | null = null
+  const startHlsTick = () => {
+    if (hlsTickTimer) return
+    stall.bind()   // 心跳启动时 video 已就绪，绑定卡顿监听（幂等）
+    hlsTickTimer = setInterval(() => {
+      prefetchTick()
+      updateHlsStats()
+      tickHook?.()
+    }, 1000)
+  }
+  const stopHlsTick = () => {
+    if (hlsTickTimer) { clearInterval(hlsTickTimer); hlsTickTimer = null }
+  }
+
+  const updateHlsStats = () => {
+    if (!hls || !videoEl.value) return
+    const video = videoEl.value
+    playbackDiag.value = describePlaybackState(video, getStuckSegment())
+    hlsStats.value = {
+      buffered: getCachedAhead(video),   // 含预取缓存的有效已缓冲，不只 MSE 的 ~60s
+      level: describeLevel(hls.levels[hls.currentLevel]),
+    }
+  }
+
+  // ── 加载 / 销毁 ──
+
+  // 销毁时要顺手清掉的外部资源（自动播放定时器、下载任务…）由使用方登记，
+  // 避免引擎反向 import 事件/下载模块
+  const onDestroyHooks: Array<() => void> = []
+  const registerDestroyHook = (fn: () => void) => { onDestroyHooks.push(fn) }
+
+  const destroyHls = () => {
+    clearLoadTimeout()
+    onDestroyHooks.forEach(fn => fn())
+    if (hls) { hls.destroy(); hls = null }
+    hlsStats.value = null
+    // 取消正在跑的预取请求、停止清理定时器/心跳、重置策略实测（换流/换 CDN 重新测）。
+    // 注意：不清空预取缓存——它是模块级单例，需跨换流/导航存活，让「点回去」命中内存缓存；
+    // 键按分片 URL 隔离，不同视频不冲突，内存交给 TTL+LRU 兜底。
+    stopHlsTick()
+    stopPrefetchCleanup()
+    abortAllPrefetches()
+    prefetchInfo.value = { bufferSecs: 0, threads: 0, cached: 0, pending: 0 }
+    resetStrategy()
+    stall.unbind()          // 解绑卡顿监听（换流重新计）
+    stall.reset()
+    tier.guardRateCeiling.value = Infinity   // 解除抗卡降速守卫
+  }
+
+  const loadVideo = async () => {
+    if (!videoUrl.value.trim()) return
+
+    errorMessage.value = ''
+    isLoading.value = true
+    isBuffering.value = true
+    isPlaying.value = false
+    currentTime.value = 0
+    duration.value = 0
+    bufferedPercent.value = 0
+    hlsRetryCount.value = 0
+
+    videoKey.value++     // 强制重新创建 video 元素，彻底重置状态
+    isVideoLoaded.value = true
+    destroyHls()
+
+    const url = videoUrl.value.trim()
+    // 按视频切换缓存：同一视频（重播/点回去）保留内存缓存，换了视频才清空旧的
+    useCacheForVideo(url)
+    // 可达性探测可能阻塞（首访该 host 时约 0.5-3s）——必须在 startLoadTimeout 之前 await，
+    // 否则探测耗时会被算进加载超时，慢源直接被误判成「加载超时」。
+    await conn.applyStrategy(url)
+    if (videoUrl.value.trim() !== url) return   // 探测期间用户切了地址 → 放弃本次加载
+
+    startLoadTimeout()
+    isHls.value = conn.isHlsUrl(url)
+
+    console.log('开始加载视频:', url, '是否HLS:', isHls.value,
+      '使用代理:', conn.useProxy.value, '站点规则:', conn.activeRule.value?.name ?? '无')
+
+    try {
+      if (isHls.value) await loadHlsVideo(url)
+      else await loadNativeVideo(url)
+    } catch (e) {
+      console.error('加载视频失败:', e)
+      errorMessage.value = '加载视频失败: ' + (e instanceof Error ? e.message : String(e))
+      isLoading.value = false
+      isBuffering.value = false
+      isVideoLoaded.value = false
+    }
+  }
+
+  const loadHlsVideo = async (url: string) => {
+    if (!Hls) Hls = (await import('hls.js')).default
+    const HlsLib = Hls   // 取成局部常量，闭包里就不用到处写 Hls!
+
+    isVideoLoaded.value = true
+    await nextTick()
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    if (!HlsLib.isSupported()) {
+      // 尝试原生支持（Safari）
+      if (videoEl.value?.canPlayType('application/vnd.apple.mpegurl')) {
+        await loadNativeVideo(url)
+        return
+      }
+      errorMessage.value = '您的浏览器不支持 HLS 播放'
+      isLoading.value = false
+      return
+    }
+    if (!videoEl.value) throw new Error('视频元素未初始化')
+
+    const finalUrl = conn.getProxyUrl(url)
+    console.log('加载 HLS 视频:', finalUrl)
+
+    // 恢复播放进度：直接告诉 hls.js 从目标位置起播，避免它先从头猛下一堆用不上的分片、
+    // 等 onLoadedMetadata 里再 seek 过去（那样等于白下了一遍开头）。
+    // 进度按稳定键存（按需取址的站点真实地址每次都变），不能用 url 查
+    const resumeTime = deps.getSavedProgress(deps.progressKey())
+    pendingStartPos = resumeTime > 0 ? resumeTime : 0
+    startAnchorActive = resumeTime > 0
+
+    hls = new HlsLib({
+      // MSE 缓冲要「小而健康」——append 太多（几百 MB）会触发浏览器 MSE 配额/驱逐，
+      // 产生缓冲空洞导致明明缓冲很多却卡在原地。真正的大量预读放在 JS 预取缓存里
+      //（容量 = maxBufferSizeMB），hls.js 只在 MSE 里留 ~30s，随播随取。
+      // Math.min 兼容并迁移旧的超大配置。
+      maxBufferLength: Math.min(30, hlsConfig.value.maxBufferLength),
+      maxMaxBufferLength: Math.min(60, hlsConfig.value.maxMaxBufferLength),
+      backBufferLength: Math.min(30, hlsConfig.value.backBufferLength),
+      maxBufferSize: 60 * 1000 * 1000,   // MSE 最多 ~60MB，其余交给 JS 预取缓存
+      // 缓冲空洞 / 卡顿自动跳跃恢复
+      maxBufferHole: 0.5,
+      highBufferWatchdogPeriod: 1,
+      nudgeOffset: 0.2,
+      nudgeMaxRetry: 8,
+      fragLoadingTimeOut: hlsConfig.value.fragLoadingTimeOut,
+      fragLoadingMaxRetry: hlsConfig.value.fragLoadingMaxRetry,
+      manifestLoadingTimeOut: 20000,
+      manifestLoadingMaxRetry: 3,
+      levelLoadingTimeOut: 20000,
+      levelLoadingMaxRetry: 3,
+      enableWorker: hlsConfig.value.enableWorker,
+      lowLatencyMode: hlsConfig.value.lowLatencyMode,
+      startLevel: -1,
+      startPosition: resumeTime > 0 ? resumeTime : -1,
+      // 自定义分片加载器：接管分片请求，命中预取缓存直接返回
+      fLoader: createHlsFragLoader() as any,
+      // Origin/Referer 由 /api/proxy 服务端注入，XHR 层只需关闭 credentials
+      xhrSetup: (xhr: XMLHttpRequest) => { xhr.withCredentials = false },
+    })
+
+    hls.loadSource(finalUrl)
+    hls.attachMedia(videoEl.value)
+
+    hls.on(HlsLib.Events.MANIFEST_PARSED, (_, data) => {
+      console.log('HLS manifest 解析完成，画质数:', data.levels.length)
+      markDataReceived()
+      isLoading.value = false
+      startPrefetchCleanup()  // 启动周期清理过期缓存
+      if (videoEl.value) {
+        videoEl.value.playbackRate = playbackRate.value
+        videoEl.value.volume = volume.value
+        videoEl.value.muted = isMuted.value
+      }
+      autoPlayHook?.()
+    })
+
+    // playlist（分片列表）就绪 → 立刻并行预热前若干分片 + 启动实时心跳
+    hls.on(HlsLib.Events.LEVEL_LOADED, () => {
+      primePrefetch()
+      startHlsTick()
+    })
+
+    hls.on(HlsLib.Events.ERROR, (_, data) => {
+      console.warn('HLS 错误:', data.type, data.details, 'fatal:', data.fatal)
+      if (!data.fatal) return
+      switch (data.type) {
+        case HlsLib.ErrorTypes.NETWORK_ERROR:
+          hlsRetryCount.value++
+          if (hlsRetryCount.value <= MAX_HLS_RETRY) {
+            errorMessage.value = `网络错误，正在重试 (${hlsRetryCount.value}/${MAX_HLS_RETRY})...`
+            setTimeout(() => { hls?.startLoad() }, 1000)
+          } else {
+            // 超过重试次数：先自动升级可达性策略（重探 → 线性阶梯）再重载
+            if (conn.escalateStrategyAndReload()) break
+            errorMessage.value = data.details === 'manifestLoadError'
+              ? '视频链接无效或已过期，请检查链接是否正确'
+              : `网络错误: ${data.details}，链接可能已过期`
+            isLoading.value = false
+            isBuffering.value = false
+            isVideoLoaded.value = false
+            destroyHls()
+          }
+          break
+        case HlsLib.ErrorTypes.MEDIA_ERROR:
+          errorMessage.value = '媒体错误，正在恢复...'
+          hls?.recoverMediaError()
+          setTimeout(() => { errorMessage.value = '' }, 2000)
+          break
+        default:
+          errorMessage.value = '播放失败: ' + data.details
+          isLoading.value = false
+          isBuffering.value = false
+          isVideoLoaded.value = false
+          destroyHls()
+      }
+    })
+
+    // 分片加载完成 → 更新统计 + 触发自适应预取
+    hls.on(HlsLib.Events.FRAG_BUFFERED, (_, data) => {
+      updateHlsStats()
+      isBuffering.value = false
+      // sn 在 init segment 上是字符串 'initSegment'，那种片没有后续可预取，跳过
+      const sn = data?.frag?.sn
+      if (typeof sn === 'number') triggerAdaptivePrefetch(sn)
+    })
+
+    // 分片加载中：只在没有足够缓冲时显示加载
+    hls.on(HlsLib.Events.FRAG_LOADING, () => {
+      const v = videoEl.value
+      if (v && v.buffered.length > 0) {
+        const bufferedEnd = v.buffered.end(v.buffered.length - 1)
+        if (bufferedEnd - v.currentTime < 2) isBuffering.value = true
+      }
+    })
+
+    hls.on(HlsLib.Events.LEVEL_SWITCHED, () => updateHlsStats())
+  }
+
+  const loadNativeVideo = async (url: string) => {
+    const finalUrl = conn.getProxyUrl(url)
+    console.log('加载原生视频:', finalUrl)
+    isVideoLoaded.value = true
+    // 等待 DOM 更新（video 元素重新创建需要更多时间）
+    await nextTick()
+    await new Promise(resolve => setTimeout(resolve, 100))
+    if (!videoEl.value) throw new Error('视频元素未初始化，请刷新页面重试')
+    videoEl.value.src = finalUrl
+    videoEl.value.load()
+  }
+
+  // MANIFEST_PARSED 之后要触发的起播预缓冲，由 useVideoEvents 登记（避免引擎依赖它）
+  let autoPlayHook: (() => void) | null = null
+  const registerAutoPlayHook = (fn: () => void) => { autoPlayHook = fn }
+
+  /** 「应用配置」：重载并回到原播放位置 */
+  const applyHlsConfig = async () => {
+    if (!isHls.value || !videoUrl.value) return
+    const savedTime = currentTime.value
+    const wasPlaying = isPlaying.value
+    await loadVideo()
+    // video 元素被重建，用一次性 loadedmetadata 恢复位置
+    videoEl.value?.addEventListener('loadedmetadata', () => {
+      if (videoEl.value && savedTime > 0) {
+        videoEl.value.currentTime = savedTime
+        if (wasPlaying) videoEl.value.play().catch(() => {})
+      }
+    }, { once: true })
+  }
+
+  const resetHlsConfig = () => { hlsConfig.value = { ...FACTORY_HLS_TUNING } }
+
+  return {
+    // hls.js 生命周期
+    loadVideo, destroyHls, applyHlsConfig, resetHlsConfig,
+    clearLoadTimeout, markDataReceived,
+    registerDestroyHook, registerAutoPlayHook, registerTickHook,
+    // 预取 / 缓存 / 卡顿
+    prefetchInfo, strategy, stall,
+    getAheadBuffered, getCachedAhead, primePrefetch, startOnePrefetch, prefetchTick,
+    abortAllPrefetches, triggerAdaptivePrefetch,
+    aggregateKBps, aggregateMbps,
+    // 起播锚点
+    clearStartAnchor, isArrivingAtStart,
+    // 统计
+    updateHlsStats,
+  }
+}
+
+export type VideoEngine = ReturnType<typeof useVideoEngine>

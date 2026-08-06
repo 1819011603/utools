@@ -89,6 +89,9 @@ export const nbmovieParser: SiteParser = {
       fn: 'build_play_url',
       base: origin,
       argsList: byLine.get(lineNos[targetIndex])!.map(x => x.args),
+      // 站点自己就是「点一集取一集」的。实测一次性把 185 集全取完，
+      // 打到 186 发时接口开始回「请求过于频繁，请稍后再试」——必须按需取
+      lazy: true,
       // wasm 会读这个 <meta> 的 content 当时间戳（站点原页面由内联脚本写入 Date.now()）
       timestampMetaId: 'nb-plt',
       pick: {

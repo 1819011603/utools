@@ -75,11 +75,22 @@ export async function resolvePlaylist(opts: ResolveOptions): Promise<ResolveOutc
 
   // 有些站点页面里根本没有地址，服务端只能给一张「作业单」，最后一步要浏览器来做
   // （见 useClientResolve）。这类站点服务端一次就拿全了整季，不走下面的分批。
-  if (first.clientTask) {
-    await runClientResolve(first.clientTask, episodes, {
-      onStage,
-      onProgress: (done, n) => onStage?.(`正在解析选集 ${done}/${n}…`),
-    })
+  const task = first.clientTask
+  if (task) {
+    if (task.lazy) {
+      // 站点限流，不许一次全取。这里只取传入的那一集：既验证链路能通、
+      // 又给界面一个能复制的真实地址；其余集等播到了再由播放器现取。
+      const cur = Math.max(0, episodes.findIndex(e => e.pageUrl === first.pageUrl))
+      if (episodes[cur]) {
+        onStage?.('正在获取当前集地址…')
+        await runClientResolve(sliceClientTask(task, [cur]), [episodes[cur]])
+      }
+    } else {
+      await runClientResolve(task, episodes, {
+        onStage,
+        onProgress: (done, n) => onStage?.(`正在解析选集 ${done}/${n}…`),
+      })
+    }
     return { result: first, cookie }
   }
 
@@ -105,11 +116,19 @@ export async function resolvePlaylist(opts: ResolveOptions): Promise<ResolveOutc
   return { result: first, cookie }
 }
 
-/** 从解析结果里取出可播的地址与集名（下标一一对应） */
+/**
+ * 从解析结果里取出播放列表（地址与集名下标一一对应）。
+ *
+ * 按需取址的站点（clientTask.lazy）这里给的是**源站播放页地址占位**，不是真实视频地址：
+ * 真实地址带时效签名、且站点限流不许批量取，只能等播到那一集再现取
+ * （播放器的 resolveLazyUrl 负责，靠下标对回 clientTask.argsList）。
+ * 所以这类结果必须整份带上，不能像下面那样按 videoUrl 过滤，否则下标就对不上了。
+ */
 export function toPlaylist(result: ParseResult): { urls: string[]; names: string[] } {
-  const eps = (result.lines[result.activeLineIndex]?.episodes ?? []).filter(e => e.videoUrl)
+  const all = result.lines[result.activeLineIndex]?.episodes ?? []
+  const eps = result.clientTask?.lazy ? all : all.filter(e => e.videoUrl)
   return {
-    urls: eps.map(e => e.videoUrl!),
+    urls: eps.map((e, i) => (result.clientTask?.lazy ? e.pageUrl : e.videoUrl!) || `#${i}`),
     names: eps.map((e, i) => e.title || `第 ${i + 1} 集`),
   }
 }
