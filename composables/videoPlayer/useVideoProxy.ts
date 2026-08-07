@@ -6,8 +6,8 @@ import type { Ref } from 'vue'
  * Origin/Referer 是浏览器禁止 JS 修改的 forbidden headers，必须走服务端代理
  * （/api/proxy）注入，fetch/XHR 直接设置会被浏览器忽略。
  *
- * 说明：站点规则命中后，会把 origin/referer/manifestOnly/disguise/useProxy
- * 直接写回下面这些 ref，因此本 composable 无需感知站点规则——照常读 ref 即可。
+ * 说明：这些 ref 由可达性探测的结论（或兜底阶梯）写入，本 composable 只负责照着它们拼 URL，
+ * 不参与任何「该走哪条路」的决策。
  */
 export interface VideoProxyOptions {
   requestOrigin: Ref<string>

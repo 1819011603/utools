@@ -43,7 +43,7 @@
           </UButton>
         </div>
         <p class="text-xs text-gray-500 dark:text-gray-400">
-          留空 = 用档位预设（灰字）；改动即覆盖当前档位。档位在「站点规则」里可手动锁定「好/中/差」或让引擎自动分档。
+          留空 = 用档位预设（灰字）；改动即覆盖当前档位。档位由引擎按实测自动分档，并按 host 记忆。
         </p>
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
           <UFormGroup label="濒卡阈值(秒)" help="MSE 前向低于此=濒卡→降速/跳片">

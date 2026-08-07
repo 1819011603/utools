@@ -1,25 +1,14 @@
 /**
- * 站点规则：按视频 host 自动套用一套代理/防盗链/并发配置，
- * 解决「有些站点播放慢 / 403」——不同 CDN 对代理模式、Referer、并发的要求不同。
+ * 播放侧按 host 学习/预设的参数：服务器档位（好/中/差）与学习档案。
  *
- * 匹配优先级：用户自定义规则 > 内置规则；同级按数组顺序，第一个命中即用。
- * pattern 语义：以 `/` 包裹视为正则（如 `/\.jisuzyv\.com$/`），否则按 host 子串匹配。
+ * **「站点规则」整张表已删除**（`SiteRule` / `BUILTIN_RULES` / `matchSiteRule` /
+ * 用户自定义规则的读写全部不复存在）。理由：它是一堆写死的静态判断，
+ * 而它想解决的每件事现在都有实测来源——
+ *   · 连接方式 → 可达性探测（四通道两轴）+ 运行时 lane 熔断；
+ *   · 并发    → `useHlsPrefetch` 的闭环控制，按缓冲趋势与实测带宽爬坡；
+ *   · 档位    → `classifyTier` 自动分档 + 按 host 学习（`LearnedProfile`）。
+ * 规则唯一的作用只剩「让源站改了策略之后整站播不了，还看不出是被谁按住的」。
  */
-export interface SiteRule {
-  id: string
-  name: string
-  pattern: string
-  useProxy?: boolean
-  manifestOnly?: boolean            // true=仅代理 manifest（分片直连，快）；false=全程代理（兼容）
-  disguiseAsDownloader?: boolean    // true=不发 Origin/Referer（部分 CDN 放行）
-  origin?: string
-  referer?: string
-  playbackConcurrency?: number      // 预取并发「下限/手动兜底」；不设则引擎按实测+倍速全自动(2-6)
-  downloadConcurrency?: number      // 下载并发，默认 6
-  dualChannel?: boolean             // true=直连+代理双通道：分片在「直连 CDN」和「/api/proxy」两个 origin 间分流，
-                                    // 把浏览器 per-origin 6 连接上限提到 ~12（仅直连可达的源有效，代价是服务器出口流量）
-  serverTier?: ServerTier | 'auto'  // 服务器档位：'good'|'medium'|'bad' 手动锁定一档；'auto'/不设=按实测自动分档（可被 host 学习值起步）
-}
 
 // ── 服务器档位：好/中/差 三套抗卡参数预设 ──
 // 一处集中管理（取代 useHlsPrefetch 里散落的模块常量），供引擎按档位读取。
@@ -135,87 +124,10 @@ export function hostOf(url: string): string {
   return getHost(url)
 }
 
-// 内置规则表——按需扩展：复制一条改 pattern/name 与要覆盖的字段即可
-export const BUILTIN_RULES: SiteRule[] = [
-  {
-    id: 'jisuzyv',
-    name: '极速资源 (jisuzyv)',
-    pattern: 'jisuzyv.com',
-    // 该 CDN 并发一高就互相堵塞（502），只压并发。
-    // 可达性交给探测——这里若写死 useProxy/manifestOnly 等字段会让规则「接管可达性」、整站跳过探测，
-    // 反而拿不到最优组合与双通道。
-    playbackConcurrency: 2,
-    downloadConcurrency: 4,
-  },
-  {
-    id: 'xhscdn',
-    name: '小红书 CDN (xhscdn)',
-    pattern: 'xhscdn.com',
-    // 对无 Origin/Referer 的请求放行，403 时用伪装下载器
-    disguiseAsDownloader: true,
-    playbackConcurrency: 3,
-  },
-  {
-    id: 'huyall',
-    name: '慢速 CDN (huyall/baisiweiting)',
-    pattern: '/huyall\\.com|baisiweiting\\.com/',
-    // 源站每连接仅 ~80-160KB/s、1080p 需 ~3.5Mbps：只设并发下限保证起播即高并发，
-    // 直连/代理仍交给自动可达性阶梯，引擎再按实测微调（冷启动直接用满 6）。
-    playbackConcurrency: 6,
-    downloadConcurrency: 8,
-  },
-]
-
-const LS_KEY = 'video-player-site-rules'
-
-// 读取用户自定义规则（独立 localStorage key，避免污染主 state）
-export function loadUserSiteRules(): SiteRule[] {
-  try {
-    const raw = localStorage.getItem(LS_KEY)
-    if (raw) {
-      const parsed = JSON.parse(raw)
-      if (Array.isArray(parsed)) return parsed as SiteRule[]
-    }
-  } catch (e) {
-    console.error('加载站点规则失败:', e)
-  }
-  return []
-}
-
-export function saveUserSiteRules(rules: SiteRule[]) {
-  try {
-    localStorage.setItem(LS_KEY, JSON.stringify(rules))
-  } catch (e) {
-    console.error('保存站点规则失败:', e)
-  }
-}
-
 function getHost(url: string): string {
   try {
     return new URL(url.startsWith('//') ? 'https:' + url : url).host
   } catch {
     return ''
   }
-}
-
-function ruleMatches(rule: SiteRule, url: string, host: string): boolean {
-  const p = rule.pattern?.trim()
-  if (!p) return false
-  if (p.length > 2 && p.startsWith('/') && p.endsWith('/')) {
-    try {
-      return new RegExp(p.slice(1, -1)).test(url)
-    } catch {
-      return false
-    }
-  }
-  return host.includes(p) || url.includes(p)
-}
-
-// 命中的规则：用户规则优先，其次内置
-export function matchSiteRule(url: string, userRules: SiteRule[] = []): SiteRule | null {
-  const host = getHost(url)
-  for (const rule of [...userRules, ...BUILTIN_RULES]) {
-    if (ruleMatches(rule, url, host)) return rule
-  }
-  return null
 }

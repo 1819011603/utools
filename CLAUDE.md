@@ -89,7 +89,7 @@ server/parsers/       每站一个策略，见「视频解析」一节
 | `useVideoMediaState.ts` | **裸状态**：只有 ref，没有逻辑。存在的唯一目的是打断模块间依赖环 |
 | `useVideoHandoff.ts` | 交接槽读写、剧名/集名、按需取址作业单（全部**按 URL 存**，见下） |
 | `useVideoServerTier.ts` | 服务器档位（好/中/差）与抗卡参数覆盖 |
-| `useVideoConnStrategy.ts` | 可达性探测 → 结论套用 / 线性阶梯兜底 / 站点规则 / Origin-Referer 历史 |
+| `useVideoConnStrategy.ts` | 可达性探测 → 结论套用 / 线性阶梯兜底 / Origin-Referer 候选值与历史 |
 | `useVideoPlaylistCtl.ts` | 播放列表、切集、进度记忆、刷新链接、按需取址 |
 | `useVideoEngine.ts` | hls.js 生命周期、预取/缓存/卡顿三件套装配、加载超时、每秒心跳 |
 | `useVideoAutoTune.ts` | 自愈调参环：自动分档 + 抗卡阶梯 + 生效倍速 + 按 host 记忆 |
@@ -125,15 +125,18 @@ UI 分块在 `components/videoPlayer/`：`SourceCard`（输入+连接策略+探�
 - Node 上动态加载 undici Agent 放宽 TLS、超时拉到 5 分钟；CF Workers 上降级原生 fetch
 - `fetchWithHeaderProbe` 会并发探测「带头/不带头」哪种能过，结果按 host 缓存 30 分钟
 
-页面侧只有两层，优先级 **站点规则 > 自动探测**：
+**连接方式只有一个来源：自动可达性探测**（`composables/videoPlayer/useReachabilityProbe.ts`）。
+起播前用几个小请求把 **manifest 轴**和**分片轴**各自的可达性实测出来再决策，
+取代了早先「直连→失败重载→代理→失败重载→代理+防盗链」的线性盲试。
 
-1. **自动可达性探测**（`composables/videoPlayer/useReachabilityProbe.ts`）：起播前用几个小请求把
-   **manifest 轴**和**分片轴**各自的可达性实测出来，再决策。取代了早先「直连→失败重载→代理→失败重载→代理+防盗链」的线性盲试。
-2. **站点规则**（`composables/videoSiteRules.ts`）：按 host 子串或 `/正则/` 匹配，内置 jisuzyv/xhscdn/huyall 三条。
-   **只剩内置表**——用户自定义规则的编辑界面已移除（`matchSiteRule(url)` 不再传用户规则），加规则直接改这个文件。
-   注意：规则里只要写了 `useProxy`/`manifestOnly`/`disguiseAsDownloader`/`origin`/`referer` 任一字段就算「接管可达性」，会整站跳过探测——只想调并发就别写这些字段。
+**「站点规则」整张表已删除**：`SiteRule` / `BUILTIN_RULES`（jisuzyv、xhscdn、huyall）/ `matchSiteRule` /
+`ruleControlsReachability` / `loadUserSiteRules` / `localStorage` 的 `video-player-site-rules` 全部不复存在。
+它是一堆写死的静态判断，而它想解决的每件事现在都有实测来源：
+连接方式 → 可达性探测 + lane 熔断；并发 → `useHlsPrefetch` 的闭环控制；档位 → `classifyTier` + 按 host 学习。
+留着它唯一的作用只剩「源站改了策略之后整站播不了，还看不出是被谁按住的」。
+`composables/videoSiteRules.ts` 这个文件还在，但**只剩服务器档位预设与按 host 的学习档案**（文件名待改）。
 
-**没有手动模式了**（`manualStrategyOverride` 已整条删除）。原来「用户改任一连接设置就把引擎的手按住」
+**也没有手动模式了**（`manualStrategyOverride` 已整条删除）。原来「用户改任一连接设置就把引擎的手按住」
 带来的问题是：探测覆盖不到的情况（分片轴没测到、双通道没证据）会被一个手动开关永久固化，
 用户还看不出是自己按住的还是引擎判的。现在全部收敛进自动：
 
@@ -206,7 +209,7 @@ manifest 不过代理就没法把分片指向代理）；**分片可直连 → m
 - `videoPlayer/useHlsPrefetch.ts`：自定义 hls.js `fLoader`，命中预取缓存即时返回；按缓冲健康度动态调并发。
   浏览器同 host 只给 6 条连接（`MAX_CONN`），所以有**双通道**——同一分片给出「直连 CDN」和「/api/proxy」两个 origin 的 URL，并发提到 ~12。
 - **服务器档位** good/medium/bad（`SERVER_TIERS`）：一套抗卡参数（濒卡/吃紧阈值、安全系数、并发下限、对冲延迟、跳片超时、竞速上限）。
-  可自动分档（`classifyTier`）或站点规则锁定；页面「抗卡策略」区可覆盖其中几项
+  由 `classifyTier` 自动分档（站点规则已删除，不再有「锁定档位」）；页面「抗卡策略」区可覆盖其中几项
   （`hedgeMs`/`maxRacers` 只留预设不开放覆盖：手调它们只是在换「多快开始浪费连接」，帮不上忙）。
   分档结果按 host 学习并持久化（`loadLearnedProfile`/`saveLearnedProfile`），下次进同站直接从最优起步。
 - `videoPlayer/useStallTracker.ts`：以 `<video>` 真实停顿（waiting/stalled）为地面真值反馈调参，排除 seek 和用户 pause。
@@ -297,7 +300,7 @@ composables/
 
 1. 地址明文写在页面里 → 在 `BUILTIN_PARSE_RULES` 加一条规则，**不用写代码**。
    规则就四条正则：`sourceRe`（当前集地址）/ `lineRe`（线路标签）/ `episodeGroupRe`（选集容器）/
-   `episodeRe`（组内单集），pattern 语义与 `videoSiteRules.ts` 一致（`/正则/` 或 host 子串）。
+   `episodeRe`（组内单集），pattern 语义见 `matchParseSite`（`/正则/` 或 host 子串）。
 2. 要另调接口 / 要签名 / 要解密 → 在 `server/parsers/sites/` 加一个 `.ts` 导出 `SiteParser`，
    在 `server/parsers/index.ts` 的 `CODED_PARSERS` 注册，**并在 `videoParseRules.ts` 的
    `CODED_PARSE_SITES` 登记 pattern**——前端 `matchParseSite()` 要靠它判断「这个地址支持不支持」，
@@ -478,10 +481,16 @@ ncat 系挂了 cdndefend：首访返回 **HTTP 850** + 挑战页，要求暴力�
 若目标站点被 DNS 污染或需要代理才能访问，会出现「浏览器能打开、接口报 `fetch failed`」——
 因为浏览器走系统代理而 Node 默认不走。起 dev 前设一下即可：
 
-```powershell
-$env:HTTPS_PROXY = 'http://127.0.0.1:7897'   # 换成你本机代理端口
-npm run dev
+```bash
+HTTPS_PROXY=http://127.0.0.1:7897 MEDIA_NO_PROXY=1 npm run dev
 ```
+
+**`MEDIA_NO_PROXY=1` 很关键**：`HTTPS_PROXY` 会同时作用于 `siteFetch.ts`（抓解析页）和 `api/proxy.ts`
+（转发视频流），而**视频流跟着走代理往往适得其反**——出口 IP 一变很多 CDN 直接 403。
+实测 `vip.ffzy-play10.com` 的分片：本机直连 200，经本地代理出口 403，**与 Referer 完全无关**
+（带不带、带哪个域名都一样）。这种 403 极难归因：页面上看到的是「所有分片红一片」，
+探测矩阵还显示某条代理通道可达，非常容易误判成防盗链或连接策略的问题——追了三轮才定位到出口 IP。
+所以 `api/proxy.ts` 单独认 `MEDIA_NO_PROXY=1`（媒体流直连）和 `MEDIA_HTTPS_PROXY`（媒体流单独指定代理）。
 
 CF Pages 上没有这些变量，出口直连，不受影响。
 
@@ -505,6 +514,15 @@ CF Pages 上没有这些变量，出口直连，不受影响。
 - **CF Workers 无 `process`**：服务端代码判空后再动态 `import('undici')`，specifier 必须用变量 + `@vite-ignore` 包住，否则 Vite 会在 CF 构建时静态解析报错
 - **`@ffmpeg/*` 必须 `optimizeDeps.exclude`**（已在 nuxt.config.ts）
 - **206 Range 响应不可缓存**，见上
+- **`/api/proxy` 遇到上游非 2xx 必须原样透传状态码，绝不能进 m3u8 改写**。
+  漏了这条的表现极其隐蔽（实测 `vip.ffzy-play10.com`）：源站回 403 + 一页 HTML，而请求的是 `.m3u8`，
+  于是这页 HTML 被 `rewriteM3u8` 逐行当成相对 URI 拼上 baseUrl，最后以
+  **200 + `application/vnd.apple.mpegurl`** 返回。连锁反应是：
+  ① 可达性探测的 `fetchM3u8Manifest` 不报错 → 该通道判 `ok`（假阳性）；
+  ② 但解析出 0 个分片 → `segmentUrl` 为空 → **分片轴整轮跳过、四格全 `skip`**；
+  ③ 结论只好让分片跟随清单，选中一条实际 403 的通道，播放器满屏红。
+  「分片轴全 skip 而清单显示可达」这个现象追了三轮才定位到这里。
+  第二道防线在 `loadManifest`：**解析不出任何分片就判 `fail`**，别的源回 200 垃圾时也能兜住。
 - **判断「是不是 m3u8 清单」绝不能用 `url.includes('.m3u8')`**，一律走 `utils/mediaUrl.ts` 的 `isM3u8Url()`。
   有的站点把 `.m3u8` 当**目录名**：`https://cdn/video/xxx/20241110HVeUlTF2index.m3u8/0000000.ts`
   （实测 `feikuai.in` → `p.bvvvvvvvvv1f.com` 这条链路）。全串匹配会把 ts 分片判成清单，两处同时坏掉：

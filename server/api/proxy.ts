@@ -45,9 +45,17 @@ async function getNodeDispatcher(): Promise<any> {
     // 本地开发时目标站点常被 DNS 污染或需要代理才能访问（同 siteFetch.ts 的理由）。
     // 视频解析会经本接口去取站点自己的 js/wasm 和取址接口，这条链路也得能走代理，
     // 否则「解析页能出选集、取址却全 502」。CF Pages 上没有这些变量，出口直连。
+    //
+    // 但**视频流不一定该跟着走代理**：出口 IP 一变，很多 CDN 直接 403
+    //（实测 vip.ffzy-play10.com：本机直连 200，经本地代理出口 403，且与 Referer 完全无关）。
+    // 这种 403 极难归因——页面上看到的是「所有分片红一片」，很容易误判成防盗链或连接策略有问题。
+    // 所以留一个 MEDIA_NO_PROXY=1 的开关：解析链路照走代理，媒体流直连。
     // @ts-ignore CF Workers 上没有 process
     const env = globalThis.process?.env ?? {}
-    const proxyUri = env.HTTPS_PROXY || env.https_proxy || env.HTTP_PROXY || env.http_proxy || env.ALL_PROXY || env.all_proxy
+    const noMediaProxy = env.MEDIA_NO_PROXY === '1'
+    const proxyUri = noMediaProxy ? ''
+      : (env.MEDIA_HTTPS_PROXY || env.HTTPS_PROXY || env.https_proxy || env.HTTP_PROXY || env.http_proxy || env.ALL_PROXY || env.all_proxy)
+    if (noMediaProxy) console.log('[proxy] MEDIA_NO_PROXY=1：媒体流直连出口，不走本地代理')
     if (proxyUri && undici?.ProxyAgent) {
       _dispatcher = new undici.ProxyAgent({ uri: proxyUri, ...opts })
       console.log('[proxy] 走代理转发：' + proxyUri)
@@ -96,6 +104,23 @@ export default defineEventHandler(async (event) => {
   }
 
   const contentType = response.headers.get('content-type') ?? ''
+
+  // ── 上游非 2xx：原样把状态码透回去，绝不进 m3u8 改写 ──
+  //
+  // 不这么做的后果极其隐蔽（实测 vip.ffzy-play10.com）：源站对不带 Referer 的请求回 403 + 一页 HTML，
+  // 而这段 HTML 因为请求的是 .m3u8 会被 rewriteM3u8 逐行当成相对 URI 拼上 baseUrl，
+  // 最后以 **200 + application/vnd.apple.mpegurl** 返回。于是：
+  //   · 可达性探测的 `fetchM3u8Manifest` 不报错 → 该通道被判成 `ok`（假阳性）；
+  //   · 但解析出来 0 个分片 → `segmentUrl` 为空 → 分片轴整轮跳过，四格全 `skip`；
+  //   · 结论只好让分片跟随清单，最终选了一条实际 403 的通道，播放器满屏红。
+  // 「分片轴全 skip + 清单显示可达」这个诡异现象追了三轮，根子就在这里。
+  if (!response.ok) {
+    setResponseHeader(event, 'Access-Control-Allow-Origin', '*')
+    setResponseHeader(event, 'Cache-Control', 'no-store')
+    if (contentType) setResponseHeader(event, 'Content-Type', contentType)
+    setResponseStatus(event, response.status)
+    return response.body
+  }
 
   // ── m3u8：改写内部 URL ──
   // 判据用 isM3u8Url 而不是 includes('.m3u8')：分片路径里可能带 .m3u8 目录名，

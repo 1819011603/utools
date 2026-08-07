@@ -240,9 +240,13 @@ export async function probeReachability(
         ({ manifest, baseUrl } = await fetchM3u8Manifest(resolveUrl(baseUrl, best.uri), ctrl.signal))
       }
       const seg = manifest?.segments?.[0]
+      // 拿到了响应但里面一个分片都没有 → 判 fail，不能算这条通道「可达」。
+      // 源站的错误页（403/404 的 HTML）经代理回来仍是 200，m3u8-parser 也不会抛错，
+      // 只是解析出一个空清单；判成 ok 会让后面整轮分片探测被跳过，最终选中一条根本播不了的通道。
+      if (!seg?.uri) return { reach: 'fail' as Reach, ms: Math.round(performance.now() - t0) }
       return {
         reach: 'ok' as Reach, ms: Math.round(performance.now() - t0),
-        segmentUrl: seg?.uri ? resolveUrl(baseUrl, seg.uri) : undefined,
+        segmentUrl: resolveUrl(baseUrl, seg.uri),
         keyUrl: seg?.key?.uri ? resolveUrl(baseUrl, seg.key.uri) : undefined,
       }
     } catch {

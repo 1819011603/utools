@@ -18,7 +18,7 @@ export interface HlsPrefetchOptions {
   getVideoEl: () => HTMLVideoElement | undefined
   getProxyUrl: (url: string) => string
   cache: ReturnType<typeof useSegmentCache>
-  // 站点规则的 playbackConcurrency：作为并发「下限/手动兜底」（默认 3），引擎可按需再往上到 6
+  // 并发下限的外部兜底（站点规则已删除，现恒为 1）；实际下限取档位的 concurrencyFloor
   getConcurrencyCap: () => number
   // 当前倍速（倍速越高需要越大带宽），默认 1
   getPlaybackRate?: () => number
@@ -57,7 +57,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   const getLaneUrls = opts.getLaneUrls ?? ((url: string) => [getProxyUrl(url)])
   // 档位参数：好/中/差预设，抗卡阈值/超时/安全系数全从这里取（默认中档）
   const tier = (): TierParams => opts.getTierParams?.() ?? SERVER_TIERS[DEFAULT_TIER]
-  // 并发下限：站点规则 playbackConcurrency 与档位 concurrencyFloor 取大
+  // 并发下限：外部兜底值与档位 concurrencyFloor 取大
   const floorConn = (): number => Math.max(1, getConcurrencyCap(), tier().concurrencyFloor)
   // 有效预取深度：只认用户「预加载时长」（maxBufferLength）。档位不收窄它——
   // 否则快源缓存一到档位深度就停、预取线程掉 0。想省内存请调小「预加载时长」。
@@ -73,7 +73,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
 
   // ── lane 熔断 ──
   // 起播前的可达性探测未必覆盖得到分片轴（清单通了但没解析出分片时它整轮跳过），
-  // 站点规则和手动开关更是完全没实测。所以真实请求本身就是最后一道探测：
+  // 而探测本身也可能因为源站返回怪东西而给出假阳性。所以真实请求本身就是最后一道探测：
   // 某条 lane 连续失败而别的 lane 还在成功，就把它熔断，双通道自动退回单通道。
   // 不这么做的表现是「视频能播，但一半请求 403」——白扔一半连接，控制台刷屏（实测 maowushi 源，
   // 分片要 Referer，直连 lane 每发必 403，代理 lane 正常 200）。

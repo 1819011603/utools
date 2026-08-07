@@ -59,8 +59,9 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     getVideoEl: () => videoEl.value,
     getProxyUrl: conn.getProxyUrl,
     cache: segmentCache,
-    // 站点规则 playbackConcurrency 作并发下限（默认 1）；引擎按实测+倍速动态往上算
-    getConcurrencyCap: () => conn.activeRule.value?.playbackConcurrency ?? 1,
+    // 并发下限恒为 1：站点规则已删除，实际下限由档位的 concurrencyFloor 给，
+    // 引擎再按实测带宽 + 倍速动态往上爬（见 useHlsPrefetch 的 floorConn/stepControl）
+    getConcurrencyCap: () => 1,
     getPlaybackRate: () => playbackRate.value,
     // 「预加载时长」= 往后预取多少秒就够了，到量即停（0/负数视为不限）
     getPrefetchTargetSecs: () => {
@@ -205,7 +206,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     isHls.value = conn.isHlsUrl(url)
 
     console.log('开始加载视频:', url, '是否HLS:', isHls.value,
-      '使用代理:', conn.useProxy.value, '站点规则:', conn.activeRule.value?.name ?? '无')
+      '使用代理:', conn.useProxy.value)
 
     try {
       if (isHls.value) await loadHlsVideo(url)

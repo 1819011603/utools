@@ -34,7 +34,7 @@
  *   useVideoMediaState      裸状态（打断模块间依赖环）
  *   useVideoHandoff         交接槽 / 剧名集名 / 按需取址作业单
  *   useVideoServerTier      服务器档位与抗卡参数
- *   useVideoConnStrategy    可达性探测 / 线性阶梯兜底 / 站点规则 / 代理 URL
+ *   useVideoConnStrategy    可达性探测 / 线性阶梯兜底 / 代理 URL
  *   useVideoPlaylistCtl     播放列表 / 进度记忆 / 刷新链接
  *   useVideoEngine          hls.js 生命周期 / 预取装配 / 自愈调参
  *   useVideoEvents          <video> 事件 / 起播预缓冲

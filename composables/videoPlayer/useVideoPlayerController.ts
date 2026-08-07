@@ -27,7 +27,6 @@ export function useVideoPlayerController() {
   let playlist!: VideoPlaylistCtl
 
   const tier = useVideoServerTier({
-    getActiveRule: () => conn?.activeRule.value ?? null,
     onDirty: () => saveState(),
   })
 
@@ -72,7 +71,7 @@ export function useVideoPlayerController() {
     currentIndex: playlist.currentIndex,
     errorMessage: media.errorMessage,
     useProxy: conn.useProxy,
-    getDownloadConcurrency: () => conn.activeRule.value?.downloadConcurrency ?? 6,
+    getDownloadConcurrency: () => 6,
   })
   // 换流/销毁时把下载任务一起取消（引擎不认识下载模块，靠登记钩子）
   engine.registerDestroyHook(() => download.cancelDownload())

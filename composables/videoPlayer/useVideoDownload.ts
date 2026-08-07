@@ -14,7 +14,7 @@ export interface VideoDownloadOptions {
   currentIndex: Ref<number>
   errorMessage: Ref<string>
   useProxy: Ref<boolean>
-  // 下载并发（来自站点规则），默认 6
+  // 下载并发，默认 6
   getDownloadConcurrency?: () => number
 }
 

@@ -2,18 +2,16 @@
  * 服务器档位（好/中/差）与抗卡参数。
  *
  * 一套抗卡参数（濒卡/吃紧阈值、安全系数、并发下限、对冲延迟、跳片超时、竞速上限）打包成档位，
- * 可自动分档（classifyTier，由 useVideoEngine 的自愈环调用）或被站点规则锁定；
+ * 由 classifyTier 自动分档（useVideoEngine 的自愈环每秒调一次）；站点规则已删除，不再有「锁定档位」。
  * 页面「抗卡策略」区可覆盖其中几项（hedgeMs/maxRacers 只留预设，手调无益，见 HlsSettings.vue）。
  * 分档结果按 host 学习并持久化，下次进同站直接从最优起步。
  *
  * 本模块只管「档位是什么、参数取多少」，不含分档决策——那要读实测带宽和真实卡顿，
  * 属于引擎的自愈环（见 useVideoEngine 的 selfHeal）。
  */
-import type { SiteRule, ServerTier, TierParams } from '../videoSiteRules'
+import type { ServerTier, TierParams } from '../videoSiteRules'
 
 export interface VideoServerTierDeps {
-  /** 当前 URL 命中的站点规则（规则可锁定档位） */
-  getActiveRule: () => SiteRule | null
   /** 覆盖参数改动即持久化（实时生效，无需「应用配置」） */
   onDirty: () => void
 }
@@ -24,16 +22,9 @@ export function useVideoServerTier(deps: VideoServerTierDeps) {
   const guardRateCeiling = ref(Infinity)                // 抗卡降速守卫上限：PANIC 置 1，恢复置 Infinity
   const currentHost = ref('')                           // 当前视频 host（学习档案按 host 存取）
 
-  // 生效档位名：手动规则锁定优先，否则自动实测/学习档
-  const effectiveTierName = computed<ServerTier>(() => {
-    const manual = deps.getActiveRule()?.serverTier
-    if (manual && manual !== 'auto') return manual
-    return autoTier.value
-  })
-  const tierIsAuto = computed(() => {
-    const m = deps.getActiveRule()?.serverTier
-    return !m || m === 'auto'
-  })
+  // 生效档位名 = 实测/学习档。规则锁定那条路已随站点规则一起删除，档位现在恒为自动
+  const effectiveTierName = computed<ServerTier>(() => autoTier.value)
+  const tierIsAuto = computed(() => true)
 
   const tierDefaults = computed(() => SERVER_TIERS[effectiveTierName.value])
   // 生效档位参数 = 预设 + 页面覆盖（过滤掉空/非法覆盖值，避免输入框清空污染数值逻辑）
@@ -75,11 +66,3 @@ export function useVideoServerTier(deps: VideoServerTierDeps) {
 }
 
 export type VideoServerTier = ReturnType<typeof useVideoServerTier>
-
-/** 「站点规则」里可选的档位（保留给规则编辑界面；当前页面只显示生效档位） */
-export const SERVER_TIER_OPTIONS = [
-  { label: '自动', value: 'auto' },
-  { label: '好', value: 'good' },
-  { label: '中', value: 'medium' },
-  { label: '差', value: 'bad' },
-]

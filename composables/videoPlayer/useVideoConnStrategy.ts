@@ -1,15 +1,13 @@
 /**
  * 连接策略：起播前实测「清单轴 / 分片轴」各自能走哪条通道，并把结论写回代理 ref。
  *
- * 优先级恒为 **手动 > 站点规则 > 自动探测**。
- *
+ * 连接方式**只有这一个来源**：手动模式与站点规则都已删除。
  * 过去是「直连 → 失败重载 → 代理 → 失败重载 → 代理+防盗链」的线性盲试，两个毛病：
  * 一是把 manifest 和分片当成一个维度（它们常在不同 host，CORS/防盗链/端口各自独立），
  * 二是靠失败反应式升级，最多黑屏重载 3 次。现在改成起播前几个小请求把矩阵测出来，一次到位；
  * 线性阶梯只保留为「探测拿不到结论」（断网/全超时）时的兜底。
  */
 import type { Ref } from 'vue'
-import type { SiteRule } from '../videoSiteRules'
 import type { ProbeResult, ConnConfig, AxisProbe } from './useReachabilityProbe'
 import type { VideoMediaState } from './useVideoMediaState'
 import type { VideoServerTier } from './useVideoServerTier'
@@ -34,13 +32,13 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   const { videoUrl, videoUrlInput, errorMessage } = media
 
   // ── 生效中的连接配置（getProxyUrl 直接读这些）──
-  // 这五个 ref 一律由引擎写：探测结论 / 站点规则 / 兜底阶梯。用户改不动它们，
+  // 这五个 ref 一律由引擎写：探测结论 / 兜底阶梯。用户改不动它们，
   // 因为「手动模式」已经取消了——所有情况都收敛进自动，见下面的 originHint。
   const useProxy = ref(false)
   const requestOrigin = ref('')            // 实际注入的 Origin 请求头
   const requestReferer = ref('')           // 实际注入的 Referer（空则自动为 origin + /）
   const manifestOnly = ref(true)           // 只代理 manifest，分片直连 CDN（更快）
-  const disguiseAsDownloader = ref(false)  // 默认直连不注入；探测结论或站点规则可置真
+  const disguiseAsDownloader = ref(false)  // 默认直连不注入；探测结论可置真
   // 直连+代理双通道：分片在「直连 CDN」和「/api/proxy」两个 origin 间分流，把并发从 6 提到 ~12
   const dualChannel = ref(false)
 
@@ -56,9 +54,6 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   const proxy = useVideoProxy({ requestOrigin, requestReferer, manifestOnly, disguiseAsDownloader, useProxy })
   const { isHlsUrl, effectiveReferer, refererHelp, getProxyUrl, getProxyPassthroughUrl, isDirectMode } = proxy
 
-  // 当前 URL 命中的内置站点规则（供代理/预取/下载并发和档位读取）。
-  // 自定义规则的编辑界面已移除，这里只吃 videoSiteRules.ts 里的内置表。
-  const activeRule = ref<SiteRule | null>(null)
 
   const probeResult = ref<ProbeResult | null>(null)
   const isProbing = ref(false)
@@ -87,7 +82,7 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     if (r && !r.degraded && axisMeasured(r.segment)) {
       return !(r.segment.direct === 'ok' && r.segment.disguise === 'ok')
     }
-    // 无探测数据（手动/规则/兜底阶梯）：跟 getProxyUrl 对分片(.ts)的判定保持一致——
+    // 无探测数据（分片轴没测到 / 走了兜底阶梯）：跟 getProxyUrl 对分片(.ts)的判定保持一致——
     // 分片走代理时直连 lane 必 403/CORS，没有分流可言。
     if (disguiseAsDownloader.value) return !manifestOnly.value
     const hasHeaders = !!requestOrigin.value.trim() || !!requestReferer.value.trim()
@@ -146,10 +141,6 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
 
   // ── 阶梯 / 结论套用 ──
 
-  // 规则是否显式接管可达性（任一代理相关字段有值）；有则用规则，跳过自动探测
-  const ruleControlsReachability = (r: SiteRule | null): boolean =>
-    !!r && (r.useProxy !== undefined || r.manifestOnly !== undefined ||
-      r.disguiseAsDownloader !== undefined || r.origin !== undefined || r.referer !== undefined)
 
   const selfOriginOf = (url: string): string => {
     try { return new URL(url.startsWith('//') ? 'https:' + url : url).origin } catch { return '' }
@@ -260,29 +251,17 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   }
 
   /**
-   * 决定本次加载策略。同步部分（规则/档位记忆）总是跑；可达性部分可能 await 探测。
+   * 决定本次加载策略。档位记忆总是取；可达性部分可能 await 探测。
    * 由 loadVideo 在 startLoadTimeout **之前** await，否则探测耗时会被算进加载超时。
    */
   const applyStrategy = async (url: string) => {
-    const rule = matchSiteRule(url)
-    activeRule.value = rule
     const learned = tier.beginHost(hostOf(url))
-    // 双通道：规则可指定（dualChannel 与可达性无关，单独套用）
-    if (rule?.dualChannel !== undefined) dualChannel.value = rule.dualChannel
     if (url !== lastStrategyUrl) {
       autoStrategyStep.value = 0
       ladderMode.value = false
       reprobedFor = ''
       probeResult.value = null
       lastStrategyUrl = url
-    }
-    if (ruleControlsReachability(rule)) {
-      if (rule!.useProxy !== undefined) useProxy.value = rule!.useProxy
-      if (rule!.manifestOnly !== undefined) manifestOnly.value = rule!.manifestOnly
-      if (rule!.disguiseAsDownloader !== undefined) disguiseAsDownloader.value = rule!.disguiseAsDownloader
-      if (rule!.origin !== undefined) requestOrigin.value = rule!.origin
-      if (rule!.referer !== undefined) requestReferer.value = rule!.referer
-      return
     }
     if (ladderMode.value || !isProbeable(url)) {
       applyReachabilityStep(autoStrategyStep.value)
@@ -308,7 +287,6 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
    * 重探还救不回来才退回线性阶梯继续盲试。返回 true 表示已接手（调用方别再报错）。
    */
   const escalateStrategyAndReload = (): boolean => {
-    if (ruleControlsReachability(activeRule.value)) return false
     const url = videoUrl.value.trim()
     if (url && isProbeable(url) && !ladderMode.value && reprobedFor !== url) {
       reprobedFor = url
@@ -329,7 +307,6 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   // ── 展示 ──
 
   const strategyLabel = computed(() => {
-    if (ruleControlsReachability(activeRule.value)) return `规则(${activeRule.value?.name})`
     if (isProbing.value) return '探测中…'
     if (probeResult.value && !probeResult.value.degraded) return describeProbe(probeResult.value)
     return STRATEGY_STEP_LABELS[autoStrategyStep.value] ?? '直连'
@@ -410,7 +387,6 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   return {
     // 生效中的连接配置（引擎写，UI 只读）
     useProxy, requestOrigin, requestReferer, manifestOnly, disguiseAsDownloader, dualChannel,
-    activeRule,
     // 用户填的候选头
     originHint, refererHint, hintStatus, refererHintHelp, onHeaderHintChange,
     // 代理 URL 生成
