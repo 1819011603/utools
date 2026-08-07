@@ -133,6 +133,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   let hlsTickTimer: ReturnType<typeof setInterval> | null = null
   const startHlsTick = () => {
     if (hlsTickTimer) return
+    document.addEventListener('visibilitychange', onVisibilityChange)
     hlsTickTimer = setInterval(() => {
       stall.tick()   // 绑定/改绑卡顿监听（幂等）+ 刷新连续流畅读数
       prefetchTick()
@@ -143,6 +144,28 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   }
   const stopHlsTick = () => {
     if (hlsTickTimer) { clearInterval(hlsTickTimer); hlsTickTimer = null }
+    document.removeEventListener('visibilitychange', onVisibilityChange)
+  }
+
+  /**
+   * 回到前台时的追赶。**整个预取引擎都挂在上面那个 1 秒心跳上**，而浏览器会节流后台标签页的
+   * 定时器（切走久了拉长到几十秒一拍）。于是后台期间：播放照常消耗预取缓存，补片却几乎停了，
+   * 前方缓存被吃空。切回来的一瞬间 hls.js 要的分片不在缓存里 → 走网络 → 就是那「卡一下」。
+   * 而并发是每拍 +1 慢慢爬的，等它自己恢复要好几秒；期间再切走切回来，缓存已经填回去了，
+   * 所以第二次「就好了」——这正是这个 bug 的特征现象。
+   * 全屏时没事也对得上：全屏的标签页始终是前台，压根没被节流过。
+   *
+   * 这里不等下一拍，立刻把该做的都做一遍：作废卡顿采样基准（见 resetSampler，
+   * 否则后台那几十秒会被回填成一次假卡顿）→ 跑一拍闭环 → primePrefetch 直接把并发拉起来。
+   */
+  const onVisibilityChange = () => {
+    if (document.visibilityState !== 'visible' || !hls) return
+    stall.resetSampler()
+    stall.tick()
+    prefetchTick()
+    primePrefetch()   // 不等并发一拍 +1 地爬，立刻按当前缓冲拉满补片
+    refreshCacheStats()
+    updateHlsStats()
   }
 
   const updateHlsStats = () => {

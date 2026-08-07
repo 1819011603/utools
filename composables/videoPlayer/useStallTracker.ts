@@ -224,6 +224,19 @@ export function useStallTracker(getVideo: () => HTMLVideoElement | undefined) {
     tickAt = t
   }
 
+  /**
+   * 丢掉位置采样的基准，下一拍重新建立。
+   *
+   * 标签页切到后台时心跳会被浏览器节流（拉长到几十秒一拍），回到前台的第一拍里
+   * `tickAt` 还是切走之前那个时刻。此时若播放头恰好没前进，`beginStall(tickAt)` 会把
+   * **整段后台时间**回填成一次卡顿——面板凭空多出几十秒，自愈环还会据此把倍速压回 1x。
+   * 所以回前台先调这个，把基准作废。
+   */
+  const resetSampler = () => {
+    tickPos = -1
+    tickAt = now()
+  }
+
   /** 心跳每秒调：改绑（元素可能刚被重建）+ 位置采样兜底 + 刷新响应式读数 */
   const tick = () => {
     bind()
@@ -252,6 +265,7 @@ export function useStallTracker(getVideo: () => HTMLVideoElement | undefined) {
     unbind,
     reset,
     tick,
+    resetSampler,
     getSmoothSecs,
     stallCountInWindow,
   }
