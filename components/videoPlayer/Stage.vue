@@ -209,7 +209,7 @@
       -->
       <Transition name="pop">
         <button
-          v-if="isLocked ? showLockBtn : (showControls || !isPlaying)"
+          v-if="isLocked ? showLockBtn : (showControls || pausedIdle)"
           data-no-gesture
           class="absolute left-3 top-1/2 -translate-y-1/2 w-14 h-14 rounded-full text-white
                  flex items-center justify-center backdrop-blur-sm ring-1 transition-all duration-300
@@ -274,7 +274,8 @@
             </div>
           </div>
 
-          <div class="flex items-center justify-between gap-2 flex-wrap min-w-0">
+          <!-- 窄屏上不换行：一换行控制栏就摞成两排，把进度条顶到画面中间（实测手机上一团糟） -->
+          <div class="flex items-center justify-between gap-1 min-w-0">
             <!--
               前进/后退 10 秒的两枚按钮已删：双击画面左右两侧就是 ±5s，手机上比瞄准小图标快得多，
               键盘还有 ←/→。留着只是把上下一集这两枚真正常用的挤小了。
@@ -288,11 +289,11 @@
                 title="上一集"
                 @click="playPrev"
               >
-                <UIcon name="i-heroicons-backward-solid" class="w-7 h-7" />
+                <UIcon name="i-heroicons-backward-solid" class="w-6 h-6 sm:w-7 sm:h-7" />
               </button>
 
               <button class="p-2 rounded-lg text-white hover:bg-white/15 hover:text-violet-300 active:scale-90 transition-all" @click="togglePlay">
-                <UIcon :name="isPlaying ? 'i-heroicons-pause' : 'i-heroicons-play'" class="w-8 h-8" />
+                <UIcon :name="isPlaying ? 'i-heroicons-pause' : 'i-heroicons-play'" class="w-7 h-7 sm:w-8 sm:h-8" />
               </button>
 
               <button
@@ -303,10 +304,11 @@
                 title="下一集"
                 @click="playNext"
               >
-                <UIcon name="i-heroicons-forward-solid" class="w-7 h-7" />
+                <UIcon name="i-heroicons-forward-solid" class="w-6 h-6 sm:w-7 sm:h-7" />
               </button>
 
-              <div class="flex items-center gap-2 group/volume ml-1">
+              <!-- 手机上没有 hover，滑条永远展不开；音量有硬件键和竖滑手势，整组藏起来腾地方 -->
+              <div class="hidden sm:flex items-center gap-2 group/volume ml-1">
                 <button class="p-2 rounded-lg text-white hover:bg-white/15 hover:text-violet-300 transition-all" @click="toggleMute">
                   <UIcon :name="volumeIcon" class="w-6 h-6" />
                 </button>
@@ -320,7 +322,7 @@
                 </div>
               </div>
 
-              <span class="text-white text-sm font-mono shrink-0">
+              <span class="text-white text-xs sm:text-sm font-mono shrink-0 tabular-nums">
                 {{ formatTime(currentTime) }} / {{ formatTime(duration) }}
               </span>
             </div>
@@ -355,7 +357,7 @@
                 </Transition>
               </div>
 
-              <template v-if="canDownload">
+              <template v-if="canDownload && !isNarrow">
                 <template v-if="isDownloading">
                   <span class="text-white text-xs font-medium w-8 text-center">{{ downloadProgress }}%</span>
                   <button class="p-2 rounded-lg text-amber-400 hover:bg-white/15 hover:text-red-400 transition-all" title="取消下载" @click="cancelDownload">
@@ -367,7 +369,7 @@
                 </button>
               </template>
 
-              <button v-if="supportsPiP" class="p-2 rounded-lg text-white hover:bg-white/15 hover:text-violet-300 transition-all" title="画中画" @click="togglePiP">
+              <button v-if="supportsPiP && !isNarrow" class="p-2 rounded-lg text-white hover:bg-white/15 hover:text-violet-300 transition-all" title="画中画" @click="togglePiP">
                 <UIcon name="i-heroicons-rectangle-stack" class="w-6 h-6" />
               </button>
 
@@ -416,6 +418,15 @@ onClickOutside(speedMenuRef, () => { showSpeedMenu.value = false })
 
 // 「停在那儿了」：暂停且不是在加载/取址中。加载中另有转圈遮罩，两个叠一起只会打架。
 // 自动播放被浏览器拦下时也是这个状态——那正是最需要一枚大播放键的时候。
+// 窄屏（手机竖屏）：控制栏塞不下十来个图标，下载/画中画这类低频项直接不渲染。
+// 用 matchMedia 而不是 Tailwind 的 hidden：这两块是 <template>，没有能挂 class 的元素
+const isNarrow = ref(false)
+onMounted(() => {
+  const mq = window.matchMedia('(max-width: 639px)')
+  isNarrow.value = mq.matches
+  mq.addEventListener('change', e => { isNarrow.value = e.matches })
+})
+
 const pausedIdle = computed(() =>
   isVideoLoaded.value && !isPlaying.value && !isBuffering.value && !isResolvingUrl.value)
 </script>

@@ -40,7 +40,10 @@ export function useVideoMediaState() {
 
   // ── 界面开关 ──
   const isFullscreen = ref(false)
-  const showControls = ref(true)
+  // 默认**收起**：刚进来时画面上只该有中央播放键和锁定键。
+  // 原来默认展开、且暂停时强制展开，起播前顶部信息条 + 整条控制栏 + 中央大播放键全堆在一起，
+  // 手机上那块 200px 高的画面被塞得看不出主次（实测截图确认）
+  const showControls = ref(false)
   const showPlayIcon = ref(false)
   const showSpeedMenu = ref(false)
   // 播放器内嵌的选集抽屉。全屏时页面下方那份列表够不着，只能做进画面里

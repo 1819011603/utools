@@ -215,7 +215,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
       // 倍速菜单是控制栏的子元素，收控制栏会把摊开的菜单一起带走——
       // 表现就是「点开倍速还没选就没了」。开着就顺延，等它关了再收
       if (showSpeedMenu.value) { hideControlsDelayed(); return }
-      if (isPlaying.value) showControls.value = false
+      showControls.value = false   // 暂停时也收：暂停态自有中央播放键，控制栏杵着只是挡画面
     }, CONTROLS_HIDE_MS)
   }
 
@@ -226,6 +226,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
 
   /** 在控制栏上有任何动作就重新计时（触摸端唯一的续命途径） */
   const keepControlsAlive = () => {
+    consumeAutoFullscreen()   // 控制栏上的每一次点按都是「用户激活」，挂起的自动全屏顺手兑现
     showControls.value = true
     hideControlsDelayed()
   }

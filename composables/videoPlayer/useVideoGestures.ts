@@ -287,8 +287,13 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
    */
   const touchAction = computed(() => (isFullscreen.value ? 'none' : 'pan-y'))
 
-  /** 锁定时控制栏一律不出；`!isPlaying` 那条常显规则也得让位 */
-  const controlsVisible = computed(() => !isLocked.value && (showControls.value || !isPlaying.value))
+  /**
+   * 控制栏可见 = 用户唤出过 && 没锁定。
+   *
+   * 原来还带一条「暂停时常显」：可暂停态本来就有中央大播放键，再叠上顶部信息条和整条控制栏，
+   * 起播前画面上三样东西一起挤（手机上尤其明显）。现在暂停只出中央键，想要控制栏点一下就有。
+   */
+  const controlsVisible = computed(() => !isLocked.value && showControls.value)
 
   const disposeGestures = () => {
     clearTimers()
