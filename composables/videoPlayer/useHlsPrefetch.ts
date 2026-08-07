@@ -164,7 +164,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   }
   const {
     segPrefetchCache, segPrefetching, segPrefetchAborts,
-    prefetchInfo, getPrefetchedBuf, evictPrefetchCache,
+    prefetchInfo, getPrefetchedBuf, evictPrefetchCache, purgeCache,
   } = cache
 
   // ── 实测采样（EWMA）：每连接速度 + 视频码率，驱动动态并发 ──
@@ -639,11 +639,51 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     }
   }
 
+  /**
+   * 清掉播放头后面的分片缓存（已经播过的那些），保留前方预取。
+   *
+   * 缓存的键恒为 `frag.url`（双通道的 lane 只影响真正 fetch 的地址、不进键），
+   * 所以能拿分片表的 start/end 跟播放头精确对齐。
+   *
+   * 留 `keepBackSecs` 的回看余量：用户往回拖一点是常事，全清了就得重下。
+   * **拿不到分片表时直接返回**——此时无从判断谁已播，一刀切等于把前方预取也清了，
+   * 表现是「点一下清理立刻开始卡」。
+   */
+  const PURGE_KEEP_BACK_SECS = 30
+  const purgePlayedSegments = (keepBackSecs = PURGE_KEEP_BACK_SECS) => {
+    const hls = opts.getHls()
+    const video = opts.getVideoEl()
+    if (!hls || !video) return { removed: 0, freedBytes: 0 }
+    const level = hls.currentLevel >= 0 ? hls.currentLevel : 0
+    const frags: any[] = (hls as any).levels?.[level]?.details?.fragments ?? []
+    if (!frags.length) return { removed: 0, freedBytes: 0 }
+
+    const ct = anchorTime(video)
+    const keep = new Set<string>()
+    for (const frag of frags) {
+      if (frag.end > ct - keepBackSecs && frag.url) keep.add(frag.url)
+    }
+    // 不在这张表里的残留（切过画质档位留下的另一档分片）也一并清掉：
+    // 同一个视频，真要用到重下即可，留着只是白占内存
+    return purgeCache(url => keep.has(url))
+  }
+
+  // 每小时自动清一次。**不另起定时器**：挂在心跳上，天然「不播就不清」，
+  // 也不用管卸载时忘记 clearInterval。首次进入不立刻清（下面初始化成第一次 tick 的时刻）
+  const AUTO_PURGE_MS = 60 * 60 * 1000
+  let lastAutoPurge = 0
+
   // 实时心跳：由定时器/视频事件驱动（不依赖 FRAG_BUFFERED，避免卡顿时停更）。
   // 刷新缓冲读数、跑闭环控制、把在途预取补足到目标并发。
   const tick = () => {
     const video = opts.getVideoEl()
     if (!video) return
+    const now = Date.now()
+    if (!lastAutoPurge) lastAutoPurge = now
+    else if (now - lastAutoPurge >= AUTO_PURGE_MS) {
+      lastAutoPurge = now
+      purgePlayedSegments()
+    }
     const mseAhead = getAheadBuffered(video)
     const cachedAhead = getCachedAhead(video)
     stepControl(mseAhead, cachedAhead)
@@ -676,5 +716,5 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     }
   }
 
-  return { getAheadBuffered, getCachedAhead, getAdaptivePrefetchCount, createHlsFragLoader, triggerAdaptivePrefetch, startOnePrefetch, strategy, resetStrategy, tick, primePrefetch, getStuckSegment, laneDead }
+  return { getAheadBuffered, getCachedAhead, getAdaptivePrefetchCount, createHlsFragLoader, triggerAdaptivePrefetch, startOnePrefetch, strategy, resetStrategy, tick, primePrefetch, getStuckSegment, laneDead, purgePlayedSegments }
 }

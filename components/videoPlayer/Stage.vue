@@ -75,18 +75,6 @@
         </div>
       </Transition>
 
-      <!-- 全屏时固定显示的退出全屏按钮（控制栏隐藏时也可见） -->
-      <Transition name="fade">
-        <button
-          v-if="isFullscreen && !showControls"
-          class="absolute top-3 right-3 z-10 text-white/60 hover:text-white transition-colors bg-black/30 rounded-full p-1.5"
-          title="退出全屏"
-          @click.stop="toggleFullscreen"
-        >
-          <UIcon name="i-heroicons-arrows-pointing-in" class="w-5 h-5" />
-        </button>
-      </Transition>
-
       <Transition name="slide-up">
         <div
           v-show="showControls || !isPlaying"

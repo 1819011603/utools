@@ -253,6 +253,17 @@ manifest 不过代理就没法把分片指向代理）；**分片可直连 → m
   之后只剩 0.25x/25s 的慢爬（1x→3x 要 200 秒），表现同样是「点了没反应」（踩过）。
 - `videoPlayer/useSegmentCache.ts`：模块级单例内存缓存，TTL 1 天 + 内存上限 LRU + seek 时批量 abort。
   只在「TTL 过期」或「切到别的视频」时清；跨组件卸载存活，但**刷新页面必然丢**（JS 堆机制）。
+  - **缓存里只可能有当前视频的分片**：`useCacheForVideo()` 在视频 URL 一变就整块 `clear()`。
+    所以「清掉别的视频的缓存」是个不存在的需求，真正堆积的是**当前视频已经播过的分片**
+    （原来要等 TTL 1 天或内存上限才淘汰）。
+  - **`maxBufferSizeMB` 不能跟着别的缓冲项一起给大值**：它是这份 JS 缓存的 LRU 天花板，
+    曾默认 3600（要堆到 3.6GB 才淘汰），长时间播放下 GC 压力足以让整个页面发卡。现默认 1024。
+    注意**改默认值救不了老用户**：`video-player-state` 优先级高于默认，得点「重置默认」。
+  - 清理由 `useHlsPrefetch.purgePlayedSegments()` 做（缓存模块只提供 `purgeCache(谓词)`，
+    它不认识 hls 和播放头，反向 import 会立刻变成循环依赖）。判据是分片表的 `end` 对播放头，
+    留 30s 回看余量；**拿不到分片表时必须直接返回**——此时无从判断谁已播，
+    一刀切等于把前方预取也清了，表现是「点一下清理立刻开始卡」。
+    每小时自动跑一次，挂在已有心跳上而不是另起定时器（天然「不播就不清」，也不用管卸载）。
 - `videoPlayer/useM3u8.ts`：m3u8-parser 解析 + AES-128 密钥/IV（`keyIv` 为 null 时用媒体序列号 `sn` 推导）
 - `videoPlayer/useVideoDownload.ts`：分片并发拉取 → AES 解密 → ffmpeg.wasm 合并 MP4（core 从 unpkg 拉）
 

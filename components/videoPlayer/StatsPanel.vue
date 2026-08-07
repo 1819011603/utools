@@ -47,7 +47,20 @@
         <span class="text-gray-500">MSE 窗口：</span>
         <span class="font-medium">{{ prefetchInfo.bufferSecs }} / {{ mseCeilingSecs }} 秒</span>
       </div>
-      <div><span class="text-gray-500">预取完成：</span><span class="font-medium">{{ prefetchInfo.cached }} 分片</span></div>
+      <!-- 分片数看不出内存压力（各站分片大小差一个量级），所以把 MB 摆在同一格 -->
+      <div
+        class="flex items-center gap-1"
+        :title="`JS 侧内存缓存（不是 MSE）：已下载好、随时命中的分片。LRU 上限 ${hlsConfig.maxBufferSizeMB} MB，`
+          + '超了淘汰最早的。长时间播放堆到上 GB 会让整个页面发卡，每小时自动清理一次已播过的分片。'"
+      >
+        <span class="text-gray-500">预取缓存：</span>
+        <span class="font-medium">{{ prefetchInfo.cached }} 片 / {{ cacheMB }} MB</span>
+        <UButton
+          size="2xs" variant="ghost" color="gray" icon="i-heroicons-trash"
+          title="清掉已经播过的分片，保留播放头前方的预取（不影响正在播的画面）"
+          @click="onPurge"
+        />
+      </div>
       <div><span class="text-gray-500">预取中：</span><span class="font-medium">{{ prefetchInfo.pending }} 分片</span></div>
     </div>
 
@@ -84,9 +97,27 @@ const {
   hlsConfig, hlsStats, bufferedPercent, progressPercent, playbackRate, playbackDiag,
   tierLabel, tierBadgeColor, tierIsAuto, guardRateCeiling, effectiveTierParams,
   strategy, stall, prefetchInfo, aggregateKBps, aggregateMbps,
-  dualChannel, dualChannelUnavailable,
+  dualChannel, dualChannelUnavailable, purgePlayedSegments,
 } = useVideoPlayerCtx()
 
 // MSE 窗口上限：与 useVideoEngine 里给 hls.js 的 maxMaxBufferLength 同一个算式（那边是 append 的硬闸）
 const mseCeilingSecs = computed(() => Math.min(60, hlsConfig.value.maxMaxBufferLength))
+
+const cacheMB = computed(() => (prefetchInfo.value.bytes / 1024 / 1024).toFixed(0))
+
+const toast = useToast()
+
+// 清理完必须给回执：释放 0 的时候尤其要说话，否则用户分不清「点了没反应」和「本来就没得清」
+const onPurge = () => {
+  const { removed, freedBytes } = purgePlayedSegments()
+  if (!removed) {
+    toast.add({ title: '没有可清理的已播分片', description: '播放头之前 30 秒内的分片会保留，供往回拖时命中', color: 'gray' })
+    return
+  }
+  toast.add({
+    title: `已释放 ${(freedBytes / 1024 / 1024).toFixed(0)} MB`,
+    description: `清掉 ${removed} 个已播分片，前方预取原样保留`,
+    color: 'green',
+  })
+}
 </script>

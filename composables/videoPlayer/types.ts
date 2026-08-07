@@ -38,7 +38,10 @@ export const DEFAULT_HLS_TUNING: HlsTuning = {
   maxBufferLength: 3600,
   maxMaxBufferLength: 3600,
   backBufferLength: 3600,
-  maxBufferSizeMB: 3600,
+  // 这一项**不能跟着上面几个一起给大值**：它是 JS 预取缓存的 LRU 天花板，
+  // 给 3600 意味着要堆到 3.6GB 才开始淘汰，长时间播放下 GC 压力足以让整个页面发卡（实测）。
+  // 1GB 大约对应 15~40 分钟预取，抗卡够用；真需要更深的人在「HLS 配置」里自己调
+  maxBufferSizeMB: 1024,
   fragLoadingTimeOut: 300000,
   fragLoadingMaxRetry: 3,
   enableWorker: true,

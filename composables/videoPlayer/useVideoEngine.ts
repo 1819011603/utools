@@ -52,7 +52,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
 
   // ── 预取缓存 + 自适应预取 + 卡顿记录 ──
   const segmentCache = useSegmentCache({ getMaxBufferSizeMB: () => hlsConfig.value.maxBufferSizeMB })
-  const { prefetchInfo, useCacheForVideo, abortAllPrefetches, startPrefetchCleanup, stopPrefetchCleanup } = segmentCache
+  const { prefetchInfo, useCacheForVideo, abortAllPrefetches, startPrefetchCleanup, stopPrefetchCleanup, refreshCacheStats } = segmentCache
 
   const prefetch = useHlsPrefetch({
     getHls: () => hls,
@@ -82,6 +82,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   const {
     getAheadBuffered, getCachedAhead, createHlsFragLoader, triggerAdaptivePrefetch,
     startOnePrefetch, strategy, resetStrategy, tick: prefetchTick, primePrefetch, getStuckSegment, laneDead,
+    purgePlayedSegments,
   } = prefetch
 
   // 双通道实际有没有跑起来：真实请求连续失败会把某条 lane 熔断（见 useHlsPrefetch 的 markLaneFail）。
@@ -135,6 +136,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     hlsTickTimer = setInterval(() => {
       stall.tick()   // 绑定/改绑卡顿监听（幂等）+ 刷新连续流畅读数
       prefetchTick()
+      refreshCacheStats()   // 面板上的「预取缓存 N 片 / X MB」
       updateHlsStats()
       tickHook?.()
     }, 1000)
@@ -171,7 +173,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     stopHlsTick()
     stopPrefetchCleanup()
     abortAllPrefetches()
-    prefetchInfo.value = { bufferSecs: 0, threads: 0, cached: 0, pending: 0 }
+    prefetchInfo.value = { bufferSecs: 0, threads: 0, cached: 0, pending: 0, bytes: 0 }
     resetStrategy()
     stall.unbind()          // 解绑卡顿监听（换流重新计）
     stall.reset()
@@ -399,7 +401,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     // 预取 / 缓存 / 卡顿
     prefetchInfo, strategy, stall,
     getAheadBuffered, getCachedAhead, primePrefetch, startOnePrefetch, prefetchTick,
-    abortAllPrefetches, triggerAdaptivePrefetch,
+    abortAllPrefetches, triggerAdaptivePrefetch, purgePlayedSegments,
     aggregateKBps, aggregateMbps, deadLaneLabel,
     // 起播锚点
     clearStartAnchor, isArrivingAtStart,

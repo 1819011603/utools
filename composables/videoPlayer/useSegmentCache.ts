@@ -9,7 +9,9 @@
  * 只管「存/取/淘汰/取消」，不涉及决定预取哪些分片（那是 useHlsPrefetch 的职责）。
  */
 interface PrefetchEntry { buf: ArrayBuffer; ts: number }   // 带时间戳，用于 TTL 过期
-export interface PrefetchInfo { bufferSecs: number; threads: number; cached: number; pending: number }
+// bytes = 缓存占的字节数。分片数看不出内存压力（各站分片大小差一个量级），
+// 而这个缓存正是播放页发卡时最该先看的那个数
+export interface PrefetchInfo { bufferSecs: number; threads: number; cached: number; pending: number; bytes: number }
 
 const PREFETCH_TTL_MS = 24 * 60 * 60 * 1000  // 缓存过期时间：1 天
 
@@ -21,7 +23,40 @@ const segPrefetchAborts = new Map<string, AbortController>()    // 正在预取�
 let cachedVideoUrl = ''                                         // 当前缓存归属的视频 URL
 
 export function useSegmentCache(opts: { getMaxBufferSizeMB: () => number }) {
-  const prefetchInfo = ref<PrefetchInfo>({ bufferSecs: 0, threads: 0, cached: 0, pending: 0 })
+  const prefetchInfo = ref<PrefetchInfo>({ bufferSecs: 0, threads: 0, cached: 0, pending: 0, bytes: 0 })
+
+  // 缓存占用字节数。条目数量级 ~1000（1GB / 1MB 一片），每秒遍历一次可忽略，
+  // 不值得为它维护一份「增删都要记得同步」的计数器——那种漏改一处就长期偏差
+  const cacheBytes = () => {
+    let n = 0
+    for (const entry of segPrefetchCache.values()) n += entry.buf.byteLength
+    return n
+  }
+
+  /** 把分片数与字节数一次写好。心跳每秒调一次，UI 只读这一个 ref */
+  const refreshCacheStats = () => {
+    prefetchInfo.value.cached = segPrefetchCache.size
+    prefetchInfo.value.bytes = cacheBytes()
+  }
+
+  /**
+   * 按谓词删除缓存项，返回释放量。
+   *
+   * 本模块**不认识 hls 也不认识播放头**（它只管存/取/淘汰/取消），
+   * 「哪些算已播」由上层算好后用谓词传进来——反过来在这里 import 上层会立刻变成循环依赖。
+   */
+  const purgeCache = (shouldKeep: (url: string) => boolean) => {
+    let removed = 0
+    let freedBytes = 0
+    for (const [url, entry] of segPrefetchCache) {
+      if (shouldKeep(url)) continue
+      freedBytes += entry.buf.byteLength
+      removed++
+      segPrefetchCache.delete(url)
+    }
+    refreshCacheStats()
+    return { removed, freedBytes }
+  }
 
   // 换视频时调用：URL 变了 → 旧缓存全属于上个视频，整块清掉（含在途请求）；
   // 同一视频（重播 / 点回去）→ 原样保留，直接命中内存。
@@ -33,6 +68,7 @@ export function useSegmentCache(opts: { getMaxBufferSizeMB: () => number }) {
     segPrefetchCache.clear()
     cachedVideoUrl = videoUrl
     prefetchInfo.value.cached = 0
+    prefetchInfo.value.bytes = 0
   }
 
   // 取消所有正在预取的 fetch（seek 后位置改变，旧的预取无意义）
@@ -64,7 +100,7 @@ export function useSegmentCache(opts: { getMaxBufferSizeMB: () => number }) {
       for (const [url, entry] of segPrefetchCache) {
         if (now - entry.ts > PREFETCH_TTL_MS) segPrefetchCache.delete(url)
       }
-      prefetchInfo.value.cached = segPrefetchCache.size
+      refreshCacheStats()
     }, 5 * 60 * 1000)
   }
   const stopPrefetchCleanup = () => {
@@ -82,10 +118,9 @@ export function useSegmentCache(opts: { getMaxBufferSizeMB: () => number }) {
       if (now - entry.ts > PREFETCH_TTL_MS) segPrefetchCache.delete(url)
     }
     const limitBytes = opts.getMaxBufferSizeMB() * 1024 * 1024
-    let totalBytes = 0
-    for (const entry of segPrefetchCache.values()) totalBytes += entry.buf.byteLength
+    let totalBytes = cacheBytes()
     if (totalBytes <= limitBytes) {
-      prefetchInfo.value.cached = segPrefetchCache.size
+      refreshCacheStats()
       return
     }
     for (const [key, entry] of segPrefetchCache) {
@@ -93,7 +128,7 @@ export function useSegmentCache(opts: { getMaxBufferSizeMB: () => number }) {
       totalBytes -= entry.buf.byteLength
       segPrefetchCache.delete(key)
     }
-    prefetchInfo.value.cached = segPrefetchCache.size
+    refreshCacheStats()
   }
 
   return {
@@ -107,5 +142,7 @@ export function useSegmentCache(opts: { getMaxBufferSizeMB: () => number }) {
     startPrefetchCleanup,
     stopPrefetchCleanup,
     evictPrefetchCache,
+    refreshCacheStats,
+    purgeCache,
   }
 }

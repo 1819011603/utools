@@ -38,7 +38,10 @@
       "Bash(node cdp-check.js 'http://localhost:3000/video-player?parseUrl=https%3A%2F%2Fnetflixgc.net%2Fvodplay%2F81579-5-2.html&line=3&lineName=1080P-2&index=6&ep=%E7%AC%AC07%E9%9B%86' 26000)",
       "Bash(\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless=new --remote-debugging-port=9344 --user-data-dir=/tmp/cdp-embed-1 --proxy-server=\"http://127.0.0.1:7897\" --proxy-bypass-list=\"127.0.0.1,localhost\" --no-first-run --disable-gpu --autoplay-policy=no-user-gesture-required about:blank)",
       "Bash(git checkout *)",
-      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:3000/video-parse)"
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:3000/video-parse)",
+      "Bash(grep -n \"useSegmentCache.ts\\\\`：模块级单例\" CLAUDE.md)",
+      "PowerShell(Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force -Confirm:$false; \"killed $_\" }; Start-Sleep -Milliseconds 800; \"port3000:free\")",
+      "Bash(HTTPS_PROXY=http://127.0.0.1:7897 MEDIA_HTTPS_PROXY=http://127.0.0.1:7897 npm run dev)"
     ],
     "ask": [
       "Bash(rm *)",
