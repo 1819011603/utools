@@ -56,9 +56,19 @@ export function useVideoEvents(deps: VideoEventsDeps) {
       delayedPlayTimer = null
       console.log(`开始自动播放（预缓冲 ${ahead.toFixed(1)}s，等待 ${(waited / 1000).toFixed(1)}s）`)
       isBuffering.value = false
-      video.play().catch(e => {
-        console.log('自动播放被阻止:', e.message)
-        isBuffering.value = false
+      // 自动播放被拦是常态而不是异常：安卓上「点了选集 → 几秒后才真的 play()」，
+      // 那时用户手势的有效期早过了，浏览器只认「静音播放」。
+      // 于是拦下就改静音重播一次——宁可先出画面，声音等用户下一次触碰时恢复
+      //（见 useVideoUiControls.restoreSound，任何一次点按都会解除）。
+      // 直接放弃的话表现就是「点了选集不播」，用户还得再点一次中央播放键。
+      video.play().catch(() => {
+        video.muted = true
+        media.autoMuted.value = true
+        isMuted.value = true
+        video.play().catch(e => {
+          console.log('自动播放被阻止（静音也不行）:', e.message)
+          video.muted = isMuted.value = media.autoMuted.value = false
+        })
       })
     }
 

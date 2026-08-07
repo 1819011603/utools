@@ -147,6 +147,7 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
     if (isLocked.value) { revealLockBtn(); return }
     // 这一下就是「用户激活」：自动全屏被浏览器拒过的话趁现在补上（安卓上必然走这条路）
     controls.consumeAutoFullscreen()
+    controls.restoreSound()   // 静音兜底起播过的话，这一下把声音还回来
 
     activePointer = e.pointerId
     pointerKind = e.pointerType

@@ -69,21 +69,6 @@ export function useVideoPlayerController() {
   // 手势层建在控制层之上：它把「一次指针交互」翻译成控制层已有的动作
   const gestures = useVideoGestures({ media, controls, autoTune })
 
-  // 视频下载（HLS 分片并发 + AES 解密 + ffmpeg 合并 / MP4 直下）
-  const download = useVideoDownload({
-    getProxyUrl: conn.getProxyUrl,
-    isHlsUrl: conn.isHlsUrl,
-    getVideoName: handoff.getVideoName,
-    videoUrl: media.videoUrl,
-    playlist: playlist.playlist,
-    currentIndex: playlist.currentIndex,
-    errorMessage: media.errorMessage,
-    useProxy: conn.useProxy,
-    getDownloadConcurrency: () => 6,
-  })
-  // 换流/销毁时把下载任务一起取消（引擎不认识下载模块，靠登记钩子）
-  engine.registerDestroyHook(() => download.cancelDownload())
-
   // ── 持久化 ──
 
   const loadSavedState = (): SavedState | null => {
@@ -268,7 +253,6 @@ export function useVideoPlayerController() {
     ...controls,
     ...gestures,
     ...events,
-    ...download,
     ...query,
     saveState, mount, unmount,
   }

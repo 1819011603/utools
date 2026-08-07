@@ -43,7 +43,8 @@
       "PowerShell(Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force -Confirm:$false; \"killed $_\" }; Start-Sleep -Milliseconds 800; \"port3000:free\")",
       "Bash(HTTPS_PROXY=http://127.0.0.1:7897 MEDIA_HTTPS_PROXY=http://127.0.0.1:7897 npm run dev)",
       "Bash(curl -s -o /dev/null http://localhost:3000/video-player --max-time 5)",
-      "Bash(curl -s -o /dev/null -w \"video-player: %{http_code}\\\\n\" http://localhost:3000/video-player --max-time 30)"
+      "Bash(curl -s -o /dev/null -w \"video-player: %{http_code}\\\\n\" http://localhost:3000/video-player --max-time 30)",
+      "Bash(python -)"
     ],
     "ask": [
       "Bash(rm *)",

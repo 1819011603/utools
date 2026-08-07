@@ -35,7 +35,7 @@
         <div
           v-for="(item, index) in playlist"
           :key="index"
-          class="relative group/item rounded cursor-pointer transition-colors text-sm text-center px-2 py-2 truncate"
+          class="rounded cursor-pointer transition-colors text-sm text-center px-2 py-2 truncate"
           :class="[
             index === currentIndex
               ? 'bg-violet-500 text-white font-medium'
@@ -54,15 +54,6 @@
             class="w-3.5 h-3.5 inline-block mr-1 align-text-bottom"
           />
           {{ getVideoName(item, index) }}
-          <!-- 下载按钮压在右上角，hover 才出现，免得占掉格子宽度 -->
-          <button
-            v-if="item.startsWith('http') && !isDownloading"
-            class="absolute -top-1 -right-1 opacity-0 group-hover/item:opacity-100 p-1 rounded-full bg-violet-500 text-white shadow transition-opacity"
-            title="下载这一集"
-            @click.stop="downloadVideo(item)"
-          >
-            <UIcon name="i-heroicons-arrow-down-tray" class="w-3 h-3 block" />
-          </button>
         </div>
       </div>
     </div>
@@ -72,8 +63,8 @@
 <script setup lang="ts">
 const {
   playlist, currentIndex, playlistTitle, playlistSource, lastRefreshAt, isRefreshingLinks,
-  isPlaying, isDownloading,
-  getSavedProgress, getVideoName, playByIndex, downloadVideo,
+  isPlaying,
+  getSavedProgress, getVideoName, playByIndex,
   refreshPlaylistLinks, clearAllProgress, clearPlaylist,
 } = useVideoPlayerCtx()
 </script>

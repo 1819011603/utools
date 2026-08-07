@@ -18,7 +18,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   const {
     videoEl, playerContainer, progressBar, isPlaying, isVideoLoaded, duration,
     volume, isMuted, desiredRate, autoBestRate, isFullscreen, showControls, showPlayIcon, showSpeedMenu,
-    pendingAutoFullscreen,
+    pendingAutoFullscreen, autoMuted,
     seekPreviewTime, seekPreviewPercent, isSeeking, hoverTime, hoverPercent, preloadStrategy,
   } = media
 
@@ -30,9 +30,14 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   const volumeIcon = computed(() =>
     isMuted.value || volume.value === 0 ? 'i-heroicons-speaker-x-mark' : 'i-heroicons-speaker-wave')
 
-  const canDownload = computed(() =>
-    isVideoLoaded.value && !!media.videoUrl.value
-    && (media.videoUrl.value.startsWith('http') || media.videoUrl.value.startsWith('//')))
+
+  /** 静音兜底起播后，用户任何一次触碰都把声音还回来（这一下就是浏览器要的手势） */
+  const restoreSound = () => {
+    if (!autoMuted.value) return
+    autoMuted.value = false
+    isMuted.value = false
+    if (videoEl.value) videoEl.value.muted = false
+  }
 
   const togglePlay = () => {
     if (!videoEl.value) return
@@ -226,7 +231,8 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
 
   /** 在控制栏上有任何动作就重新计时（触摸端唯一的续命途径） */
   const keepControlsAlive = () => {
-    consumeAutoFullscreen()   // 控制栏上的每一次点按都是「用户激活」，挂起的自动全屏顺手兑现
+    consumeAutoFullscreen()
+    restoreSound()   // 控制栏上的每一次点按都是「用户激活」，挂起的自动全屏顺手兑现
     showControls.value = true
     hideControlsDelayed()
   }
@@ -295,10 +301,10 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   }
 
   return {
-    supportsPiP, volumeIcon, canDownload,
+    supportsPiP, volumeIcon,
     togglePlay, skip, startSeek, updateSeekPreview, updateHoverTime,
     setVolume, toggleMute, setPlaybackRate,
-    toggleFullscreen, togglePiP, handleMouseMove, hideControlsDelayed, keepControlsAlive, consumeAutoFullscreen,
+    toggleFullscreen, togglePiP, handleMouseMove, hideControlsDelayed, keepControlsAlive, consumeAutoFullscreen, restoreSound,
     applyPreload, bindGlobalKeys, unbindGlobalKeys,
   }
 }

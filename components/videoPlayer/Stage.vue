@@ -357,18 +357,6 @@
                 </Transition>
               </div>
 
-              <template v-if="canDownload && !isNarrow">
-                <template v-if="isDownloading">
-                  <span class="text-white text-xs font-medium w-8 text-center">{{ downloadProgress }}%</span>
-                  <button class="p-2 rounded-lg text-amber-400 hover:bg-white/15 hover:text-red-400 transition-all" title="取消下载" @click="cancelDownload">
-                    <UIcon name="i-heroicons-x-circle" class="w-5 h-5" />
-                  </button>
-                </template>
-                <button v-else class="p-2 rounded-lg text-white hover:bg-white/15 hover:text-violet-300 transition-all" title="下载视频" @click="downloadVideo()">
-                  <UIcon name="i-heroicons-arrow-down-tray" class="w-6 h-6" />
-                </button>
-              </template>
-
               <button v-if="supportsPiP && !isNarrow" class="p-2 rounded-lg text-white hover:bg-white/15 hover:text-violet-300 transition-all" title="画中画" @click="togglePiP">
                 <UIcon name="i-heroicons-rectangle-stack" class="w-6 h-6" />
               </button>
@@ -400,7 +388,7 @@ const {
   progressPercent, bufferedPercent, seekPreviewTime, seekPreviewPercent, hoverTime, hoverPercent,
   hlsStats, playlist, playlistTitle, hasPrev, hasNext, strategyLabel, showAdvancedProxy,
   // 选集按钮在顶部信息条里（VideoPlayerTopBar），这里只留抽屉本身要用的状态
-  currentVideoName, volumeIcon, supportsPiP, canDownload,
+  currentVideoName, volumeIcon, supportsPiP,
   togglePlay, skip, startSeek, updateHoverTime, setVolume, toggleMute, setPlaybackRate,
   // 容器的 mousemove 走手势层的 onMouseMove（要滤掉触摸补发的兼容鼠标事件），不直接用 handleMouseMove
   toggleFullscreen, togglePiP, hideControlsDelayed, keepControlsAlive,
@@ -408,7 +396,6 @@ const {
   isLocked, showLockBtn, toggleLock, brightness, gestureHud, seekFlash, touchAction, controlsVisible,
   onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onMouseMove, boostActive, boostRate,
   playPrev, playNext,
-  isDownloading, downloadProgress, downloadVideo, cancelDownload,
   onTimeUpdate, onLoadedMetadata, onLoadedData, onVideoEnded, onWaiting, onCanPlay,
   onCanPlayThrough, onSeeking, onSeeked, onPlaying, onVolumeChange, onVideoError,
 } = useVideoPlayerCtx()
@@ -418,7 +405,7 @@ onClickOutside(speedMenuRef, () => { showSpeedMenu.value = false })
 
 // 「停在那儿了」：暂停且不是在加载/取址中。加载中另有转圈遮罩，两个叠一起只会打架。
 // 自动播放被浏览器拦下时也是这个状态——那正是最需要一枚大播放键的时候。
-// 窄屏（手机竖屏）：控制栏塞不下十来个图标，下载/画中画这类低频项直接不渲染。
+// 窄屏（手机竖屏）：控制栏塞不下这么多图标，画中画这类低频项直接不渲染。
 // 用 matchMedia 而不是 Tailwind 的 hidden：这两块是 <template>，没有能挂 class 的元素
 const isNarrow = ref(false)
 onMounted(() => {

@@ -32,7 +32,7 @@
       连接那块的开合直接复用 showAdvancedProxy，播放器标题栏上的策略徽标点一下就能把它掀开。
     -->
     <div class="space-y-3">
-      <!-- 选集：日常走播放器里那个抽屉，这份是「想一眼看全 + 刷新链接 + 逐集下载」时才展开的 -->
+      <!-- 选集：日常走播放器里那个抽屉，这份是「想一眼看全 + 刷新链接」时才展开的 -->
       <VideoPlayerCollapseCard
         v-if="playlist.length > 1"
         v-model="openPlaylist"
