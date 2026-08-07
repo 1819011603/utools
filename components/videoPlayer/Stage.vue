@@ -153,6 +153,8 @@
           data-no-gesture
           class="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-4 pt-12"
           @click.stop
+          @pointerdown="keepControlsAlive"
+          @pointerup="keepControlsAlive"
         >
           <!-- 进度条 -->
           <div
@@ -307,7 +309,7 @@ const {
   hlsStats, playlist, playlistTitle, hasPrev, hasNext,
   currentVideoName, volumeIcon, supportsPiP, canDownload,
   togglePlay, skip, startSeek, updateHoverTime, setVolume, toggleMute, setPlaybackRate,
-  toggleFullscreen, togglePiP, handleMouseMove, hideControlsDelayed,
+  toggleFullscreen, togglePiP, handleMouseMove, hideControlsDelayed, keepControlsAlive,
   // 手势层（useVideoGestures）
   isLocked, showLockBtn, toggleLock, brightness, gestureHud, seekFlash, touchAction, controlsVisible,
   onPointerDown, onPointerMove, onPointerUp, onPointerCancel, boostActive, boostRate,

@@ -179,14 +179,27 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
 
   // ── 控制栏显隐 ──
 
+  // 触摸端没有「移动鼠标就续命」这回事：点一下唤出来之后就只剩这个倒计时在跑，
+  // 3 秒不够手指移过去点倍速/下载（还要先看清图标在哪），实测经常点到一半就收了
+  const CONTROLS_HIDE_MS = 5000
+
   const hideControlsDelayed = () => {
     if (controlsTimer) clearTimeout(controlsTimer)
     controlsTimer = setTimeout(() => {
+      // 倍速菜单是控制栏的子元素，收控制栏会把摊开的菜单一起带走——
+      // 表现就是「点开倍速还没选就没了」。开着就顺延，等它关了再收
+      if (showSpeedMenu.value) { hideControlsDelayed(); return }
       if (isPlaying.value) showControls.value = false
-    }, 3000)
+    }, CONTROLS_HIDE_MS)
   }
 
   const handleMouseMove = () => {
+    showControls.value = true
+    hideControlsDelayed()
+  }
+
+  /** 在控制栏上有任何动作就重新计时（触摸端唯一的续命途径） */
+  const keepControlsAlive = () => {
     showControls.value = true
     hideControlsDelayed()
   }
@@ -258,7 +271,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     supportsPiP, volumeIcon, canDownload,
     togglePlay, skip, startSeek, updateSeekPreview, updateHoverTime,
     setVolume, toggleMute, setPlaybackRate,
-    toggleFullscreen, togglePiP, handleMouseMove, hideControlsDelayed,
+    toggleFullscreen, togglePiP, handleMouseMove, hideControlsDelayed, keepControlsAlive,
     applyPreload, bindGlobalKeys, unbindGlobalKeys,
   }
 }
