@@ -194,20 +194,32 @@ export function useVideoPlayerController() {
       // 直接用，省掉一次好几秒的重新解析（这是最常走的路径，不能每次都重解析）。
       const line = queryParams.line ?? 0
       const p = handoff.readHandoff()
-      const fromSlot = p?.source?.pageUrl === queryParams.parseUrl && (p?.source?.line ?? 0) === line
-      const idx = queryParams.index ?? p?.index ?? 0
+      // 槽算不算「同一份列表」：线路有名字就按名字比，序号只是兜底
+      //（源站增删线路后序号会漂，光比序号会把另一条线路的列表当成这一份用上）
+      const sameLine = queryParams.lineName
+        ? p?.source?.lineName === queryParams.lineName
+        : (p?.source?.line ?? 0) === line
+      const fromSlot = !!p && p.source?.pageUrl === queryParams.parseUrl && sameLine
+      // 槽里的 index 只有在槽确实是这份列表时才能用。
+      // 否则分享链接（不带 index，本该从第 1 集起播）会跳到本机上一部剧看到的集数——
+      // 收到链接的人完全不知道为什么开在第 5 集（实测抓到过）
+      const idx = queryParams.index ?? (fromSlot ? p!.index ?? 0 : 0)
 
       if (fromSlot && p) {
         handoff.applyHandoffMeta(p)
         playlist.playlist.value = p.urls
         media.videoUrlInput.value = p.urls.join('\n')
-        playlist.currentIndex.value = Math.min(Math.max(idx, 0), p.urls.length - 1)
+        // 集数也按名字认（槽里存了集名），下标只是兜底：源站往中间插集后下标会挪位
+        const byName = queryParams.ep
+          ? p.urls.findIndex(u => handoff.playlistNames.value[u] === queryParams.ep)
+          : -1
+        playlist.currentIndex.value = byName >= 0 ? byName : Math.min(Math.max(idx, 0), p.urls.length - 1)
         await nextTick()
         media.isRestoringFromSaved.value = true
         await playlist.playByIndex(playlist.currentIndex.value)
       } else {
         await nextTick()
-        await playlist.loadFromParseSource(queryParams.parseUrl, line, idx)
+        await playlist.loadFromParseSource(queryParams.parseUrl, line, idx, queryParams.lineName, queryParams.ep)
       }
     } else if (queryParams.urls.length) {
       media.videoUrlInput.value = queryParams.urls.join('\n')

@@ -475,8 +475,10 @@ const playAll = (startIndex = 0) => {
     // 剧名一起带过去，播放器用它顶掉「播放器」「播放列表」这两个泛标题；
     // source 让播放器能在链接过期时就地重新解析（带签名的地址活不久）
     const title = result.value?.title
+    // 线路名一并带走：播放器判断「槽里是不是这份列表」时按名字比，光比序号会在
+    // 源站增删线路后把另一条线路的列表错当成这一份用上
     const source = result.value
-      ? { pageUrl: result.value.pageUrl, line: result.value.activeLineIndex }
+      ? { pageUrl: result.value.pageUrl, line: result.value.activeLineIndex, lineName: currentLine.value?.name }
       : undefined
     // 按需取址的站点必须把作业单一起交接：列表里是占位地址，没有它播放器一集都取不到
     const lazy = isLazy.value ? result.value?.clientTask : undefined
@@ -493,8 +495,13 @@ const playAll = (startIndex = 0) => {
   const parsed = result.value
   if (parsed?.pageUrl) {
     params.set('parseUrl', parsed.pageUrl)
+    // 线路和集数各带两份：序号是位置、名字是身份。源站增删线路或往中间插集之后
+    // 序号就指到别处了，而分享链接的寿命以天计——播放器打开时先按名字认，序号兜底。
     if (parsed.activeLineIndex > 0) params.set('line', String(parsed.activeLineIndex))
-    if (idx > 0) params.set('index', String(idx))
+    const lineName = currentLine.value?.name
+    if (lineName) params.set('lineName', lineName)
+    params.set('index', String(idx))
+    if (names[idx]) params.set('ep', names[idx])
   } else if (isLazy.value) {
     if (!handoffOk) {
       toast.add({ title: '浏览器存储不可用，该站点无法送进播放器', color: 'red' })

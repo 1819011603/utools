@@ -17,6 +17,10 @@ export function useVideoMediaState() {
   const isLoading = ref(false)
   const isBuffering = ref(false)
   const isResolvingUrl = ref(false)  // 按需取址中（列表里是占位地址，正在现取真实地址）
+  // 解析播放列表的阶段文案（「正在计算站点校验…」这类）。
+  // 走 ?parseUrl= 进来时整份列表要现场解析，慢的站点要好几秒，而那时 Stage 还没渲染
+  // （它 v-if="isVideoLoaded"），遮罩上的提示一个字都看不到，页面就是空的
+  const resolveStage = ref('')
 
   // ── DOM 引用 ──
   const videoEl = ref<HTMLVideoElement>()
@@ -70,7 +74,7 @@ export function useVideoMediaState() {
   const preloadStrategy = ref<'none' | 'metadata' | 'auto'>('auto')
 
   return {
-    videoUrl, videoUrlInput, isVideoLoaded, isHls, errorMessage, isLoading, isBuffering, isResolvingUrl,
+    videoUrl, videoUrlInput, isVideoLoaded, isHls, errorMessage, isLoading, isBuffering, isResolvingUrl, resolveStage,
     videoEl, playerContainer, progressBar, speedMenuRef,
     isPlaying, currentTime, duration, volume, isMuted, playbackRate, desiredRate, videoKey,
     isFullscreen, showControls, showPlayIcon, showSpeedMenu, showAdvancedProxy, autoFullscreen, autoBestRate,

@@ -44,6 +44,9 @@ export async function runHtmlSourceResolve(
       // 真过期了服务端会自己重取；只有它彻底要不到地址时才落到 error
       if (res?.currentVideoUrl) ep.videoUrl = res.currentVideoUrl
       else ep.error = '该集未给出直链'
+      // 防盗链域名是服务端从站点播放器配置里现取的，会变——每集取址都把最新值带回去，
+      // 否则站点换了播放器域名后，播到某一集就开始 403，而候选值还停在进页面时那份
+      if (res?.origin || res?.referer) opts.onHints?.(res.origin, res.referer)
     } catch (e: any) {
       ep.error = e?.statusMessage || e?.message || '取址失败'
     } finally {

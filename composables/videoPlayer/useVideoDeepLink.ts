@@ -74,6 +74,8 @@ export function useVideoDeepLink(deps: VideoDeepLinkDeps) {
           break
         }
         case 'parseUrl': result.parseUrl = dec(val).trim(); break
+        case 'lineName': result.lineName = dec(val).trim(); break
+        case 'ep': result.ep = dec(val).trim(); break
         case 'line': {
           const n = Number.parseInt(dec(val), 10)
           if (Number.isFinite(n) && n >= 0) result.line = n
@@ -131,8 +133,14 @@ export function useVideoDeepLink(deps: VideoDeepLinkDeps) {
     const src = handoff.playlistSource.value
     if (src?.pageUrl && urls.length) {
       const q = ['parseUrl=' + encodeURIComponent(src.pageUrl)]
+      // 线路和集数各写两份：序号是位置、名字是身份。源站增删线路或往中间插集之后
+      // 序号就指到别处去了，而链接是拿来分享的、寿命以天计——打开时先按名字认。
+      // index 恒写（哪怕是 0）：用户要能从链接上一眼看出这是第几集。
       if (src.line > 0) q.push('line=' + src.line)
-      if (idx > 0) q.push('index=' + idx)
+      if (src.lineName) q.push('lineName=' + encodeURIComponent(src.lineName))
+      q.push('index=' + idx)
+      const epName = handoff.playlistNames.value[urls[idx]]
+      if (epName) q.push('ep=' + encodeURIComponent(epName))
       // 槽照写不误：本机刷新/回退时能直接读回来，省掉一次重新解析（几秒）
       handoff.writeHandoff(urls, idx)
       const search = '?' + q.join('&')

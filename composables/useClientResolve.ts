@@ -10,6 +10,12 @@ import type { ClientResolveTask, ParsedEpisode } from './videoParseRules'
 export interface ClientResolveOptions {
   onStage?: (text: string) => void
   onProgress?: (done: number, total: number) => void
+  /**
+   * 取址时顺带解析出的防盗链候选值。
+   * 这类站点的播放器域名是站点配置里现取的、会变，所以每次取址都可能带回新值——
+   * 播到某一集才开始 403 的话，多半就是它变了。
+   */
+  onHints?: (origin?: string, referer?: string) => void
 }
 
 type Executor = (task: any, episodes: ParsedEpisode[], opts: ClientResolveOptions) => Promise<void>
@@ -50,11 +56,15 @@ export function sliceClientTask(task: ClientResolveTask, indices: number[]): Cli
  * 取单集地址。按需取址的站点（task.lazy）在真正要播那一集时才调这个。
  * 拿不到就抛错——调用方要把原因显示出来，静默失败会表现成「点了没反应」。
  */
-export async function resolveOneUrl(task: ClientResolveTask, index: number): Promise<string> {
+export async function resolveOneUrl(
+  task: ClientResolveTask,
+  index: number,
+  opts: ClientResolveOptions = {},
+): Promise<string> {
   const items = (task as any)[ITEMS_KEY[task.kind]] as unknown[] | undefined
   if (!items?.[index]) throw new Error('这一集没有取址参数，请重新解析')
   const ep: ParsedEpisode = { title: '', pageUrl: '' }
-  await runClientResolve(sliceClientTask(task, [index]), [ep])
+  await runClientResolve(sliceClientTask(task, [index]), [ep], opts)
   if (!ep.videoUrl) throw new Error(ep.error || '未取到播放地址')
   return ep.videoUrl
 }

@@ -73,8 +73,30 @@ export interface ParseRule {
    * 播放时建议的 Origin。**不填则用播放页 origin 兜底**，只有在源站的防盗链认的是
    * 另一个域名时才需要显式写（实测 netflixgc.net 的视频只认 cjbfq.netflixgc.tv，
    * 播放页域名和主域都是 403）。同 referer，仍只是候选值。
+   *
+   * 能用 `playerOrigin` 动态取到就别写死这个——站点换播放器域名的频率不低。
    */
   origin?: string
+
+  /**
+   * 从站点自己的播放器配置里**动态取**防盗链域名，取代写死的 origin/referer。
+   *
+   * 由来：这类站点的视频挂在毫不相干的 CDN 上（`v.fengbao10.com`），防盗链认的却是
+   * 站点自己的播放器页（`cjbfq.netflixgc.tv/player/ec.php?...&url=<视频地址>`）。
+   * 而那个 iframe 是 JS 运行时注入的，抓回来的静态 HTML 里根本没有——地址在
+   * MacCMS 的 `/static/js/playerconfig.js` 里，每条线路（`player_aaaa.from`）一份。
+   *
+   * 写死也能用，但站点换播放器域名时就得改代码；动态取则自动跟上。
+   * 取到的优先于 origin/referer，取不到就退回它们（配置文件 404 之类）。
+   */
+  playerOrigin?: {
+    /** 配置文件地址，相对站点根 */
+    url: string
+    /** 从配置里抠播放器地址，取第 1 个捕获组；`%FROM%` 会被替换成当前线路的标识 */
+    re: string
+    /** 从播放页抠当前线路的标识（喂给上面的 `%FROM%`）。抠不到就退回配置里第一条 */
+    fromRe?: string
+  }
 
   /**
    * 按需取址：解析阶段只取传入的那一集，其余集播到哪集才去抓哪集的播放页。
@@ -121,6 +143,8 @@ export const BUILTIN_PARSE_RULES: ParseRule[] = [
     // 非贪婪匹配会断在那，整条线路只剩 1 集（踩过）
     episodeGroupRe: '<div class="module-play-list-content[^"]*">([\\s\\S]*?)</div></div></div>',
     episodeRe: '<a class="module-play-list-link[^"]*" href="([^"]+)"[^>]*>\\s*<span>([^<]*)</span>',
+    // title 是「剧名-免费在线观看-集号」，兜底只削得掉最后一段
+    titleRe: '<title>([^<-]+)',
     // 实测 186 集，一次抓完要 186 个子请求
     lazy: true,
   },
@@ -139,7 +163,14 @@ export const BUILTIN_PARSE_RULES: ParseRule[] = [
     episodeRe: '<a[^>]*href="([^"]+)"[^>]*>\\s*<span>([^<]*)</span>',
     // title 是一长串 SEO 文案，剧名只在书名号里
     titleRe: '<title>[^<]*《([^》]+)》',
-    // 视频挂在与播放页无关的 CDN 上，只认这一个域名——播放页域名和主域都是 403
+    // 视频挂在与播放页无关的 CDN 上（v.fengbao10.com 之类），防盗链认的是站点自己的
+    // 播放器页。地址从站点的播放器配置里现取，站点换域名时不用改代码
+    playerOrigin: {
+      url: '/static/js/playerconfig.js',
+      re: '"%FROM%"\\s*:\\s*\\{[^}]*?"parse"\\s*:\\s*"(https?:[^"]+)"',
+      fromRe: '"from"\\s*:\\s*"([^"]+)"',
+    },
+    // 配置文件取不到时的兜底（实测值，2026-08）
     referer: 'https://cjbfq.netflixgc.tv',
     origin: 'https://cjbfq.netflixgc.tv',
     lazy: true,

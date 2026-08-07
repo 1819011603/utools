@@ -8,6 +8,22 @@
     </div>
 
     <VideoPlayerSourceCard />
+
+    <!--
+      走 ?parseUrl= 分享链接进来时，整份播放列表要现场解析，慢的站点好几秒。
+      这期间 Stage 还没渲染（它 v-if="isVideoLoaded"），它内部那个「正在获取播放地址」
+      的遮罩一个字也看不到，页面上就是一片空白，用户只会以为链接是坏的。
+    -->
+    <UCard v-if="isResolvingUrl && !isVideoLoaded">
+      <div class="flex items-center gap-3">
+        <UIcon name="i-heroicons-arrow-path" class="w-5 h-5 text-violet-500 animate-spin shrink-0" />
+        <div class="min-w-0">
+          <p class="font-medium text-gray-900 dark:text-white">正在解析播放列表…</p>
+          <p class="text-sm text-gray-500 dark:text-gray-400 truncate">{{ resolveStage || '正在获取页面…' }}</p>
+        </div>
+      </div>
+    </UCard>
+
     <VideoPlayerStage v-if="isVideoLoaded" />
     <VideoPlayerHlsSettings v-if="isHls" />
     <VideoPlayerPreloadSettings v-if="isVideoLoaded && !isHls" />
@@ -46,7 +62,7 @@ const ctx = useVideoPlayerController()
 provide(VIDEO_PLAYER_KEY, ctx)
 
 // 本页模板只用到这几项，其余全在子组件里各自 inject
-const { isVideoLoaded, isHls, errorMessage } = ctx
+const { isVideoLoaded, isHls, errorMessage, isResolvingUrl, resolveStage } = ctx
 
 onMounted(() => ctx.mount())
 onUnmounted(() => ctx.unmount())

@@ -85,10 +85,21 @@ for i,g in enumerate(G):
   或换个不嵌套的标签（`<ul>…</ul>`）当边界。验证时看每组的集数对不对得上页面。
 - **标题**：有的站 `<title>` 是一长串 SEO 文案，兜底削站名削不干净，而这个值会顶掉
   播放器标题栏。这时加 `titleRe`（如 `'<title>[^<]*《([^》]+)》'`）。
-- **防盗链域名**：视频常挂在与播放页毫不相干的 CDN 上。默认拿播放页 origin 当候选值，
-  多数站点够用；**只有当播放页域名和主域都 403 时**才写死 `referer` + `origin`
-  （实测 netflixgc.net 的视频只认 `cjbfq.netflixgc.tv`）。两者仍只是候选值，
-  播放器的可达性探测照样从直连开始逐级降级。
+- **防盗链域名，别写死**：视频常挂在与播放页毫不相干的 CDN 上。默认拿播放页 origin
+  当候选值，多数站点够用。播放页域名和主域都 403 时，去站点自己的播放器配置里现取：
+
+  ```ts
+  playerOrigin: {
+    url: '/static/js/playerconfig.js',                                  // MacCMS 标准位置
+    re: '"%FROM%"\\s*:\\s*\\{[^}]*?"parse"\\s*:\\s*"(https?:[^"]+)"',   // %FROM% = 当前线路标识
+    fromRe: '"from"\\s*:\\s*"([^"]+)"',                                 // 从播放页抠 player_aaaa.from
+  }
+  ```
+
+  注意**抓回来的 HTML 里没有那个播放器 iframe**（JS 运行时注入的），只能去配置文件里找。
+  `origin`/`referer` 退化成配置取不到时的兜底。
+  验证是「真动态取到」还是「走了兜底」：把兜底临时改成 `https://FALLBACK.invalid`，
+  看接口返回值变不变——两者恰好相同时，光看返回值区分不出来。
 
 ## 3. `lazy: true` 默认就开
 
@@ -119,9 +130,25 @@ curl -s 'http://localhost:3000/api/resolve?step=extract&only=1&url=<urlencoded �
 
 逐项对：`ruleId` 命中的是新规则、`title` 是干净剧名、`lines` 的条数与集数和页面一致、
 `activeLineIndex` 指向传入地址所属线路、`currentVideoUrl` 能直接播、
-`clientTask.pageUrls.length` 等于该线路集数。
+`clientTask.pageUrls.length` 等于该线路集数、`origin`/`referer` 是播放器域名（若配了 `playerOrigin`）。
 
 再换**另一条线路的另一集**测一遍（`?line=N`）——线路配对错位只有换线路才看得出来。
+
+### 端到端（页面真的能播吗）
+
+接口通不等于页面对。播放器有一堆前端逻辑（分享链接解析、按名字定位线路/集数、懒加载取址），
+只能在浏览器里验。`--dump-dom` / `--screenshot` 对播放器这种一直有定时器的页面**永远不返回**，
+要用 CDP：起 `--headless=new --remote-debugging-port=9333`，用项目里的 `ws` 连上去，
+`Page.navigate` 之后隔 250ms 轮询 `document.body.innerText`，读播放列表条数、加载提示、
+`location.search`、`localStorage['video-player-handoff']`。
+
+两个反复踩的测试陷阱：
+
+- **先预热再测**。改完代码第一次访问要等 Vite 重编译，`onMounted` 可能 10 秒后才跑，
+  采样窗口全落在空白期，会得出「功能没生效」的错误结论（踩过，白查一轮）。
+  先 `curl http://localhost:3000/video-player` 再测。
+- **每次换新的 `--user-data-dir`**。复用 profile 会把上一轮的交接槽带进来，
+  既测不到「别人打开链接」那条真实路径，还会让上一份列表的 `index` 串进来。
 
 ## 5. 落地点
 

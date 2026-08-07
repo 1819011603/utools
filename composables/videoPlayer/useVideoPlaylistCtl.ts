@@ -87,9 +87,11 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
 
     media.isResolvingUrl.value = true
     errorMessage.value = ''
+    // 取址时站点会带回最新的防盗链域名（它是从站点播放器配置里现取的、会变）
+    const hintOpts = { onHints: deps.applyHints }
     try {
       try {
-        return await resolveOneUrl(handoff.lazyTask.value, idx)
+        return await resolveOneUrl(handoff.lazyTask.value, idx, hintOpts)
       } catch (e) {
         const src = handoff.playlistSource.value
         if (!src) throw e
@@ -100,7 +102,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
         const want = handoff.playlistNames.value[placeholder]
         const hit = want ? names.indexOf(want) : -1
         handoff.lazyTask.value = result.clientTask
-        return await resolveOneUrl(result.clientTask, hit >= 0 ? hit : idx)
+        return await resolveOneUrl(result.clientTask, hit >= 0 ? hit : idx, hintOpts)
       }
     } catch (e: any) {
       errorMessage.value = '获取播放地址失败：' + (e?.message || '未知错误')
@@ -181,11 +183,33 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
    * 与「刷新链接」共用 resolvePlaylist（工作量证明 / 分批续拉 / 作业单都在里面），
    * 两处各写一份必然漂移。
    */
-  const loadFromParseSource = async (pageUrl: string, line = 0, index = 0) => {
+  const loadFromParseSource = async (
+    pageUrl: string,
+    line = 0,
+    index = 0,
+    lineName?: string,
+    epName?: string,
+  ) => {
     media.isResolvingUrl.value = true
+    media.resolveStage.value = '正在获取页面…'
     errorMessage.value = ''
     try {
-      const { result } = await resolvePlaylist({ pageUrl, line, rules: loadUserParseRules() })
+      const rules = loadUserParseRules()
+      // 慢站点要好几秒，逐段告诉用户在干什么（反爬校验、解析选集…）
+      const onStage = (t: string) => { media.resolveStage.value = t }
+
+      let { result } = await resolvePlaylist({ pageUrl, line, rules, onStage })
+
+      // 线路按名字认，序号只是兜底：源站增删线路后序号就指到别的线路去了，
+      // 而链接是拿来分享的、寿命以天计。名字对不上才多花一次请求换条线路重解析。
+      if (lineName) {
+        const want = result.lines.findIndex(l => l.name === lineName)
+        if (want >= 0 && want !== result.activeLineIndex) {
+          onStage(`正在切换到「${lineName}」…`)
+          ;({ result } = await resolvePlaylist({ pageUrl, line: want, rules, onStage }))
+        }
+      }
+
       const { urls, names } = toPlaylist(result)
       if (!urls.length) throw new Error('没有解析出可播放的地址')
 
@@ -197,7 +221,11 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
       if (result.title) handoff.playlistTitle.value = result.title
       // 线路记解析结果实际用的那条：传入的 line 越界时服务端会退回 active 线路，
       // 记成传入值会让地址栏与实际播的对不上，分享出去又是另一条线路
-      handoff.playlistSource.value = { pageUrl, line: result.activeLineIndex }
+      handoff.playlistSource.value = {
+        pageUrl,
+        line: result.activeLineIndex,
+        lineName: result.lines[result.activeLineIndex]?.name || undefined,
+      }
 
       // 这类站点的防盗链常认播放页域名，而视频挂在毫不相干的 CDN 上，光看视频地址推不出来。
       // 只是候选值，探测仍从直连起逐级降级（见 CLAUDE.md「连接方式只有一个来源」）
@@ -205,7 +233,10 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
       deps.applyHints(result.origin || srcOrigin, result.referer || (srcOrigin ? srcOrigin + '/' : ''))
 
       videoUrlInput.value = urls.join('\n')
-      const from = index >= 0 && index < urls.length ? index : 0
+      // 集数同样按名字认：源站往中间插一集（实测 ylsp 有「虚天战纪上/下」这种加塞），
+      // 后面每一集的下标都会挪位，光靠 index 分享出去就是另一集
+      const byName = epName ? names.indexOf(epName) : -1
+      const from = byName >= 0 ? byName : (index >= 0 && index < urls.length ? index : 0)
       currentIndex.value = from
       deps.onDirty()
       media.isRestoringFromSaved.value = true
@@ -215,6 +246,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
       errorMessage.value = `解析播放列表失败：${msg}`
     } finally {
       media.isResolvingUrl.value = false
+      media.resolveStage.value = ''
     }
   }
 
@@ -290,6 +322,13 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
       // 作业单里的令牌是源站按次渲染的，会过期 → 刷新时一并换成新的
       handoff.setLazyTask(result.clientTask?.lazy ? result.clientTask : null, urls)
       if (result.title) handoff.playlistTitle.value = result.title
+      // 线路名跟着刷新一起更新：源站改了线路名的话，地址栏里那份得跟上，
+      // 否则下次按名字认线路会落空、白白多解析一轮
+      handoff.playlistSource.value = {
+        ...src,
+        line: result.activeLineIndex,
+        lineName: result.lines[result.activeLineIndex]?.name || src.lineName,
+      }
       currentIndex.value = nextIndex
       lastRefreshAt.value = Date.now()
       deps.onDirty()

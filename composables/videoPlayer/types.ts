@@ -11,6 +11,11 @@ import type { ClientResolveTask } from '../videoParseRules'
 export interface PlaylistSource {
   pageUrl: string
   line: number
+  /**
+   * 线路名（「大陆0线」）。序号只是它在页面上的位置，源站增删线路后就指到别处去了，
+   * 分享链接放几天再打开会静默换成另一条线路。有名字就按名字认，序号退居兜底。
+   */
+  lineName?: string
 }
 
 /** HLS 可调配置（「HLS 配置」卡片直接绑定，随 SavedState 持久化） */
@@ -115,6 +120,12 @@ export interface QueryVideoParams {
    */
   parseUrl?: string
   line?: number
+  /**
+   * 线路名 / 集名。序号（line/index）是位置，源站增删线路或往中间插集之后就指到别处去了，
+   * 而分享链接的寿命恰恰以天计。所以两者都写：**先按名字认，名字找不到才退回序号**。
+   */
+  lineName?: string
+  ep?: string
 }
 
 /**
@@ -126,5 +137,5 @@ export interface QueryVideoParams {
  */
 export const PAGE_QUERY_KEYS = new Set([
   'url', 'urls', 'index', 'origin', 'referer', 'proxy', 'noref', 'manifestOnly', 'handoff',
-  'parseUrl', 'line',
+  'parseUrl', 'line', 'lineName', 'ep',
 ])

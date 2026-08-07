@@ -16,6 +16,39 @@ const MAX_EPISODES = 40
 // 解析各集的并发。太高会被源站限流，也更容易撞 CF 的并发子请求限制。
 const EPISODE_CONCURRENCY = 4
 
+// 播放器域名缓存。这个值全站通用、极少变，而**每一集取址都要用**——
+// 按需取址的站点不缓存的话，每播一集都要多抓一次配置文件。TTL 与 resolve.ts 的 cookieCache 对齐。
+const playerOriginCache = new Map<string, { origin: string; at: number }>()
+const PLAYER_ORIGIN_TTL = 30 * 60 * 1000
+
+/**
+ * 从站点自己的播放器配置里取防盗链域名（见 ParseRule.playerOrigin）。
+ * 取不到一律返回空串让上层退回写死的值——这只是个候选值，为它中断整个解析不值得。
+ */
+async function resolvePlayerOrigin(rule: ParseRule, ctx: ParserContext, html: string): Promise<string> {
+  const cfg = rule.playerOrigin
+  if (!cfg?.url || !cfg.re) return ''
+
+  const key = ctx.host + cfg.url
+  const hit = playerOriginCache.get(key)
+  if (hit && Date.now() - hit.at < PLAYER_ORIGIN_TTL) return hit.origin
+
+  try {
+    const res = await ctx.fetchPage(absolutize(cfg.url, ctx.pageUrl), ctx.cookie)
+    // 每条线路可以配不同的播放器，按当前线路的标识精确取；
+    // 标识抠不到（页面改版）就退回配置里第一条，总比什么都没有强
+    const from = cfg.fromRe ? html.match(new RegExp(cfg.fromRe, 'i'))?.[1] : ''
+    const scoped = from ? res.body.match(new RegExp(cfg.re.replace('%FROM%', from), 'i')) : null
+    const m = scoped ?? res.body.match(new RegExp(cfg.re.replace('"%FROM%"', '"[^"]+"'), 'i'))
+    // 配置是 JSON，地址里的 `/` 都是 `\/` 转义过的
+    const origin = new URL(decodeMaccmsUrl(m?.[1] ?? '')).origin
+    playerOriginCache.set(key, { origin, at: Date.now() })
+    return origin
+  } catch {
+    return ''
+  }
+}
+
 /** 解析线路 × 选集表。适用于「所有线路的选集都渲染在同一页」的站点。 */
 function parseLines(html: string, rule: ParseRule, pageUrl: string): { lines: ParsedLine[]; activeIndex: number } {
   if (!rule.lineRe || !rule.episodeGroupRe || !rule.episodeRe) return { lines: [], activeIndex: -1 }
@@ -81,14 +114,18 @@ export function createHtmlParser(rule: ParseRule): SiteParser {
         throw createError({ statusCode: 502, statusMessage: '页面结构不匹配，规则需要更新' })
       }
 
+      // 防盗链域名优先从站点自己的播放器配置里现取，规则里写死的只当兜底。
+      // 按需取址的单集请求（only=1）也走这里，所以每集都能拿到最新的域名。
+      const playerOrigin = await resolvePlayerOrigin(rule, ctx, html)
+
       const base = {
         ruleId: rule.id,
         ruleName: rule.name,
         title: (rule.titleRe && decodeEntities(html.match(new RegExp(rule.titleRe, 'i'))?.[1] ?? '')) || parseTitle(html),
         pageUrl: ctx.pageUrl,
         currentVideoUrl,
-        referer: rule.referer,
-        origin: rule.origin,
+        referer: playerOrigin ? playerOrigin + '/' : rule.referer,
+        origin: playerOrigin || rule.origin,
       }
 
       // 按需取址的单集请求（only=1）：只要这一集的地址。

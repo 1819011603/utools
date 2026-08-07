@@ -29,7 +29,12 @@
       "Bash(curl -sS -m 40 -x http://127.0.0.1:7897 -o h.html -H \"user-agent: Mozilla/5.0\" \"https://4kvm.org/\")",
       "Bash(node -e ' *)",
       "Bash(npm run *)",
-      "Edit(/.claude/skills/video-parse-site/**)"
+      "Edit(/.claude/skills/video-parse-site/**)",
+      "Bash(timeout 90 node cdp-check.js 'http://localhost:3000/video-player?parseUrl=https%3A%2F%2Fwww.ylsp.lv%2Fplay%2F78312-2-1%2F&line=3&index=4' 22000)",
+      "Bash(node cdp-check.js 'http://localhost:3000/video-player?parseUrl=https%3A%2F%2Fwww.ylsp.lv%2Fplay%2F78312-2-1%2F&line=3' 12000)",
+      "Bash(node cdp-check.js 'http://localhost:3000/video-player?parseUrl=https%3A%2F%2Fwww.ylsp.lv%2Fplay%2F78312-2-1%2F&line=0&lineName=%E5%A4%A7%E9%99%860%E7%BA%BF&index=0&ep=10' 22000)",
+      "Bash(node cdp-check.js 'http://localhost:3000/video-player?parseUrl=https%3A%2F%2Fwww.ylsp.lv%2Fplay%2F78312-2-1%2F&line=0&lineName=%E5%A4%A7%E9%99%860%E7%BA%BF&index=0&ep=10' 30000)",
+      "Bash(node cdp-check.js 'http://localhost:3000/video-player?parseUrl=https%3A%2F%2Fwww.ylsp.lv%2Fplay%2F78312-2-1%2F&line=0&lineName=%E5%A4%A7%E9%99%860%E7%BA%BF&index=0&ep=%E7%AC%AC10%E9%9B%86' 26000)"
     ],
     "ask": [
       "Bash(rm *)",
@@ -42,6 +47,10 @@
       "Bash(git rm *)",
       "Bash(find * -delete)",
       "Bash(trash *)"
+    ],
+    "additionalDirectories": [
+      "/tmp",
+      "/private/tmp"
     ]
   }
 }
