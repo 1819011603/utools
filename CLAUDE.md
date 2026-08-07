@@ -289,6 +289,17 @@ IP 与二级域名返回空串。它是压箱底的一档，只在前三条都�
   Esc / 系统手势退出不走 `toggleFullscreen`，解锁要挂在 `fullscreenchange` 上。
   iOS Safari 不给容器全屏 → 退到 `videoEl.webkitEnterFullscreen()`
 
+### 自动全屏在手机上必须「挂起 + 补兑现」
+
+手机浏览器要求**用户激活**才准 `requestFullscreen`，页面加载完自动调**必被拒**。
+原来直接调 + `catch(console.log)`，于是这个开关在安卓上从来没生效过，界面上还看不出是被谁拒的。
+现在 `onCanPlay` 只登记意图（`pendingAutoFullscreen`），由 controls 试；试不成就挂着，
+用户第一次碰播放器（`togglePlay` / 手势层的 `pointerdown`）时 `consumeAutoFullscreen()` 补上。
+用户自己退出全屏要把意图清掉，否则下一次点画面又被拽进去。
+
+同理**自动播放也可能被拦**，所以暂停态的中央播放键要常驻且**整块可点**——
+只让那枚 80px 的圆可点的话，手机上瞄不准，表现就是「点了没反应」。
+
 ### 切集必须上门闩（踩过：15 集点下一集直接落到 30 集）
 
 切一集是**异步**的（按需取址一发请求 + 重建 hls.js），而这期间旧的 `<video>` 还在原地播、
@@ -298,6 +309,12 @@ IP 与二级域名返回空串。它是压箱底的一档，只在前三条都�
 
 两道闩都要留：`playByIndex` 里的 `switching`（顺带挡住手快连点两下「下一集」），
 和 `useVideoEvents` 里每集一次的 `outroFired`（`loadedmetadata` 时复位）。
+
+**进度记忆不能记进片尾区**（同一个坑的另一半）：`skipOutro=90` 时进度会被存成 `duration-90`，
+下次进这集恢复到那儿，**当场满足跳片尾判据被弹到下一集，这集永远看不成**
+（踩过：看过 22 集后回头看 21 集，21 播完自动进 22，又立刻被弹到 23）。
+`saveCurrentProgress` 越过 `duration - max(5, skipOutro)` 就**删记录**（视作看完，下次从头播）；
+`onLoadedMetadata` 里再兜一道，把老版本留下的片尾区记录就地作废。
 
 ### 其它
 

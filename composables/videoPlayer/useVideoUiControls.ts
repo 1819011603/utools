@@ -18,6 +18,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   const {
     videoEl, playerContainer, progressBar, isPlaying, isVideoLoaded, duration,
     volume, isMuted, desiredRate, autoBestRate, isFullscreen, showControls, showPlayIcon, showSpeedMenu,
+    pendingAutoFullscreen,
     seekPreviewTime, seekPreviewPercent, isSeeking, hoverTime, hoverPercent, preloadStrategy,
   } = media
 
@@ -35,6 +36,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
 
   const togglePlay = () => {
     if (!videoEl.value) return
+    consumeAutoFullscreen()   // 这一下就是「用户激活」，挂起的自动全屏趁现在兑现
     if (isPlaying.value) videoEl.value.pause()
     else videoEl.value.play()
 
@@ -140,6 +142,28 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     try { await so.lock('landscape') } catch { /* 不支持或被拒，保持原样 */ }
   }
 
+  /**
+   * 兑现「加载后自动全屏」。
+   *
+   * 手机浏览器要求**用户激活**才准进全屏，页面加载完自动调必被拒——安卓上这个开关从来没生效过，
+   * 而失败只被 console.log 吞掉，从界面上完全看不出。现在拒了就把意图挂着（pendingAutoFullscreen），
+   * 用户第一次碰播放器（点中央播放键、单击画面）时补上。
+   */
+  const enterAutoFullscreen = async () => {
+    if (!playerContainer.value || document.fullscreenElement) { pendingAutoFullscreen.value = false; return }
+    try {
+      await playerContainer.value.requestFullscreen()
+      isFullscreen.value = true
+      pendingAutoFullscreen.value = false
+      await lockLandscape()
+    } catch { /* 没有用户激活，留着意图等下一次交互 */ }
+  }
+
+  watch(pendingAutoFullscreen, (v) => { if (v) void enterAutoFullscreen() })
+
+  /** 任何一次用户交互都可以调；没有挂起意图时是空操作 */
+  const consumeAutoFullscreen = () => { if (pendingAutoFullscreen.value) void enterAutoFullscreen() }
+
   const toggleFullscreen = async () => {
     if (!playerContainer.value) return
     if (document.fullscreenElement) {
@@ -173,6 +197,8 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   const handleFullscreenChange = () => {
     isFullscreen.value = !!document.fullscreenElement
     if (!isFullscreen.value) {
+      // 用户自己退出来了就别再惦记自动全屏，否则下次一点画面又被拽进去
+      pendingAutoFullscreen.value = false
       try { screen.orientation?.unlock?.() } catch { /* 桌面没有这能力 */ }
     }
   }
@@ -271,7 +297,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     supportsPiP, volumeIcon, canDownload,
     togglePlay, skip, startSeek, updateSeekPreview, updateHoverTime,
     setVolume, toggleMute, setPlaybackRate,
-    toggleFullscreen, togglePiP, handleMouseMove, hideControlsDelayed, keepControlsAlive,
+    toggleFullscreen, togglePiP, handleMouseMove, hideControlsDelayed, keepControlsAlive, consumeAutoFullscreen,
     applyPreload, bindGlobalKeys, unbindGlobalKeys,
   }
 }

@@ -145,6 +145,8 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
     if (fromControls(e)) return
     if (e.pointerType === 'mouse' && e.button !== 0) return
     if (isLocked.value) { revealLockBtn(); return }
+    // 这一下就是「用户激活」：自动全屏被浏览器拒过的话趁现在补上（安卓上必然走这条路）
+    controls.consumeAutoFullscreen()
 
     activePointer = e.pointerId
     pointerKind = e.pointerType

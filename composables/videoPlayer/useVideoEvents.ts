@@ -113,7 +113,17 @@ export function useVideoEvents(deps: VideoEventsDeps) {
 
     // HLS 已经通过 hls.js 的 startPosition 直接从目标位置起播，这里不用再 seek 一次
     //（避免多余的 seek 打断刚起播的加载）；非 HLS 没有 startPosition 机制，仍需手动 seek。
-    const savedTime = playlist.getSavedProgress(playlist.progressKey())
+    const key = playlist.progressKey()
+    let savedTime = playlist.getSavedProgress(key)
+    // 存的位置已经在片尾区 → 这集其实看完了。恢复过去会当场满足「跳过片尾」的判据被弹到下一集，
+    // 这集就永远看不成（踩过：看过 22 集后回头点 21 集，播完自动进 22 集又被弹走）。
+    // 写入侧已经不再记这种位置了（saveCurrentProgress），这里管的是老版本留下来的记录。
+    const finishedAt = duration.value - Math.max(5, skipOutro.value)
+    if (savedTime > 0 && savedTime >= finishedAt) {
+      playlist.dropSavedProgress(key)
+      savedTime = 0
+      if (isHls.value && videoEl.value.currentTime >= finishedAt) videoEl.value.currentTime = 0
+    }
     if (isHls.value && savedTime > 0 && savedTime < duration.value - 5) {
       hasSkippedIntro.value = true
     } else if (savedTime > 0 && savedTime < duration.value - 5) {
@@ -180,13 +190,12 @@ export function useVideoEvents(deps: VideoEventsDeps) {
     // 非 HLS 没有 MANIFEST_PARSED，起播预缓冲在这里挂
     if (!isHls.value) scheduleAutoPlay()
 
+    // 自动全屏只登记意图，兑现交给 controls（它才管横屏锁和 iOS 的原生全屏兜底）。
+    // 原来在这里直接 requestFullscreen 并把 reject 打进 console：安卓上**必然**被拒
+    // （没有用户激活），于是「自动全屏」在手机上从来没生效过，还看不出是被谁拒的。
     if (isFirstLoad && autoFullscreen.value) {
       isFirstLoad = false
-      setTimeout(() => {
-        if (playerContainer.value && !document.fullscreenElement) {
-          playerContainer.value.requestFullscreen().catch(() => console.log('自动全屏被阻止'))
-        }
-      }, 100)
+      media.pendingAutoFullscreen.value = true
     }
   }
 

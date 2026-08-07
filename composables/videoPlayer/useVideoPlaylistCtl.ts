@@ -55,12 +55,36 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
     return /^\d{1,4}$/.test(name) ? `第${name}集` : name
   })
 
+  /**
+   * 「这集算看完了」的位置：片尾区的起点（至少留 5 秒，`skipOutro` 关着时就是结尾附近）。
+   * 越过它就不该再记进度——记下来下次进这集会从片尾恢复，一恢复就又落进「跳过片尾」的判据里，
+   * 当场被弹到下一集，**这集永远看不成**（踩过：看到 22 集后回头点 21 集，播完自动进 22 集又被弹走）。
+   */
+  const finishedThreshold = (): number => {
+    const dur = media.duration.value
+    return dur > 0 ? dur - Math.max(5, media.skipOutro.value) : Infinity
+  }
+
   const saveCurrentProgress = () => {
     const key = progressKey()
-    if (key && media.currentTime.value > 0) {
-      savedProgress.value[key] = media.currentTime.value
-      deps.onDirty()
+    if (!key || media.currentTime.value <= 0) return   // 还没播就别动已有记录（切集时会经过这里）
+    if (media.currentTime.value >= finishedThreshold()) {
+      // 看完了：清掉记录，下次从头开始
+      if (savedProgress.value[key] !== undefined) {
+        delete savedProgress.value[key]
+        deps.onDirty()
+      }
+      return
     }
+    savedProgress.value[key] = media.currentTime.value
+    deps.onDirty()
+  }
+
+  /** 起播后发现存的位置已经在片尾区（老版本留下的记录）时，就地作废 */
+  const dropSavedProgress = (url: string) => {
+    if (savedProgress.value[url] === undefined) return
+    delete savedProgress.value[url]
+    deps.onDirty()
   }
 
   const getSavedProgress = (url: string): number => savedProgress.value[url] || 0
@@ -396,7 +420,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
   return {
     playlist, currentIndex, hasPrev, hasNext, isRefreshingLinks, lastRefreshAt,
     progressKey, currentVideoName, saveCurrentProgress, getSavedProgress, clearAllProgress,
-    parseAndLoad, playByIndex, playPrev, playNext, clearPlaylist, loadExample,
+    parseAndLoad, playByIndex, playPrev, playNext, clearPlaylist, loadExample, dropSavedProgress,
     resolveLazyUrl, refreshPlaylistLinks, loadFromParseSource,
   }
 }

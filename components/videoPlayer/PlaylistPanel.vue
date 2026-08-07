@@ -29,8 +29,9 @@
     </div>
 
     <!-- 网格排布：几十集竖着列要滚很久，横着摆一眼能扫到目标集 -->
-    <div class="max-h-64 overflow-y-auto p-2 bg-gray-50 dark:bg-gray-800 rounded-lg">
-      <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2">
+    <div class="max-h-80 overflow-y-auto p-2 bg-gray-50 dark:bg-gray-800 rounded-lg">
+      <!-- 列数给足：一屏能扫到的集数越多越省事，超长剧尤其明显 -->
+      <div class="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10 xl:grid-cols-12 gap-2">
         <div
           v-for="(item, index) in playlist"
           :key="index"

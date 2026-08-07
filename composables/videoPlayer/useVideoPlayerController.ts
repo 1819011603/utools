@@ -47,7 +47,8 @@ export function useVideoPlayerController() {
     applyHints: (origin, referer) => {
       if (origin) conn.originHint.value = origin
       if (referer) conn.refererHint.value = referer
-      if (origin || referer) media.showAdvancedProxy.value = true
+      // 不再顺手展开连接设置：那块已经是页面下方默认折叠的一节，
+      // 而解析来的候选头几乎每次都有，等于「默认折叠」形同虚设（用户点名要求收起）
     },
   })
 
@@ -144,8 +145,6 @@ export function useVideoPlayerController() {
     conn.dualChannel.value = s.dualChannel ?? false
     conn.originHint.value = s.originHint ?? ''
     conn.refererHint.value = s.refererHint ?? ''
-    // 填过候选头就展开设置区，否则用户看不到自己填的值还在不在
-    if (conn.originHint.value || conn.refererHint.value) media.showAdvancedProxy.value = true
     if (s.hlsConfig) media.hlsConfig.value = { ...media.hlsConfig.value, ...migrateHlsTuning(s.hlsConfig) }
     if (s.tierOverrides) tier.tierOverrides.value = { ...s.tierOverrides }
   }
@@ -173,7 +172,6 @@ export function useVideoPlayerController() {
     if (queryParams.origin !== undefined || queryParams.referer !== undefined) {
       if (queryParams.origin !== undefined) conn.originHint.value = queryParams.origin
       if (queryParams.referer !== undefined) conn.refererHint.value = queryParams.referer
-      media.showAdvancedProxy.value = true
     }
 
     const savedState = loadSavedState()

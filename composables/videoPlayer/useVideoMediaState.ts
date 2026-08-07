@@ -43,8 +43,13 @@ export function useVideoMediaState() {
   const showControls = ref(true)
   const showPlayIcon = ref(false)
   const showSpeedMenu = ref(false)
+  // 播放器内嵌的选集抽屉。全屏时页面下方那份列表够不着，只能做进画面里
+  const showEpisodes = ref(false)
   const showAdvancedProxy = ref(false)  // 展开手动连接设置（默认隐藏，全自动）
   const autoFullscreen = ref(true)
+  // 「自动全屏」的挂起意图：手机浏览器要求用户激活才准进全屏，页面加载后自动调必被拒。
+  // 拒了就挂在这里，等用户第一次碰播放器时兑现（见 useVideoUiControls.consumeAutoFullscreen）
+  const pendingAutoFullscreen = ref(false)
   // 锁定屏幕：屏蔽手势、控制栏与快捷键（横屏握持时误触太容易）。
   // 放在裸状态里而不是手势模块内，是因为快捷键在 controls 里，而 controls 是手势层的**下游**——
   // 反过来 import 就成环了。
@@ -83,7 +88,8 @@ export function useVideoMediaState() {
     videoUrl, videoUrlInput, isVideoLoaded, isHls, errorMessage, isLoading, isBuffering, isResolvingUrl, resolveStage,
     videoEl, playerContainer, progressBar, speedMenuRef,
     isPlaying, currentTime, duration, volume, isMuted, playbackRate, desiredRate, videoKey,
-    isFullscreen, showControls, showPlayIcon, showSpeedMenu, showAdvancedProxy, autoFullscreen, autoBestRate, isLocked,
+    isFullscreen, showControls, showPlayIcon, showSpeedMenu, showEpisodes,
+    showAdvancedProxy, autoFullscreen, pendingAutoFullscreen, autoBestRate, isLocked,
     progressPercent, bufferedPercent, seekPreviewTime, seekPreviewPercent, isSeeking, hoverTime, hoverPercent,
     skipIntro, skipOutro, hasSkippedIntro, savedProgress, isRestoringFromSaved,
     hlsConfig, hlsStats, playbackDiag,

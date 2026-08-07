@@ -98,9 +98,12 @@
         <div
           v-if="showPlayIcon || pausedIdle"
           class="absolute inset-0 flex items-center justify-center"
-          :class="pausedIdle ? '' : 'pointer-events-none'"
+          :class="pausedIdle ? 'cursor-pointer' : 'pointer-events-none'"
+          :data-no-gesture="pausedIdle ? '' : undefined"
+          @click="pausedIdle && togglePlay()"
         >
-          <div class="relative" :class="pausedIdle ? 'cursor-pointer' : ''" data-no-gesture @click="togglePlay">
+          <!-- 整块可点而不只是那枚 80px 的圆：手机上要瞄准那个圈太难，「点了没反应」多半是没点中 -->
+          <div class="relative">
             <span v-if="showPlayIcon" class="absolute inset-0 rounded-full bg-white/25 blast" />
             <div
               class="w-20 h-20 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center
@@ -200,7 +203,7 @@
         <button
           v-if="isLocked ? showLockBtn : (showControls || !isPlaying)"
           data-no-gesture
-          class="absolute left-3 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full text-white
+          class="absolute left-3 top-1/2 -translate-y-1/2 w-14 h-14 rounded-full text-white
                  flex items-center justify-center backdrop-blur-sm ring-1 transition-all duration-300
                  hover:scale-110 active:scale-95"
           :class="isLocked
@@ -213,7 +216,7 @@
           <UIcon
             :key="String(isLocked)"
             :name="isLocked ? 'i-heroicons-lock-closed' : 'i-heroicons-lock-open'"
-            class="w-5 h-5 lock-flip"
+            class="w-6 h-6 lock-flip"
           />
         </button>
       </Transition>
@@ -230,7 +233,7 @@
           <!-- 进度条 -->
           <div
             ref="progressBar"
-            class="relative h-1.5 bg-white/30 rounded-full cursor-pointer group/progress mb-3 touch-none"
+            class="relative h-2 bg-white/30 rounded-full cursor-pointer group/progress mb-3 touch-none"
             @pointerdown="startSeek"
             @mousemove="updateHoverTime"
             @mouseleave="hoverTime = null"
@@ -242,10 +245,10 @@
               :style="{ width: progressPercent + '%' }"
             />
             <div
-              class="absolute top-1/2 -translate-y-1/2 w-4 h-4 bg-white rounded-full shadow-lg
+              class="absolute top-1/2 -translate-y-1/2 w-5 h-5 bg-white rounded-full shadow-lg
                      opacity-0 scale-50 group-hover/progress:opacity-100 group-hover/progress:scale-100
                      transition-all duration-200 ring-2 ring-violet-400/60"
-              :style="{ left: `calc(${progressPercent}% - 8px)` }"
+              :style="{ left: `calc(${progressPercent}% - 10px)` }"
             />
             <div
               v-if="hoverTime !== null"
@@ -264,43 +267,40 @@
           </div>
 
           <div class="flex items-center justify-between gap-2 flex-wrap min-w-0">
-            <div class="flex items-center gap-2 min-w-0 flex-1">
+            <!--
+              前进/后退 10 秒的两枚按钮已删：双击画面左右两侧就是 ±5s，手机上比瞄准小图标快得多，
+              键盘还有 ←/→。留着只是把上下一集这两枚真正常用的挤小了。
+            -->
+            <div class="flex items-center gap-1 min-w-0 flex-1">
               <button
                 v-if="playlist.length > 1"
-                class="text-white transition-colors"
-                :class="hasPrev ? 'hover:text-violet-400' : 'opacity-40 cursor-not-allowed'"
+                class="p-2 rounded-lg text-white transition-all"
+                :class="hasPrev ? 'hover:bg-white/15 hover:text-violet-300 active:scale-90' : 'opacity-40 cursor-not-allowed'"
                 :disabled="!hasPrev"
                 title="上一集"
                 @click="playPrev"
               >
-                <UIcon name="i-heroicons-backward-solid" class="w-5 h-5" />
+                <UIcon name="i-heroicons-backward-solid" class="w-7 h-7" />
               </button>
 
-              <button class="text-white hover:text-violet-400 transition-colors" @click="togglePlay">
-                <UIcon :name="isPlaying ? 'i-heroicons-pause' : 'i-heroicons-play'" class="w-6 h-6" />
+              <button class="p-2 rounded-lg text-white hover:bg-white/15 hover:text-violet-300 active:scale-90 transition-all" @click="togglePlay">
+                <UIcon :name="isPlaying ? 'i-heroicons-pause' : 'i-heroicons-play'" class="w-8 h-8" />
               </button>
 
               <button
                 v-if="playlist.length > 1"
-                class="text-white transition-colors"
-                :class="hasNext ? 'hover:text-violet-400' : 'opacity-40 cursor-not-allowed'"
+                class="p-2 rounded-lg text-white transition-all"
+                :class="hasNext ? 'hover:bg-white/15 hover:text-violet-300 active:scale-90' : 'opacity-40 cursor-not-allowed'"
                 :disabled="!hasNext"
                 title="下一集"
                 @click="playNext"
               >
-                <UIcon name="i-heroicons-forward-solid" class="w-5 h-5" />
+                <UIcon name="i-heroicons-forward-solid" class="w-7 h-7" />
               </button>
 
-              <button class="text-white hover:text-violet-400 transition-colors" title="后退 10 秒" @click="skip(-10)">
-                <UIcon name="i-heroicons-backward" class="w-5 h-5" />
-              </button>
-              <button class="text-white hover:text-violet-400 transition-colors" title="前进 10 秒" @click="skip(10)">
-                <UIcon name="i-heroicons-forward" class="w-5 h-5" />
-              </button>
-
-              <div class="flex items-center gap-2 group/volume">
-                <button class="text-white hover:text-violet-400 transition-colors" @click="toggleMute">
-                  <UIcon :name="volumeIcon" class="w-5 h-5" />
+              <div class="flex items-center gap-2 group/volume ml-1">
+                <button class="p-2 rounded-lg text-white hover:bg-white/15 hover:text-violet-300 transition-all" @click="toggleMute">
+                  <UIcon :name="volumeIcon" class="w-6 h-6" />
                 </button>
                 <div class="w-0 group-hover/volume:w-20 overflow-hidden transition-all duration-200">
                   <input
@@ -317,13 +317,24 @@
               </span>
             </div>
 
-            <div class="flex items-center gap-2 shrink-0">
+            <div class="flex items-center gap-1 shrink-0">
+              <!-- 选集：全屏时页面下方那份列表够不着，而全屏里换集才是最高频的动作 -->
+              <button
+                v-if="playlist.length > 1"
+                class="p-2 rounded-lg text-white hover:bg-white/15 hover:text-violet-300 active:scale-90 transition-all"
+                :class="{ 'text-violet-300 bg-white/10': showEpisodes }"
+                title="选集"
+                @click="showEpisodes = !showEpisodes"
+              >
+                <UIcon name="i-heroicons-queue-list" class="w-6 h-6" />
+              </button>
+
               <!-- 自动全屏 / 自动倍速 / 跳过片头片尾：全是看片当下才改的，放这儿手不用离开画面 -->
               <VideoPlayerSettingsMenu />
 
               <div ref="speedMenuRef" class="relative">
                 <button
-                  class="text-white hover:text-violet-400 transition-colors px-2 py-1 rounded text-sm font-medium"
+                  class="px-2.5 py-2 rounded-lg text-white hover:bg-white/15 hover:text-violet-300 transition-all text-base font-semibold"
                   :title="autoBestRate
                     ? `自动最佳倍速：上限 ${autoRateCap}x，当前带宽下实际 ${playbackRate}x` : `倍速 ${playbackRate}x`"
                   @click="showSpeedMenu = !showSpeedMenu"
@@ -337,7 +348,7 @@
                     <button
                       v-for="rate in PLAYBACK_RATES"
                       :key="rate"
-                      class="block w-full px-4 py-2 text-sm text-white hover:bg-violet-500/50 transition-colors text-center"
+                      class="block w-full px-5 py-2.5 text-sm text-white hover:bg-violet-500/50 transition-colors text-center"
                       :class="{ 'bg-violet-500': desiredRate === rate }"
                       @click="setPlaybackRate(rate)"
                     >
@@ -350,29 +361,31 @@
               <template v-if="canDownload">
                 <template v-if="isDownloading">
                   <span class="text-white text-xs font-medium w-8 text-center">{{ downloadProgress }}%</span>
-                  <button class="text-amber-400 hover:text-red-400 transition-colors" title="取消下载" @click="cancelDownload">
+                  <button class="p-2 rounded-lg text-amber-400 hover:bg-white/15 hover:text-red-400 transition-all" title="取消下载" @click="cancelDownload">
                     <UIcon name="i-heroicons-x-circle" class="w-5 h-5" />
                   </button>
                 </template>
-                <button v-else class="text-white hover:text-violet-400 transition-colors" title="下载视频" @click="downloadVideo()">
-                  <UIcon name="i-heroicons-arrow-down-tray" class="w-5 h-5" />
+                <button v-else class="p-2 rounded-lg text-white hover:bg-white/15 hover:text-violet-300 transition-all" title="下载视频" @click="downloadVideo()">
+                  <UIcon name="i-heroicons-arrow-down-tray" class="w-6 h-6" />
                 </button>
               </template>
 
-              <button v-if="supportsPiP" class="text-white hover:text-violet-400 transition-colors" title="画中画" @click="togglePiP">
-                <UIcon name="i-heroicons-rectangle-stack" class="w-5 h-5" />
+              <button v-if="supportsPiP" class="p-2 rounded-lg text-white hover:bg-white/15 hover:text-violet-300 transition-all" title="画中画" @click="togglePiP">
+                <UIcon name="i-heroicons-rectangle-stack" class="w-6 h-6" />
               </button>
 
-              <button class="text-white hover:text-violet-400 transition-colors" title="全屏" @click="toggleFullscreen">
+              <button class="p-2 rounded-lg text-white hover:bg-white/15 hover:text-violet-300 active:scale-90 transition-all" title="全屏" @click="toggleFullscreen">
                 <UIcon
                   :name="isFullscreen ? 'i-heroicons-arrows-pointing-in' : 'i-heroicons-arrows-pointing-out'"
-                  class="w-5 h-5"
+                  class="w-7 h-7"
                 />
               </button>
             </div>
           </div>
         </div>
       </Transition>
+
+      <VideoPlayerEpisodeOverlay />
     </div>
   </UCard>
 </template>
