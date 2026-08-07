@@ -95,7 +95,7 @@ server/api/resolve.ts 播放页解析接口（薄壳，站点策略在 server/pa
 | `useVideoEvents.ts` / `useVideoUiControls.ts` / `useVideoDeepLink.ts` | 事件 / 交互快捷键 / 地址栏同步 |
 | `useVideoGestures.ts` | 画面手势：单击/双击/长按/滑动/锁定（建在 controls 之上，见下） |
 | `useVideoPlayerController.ts` | **装配层**：接线 + 持久化 + 挂载卸载 |
-| `useReachabilityProbe.ts` / `useHlsPrefetch.ts` / `useSegmentCache.ts` / `useStallTracker.ts` / `useM3u8.ts` / `useVideoDownload.ts` / `useVideoProxy.ts` / `videoDiag.ts` | 底层引擎 |
+| `useReachabilityProbe.ts` / `useHlsPrefetch.ts` / `useSegmentCache.ts` / `useStallTracker.ts` / `useM3u8.ts` / `useVideoProxy.ts` / `videoDiag.ts` | 底层引擎 |
 
 UI 分块：`SourceCard` / `PlaylistPanel` / `Stage` / `SettingsMenu` / `ConnSettings` / `HlsSettings` /
 `StatsPanel` / `PreloadSettings` / `Shortcuts` / `CollapseCard`。
@@ -302,8 +302,16 @@ IP 与二级域名返回空串。它是压箱底的一档，只在前三条都�
 用户第一次碰播放器（`togglePlay` / 手势层的 `pointerdown`）时 `consumeAutoFullscreen()` 补上。
 用户自己退出全屏要把意图清掉，否则下一次点画面又被拽进去。
 
-同理**自动播放也可能被拦**，所以暂停态的中央播放键要常驻且**整块可点**——
-只让那枚 80px 的圆可点的话，手机上瞄不准，表现就是「点了没反应」。
+**「点中央播放键 = 播放 + 全屏 + 横屏」必须是确定行为**：`togglePlay` 里不看 `pendingAutoFullscreen`
+（它只在首个 `canplay` 置位，被别的路径清掉就没了），只要开关开着且还没全屏就直接进。
+中央键那层的 `data-no-gesture` 也要**无条件**写死——写成 `:data-no-gesture="cond ? '' : undefined"`
+时手势层会照样接管那一下，表现是「点播放键结果只把上下两条框弹出来了」。
+不可点时靠 `pointer-events-none` 让事件穿过去就够了。
+
+同理**自动播放也可能被拦**：拦下就**改静音重播一次**（静音播放任何时候都允许），
+宁可先出画面，声音等用户下一次触碰时恢复（`restoreSound`，任何点按都解除）。
+直接放弃的表现是「点了选集不播」，还得再点一次中央播放键。
+暂停态的中央播放键要常驻且**整块可点**——只让那枚 80px 的圆可点的话手机上瞄不准。
 
 ### 切集必须上门闩（踩过：15 集点下一集直接落到 30 集）
 
@@ -324,7 +332,8 @@ IP 与二级域名返回空串。它是压箱底的一档，只在前三条都�
 ### 其它
 
 - `useM3u8.ts`：m3u8-parser + AES-128 密钥/IV（`keyIv` 为 null 时用媒体序列号 `sn` 推导）
-- `useVideoDownload.ts`：分片并发拉取 → AES 解密 → ffmpeg.wasm 合并 MP4（core 从 unpkg 拉）
+- 视频下载（分片并发拉取 → AES 解密 → ffmpeg.wasm 合并 MP4）**已整块删除**：
+  几十分钟的合并过程要一直开着页面，实际没人用，而它把控制栏最宝贵的位置占掉了
 
 ### URL 参数直链
 

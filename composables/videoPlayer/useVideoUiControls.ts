@@ -17,7 +17,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   const { media, autoTune } = deps
   const {
     videoEl, playerContainer, progressBar, isPlaying, isVideoLoaded, duration,
-    volume, isMuted, desiredRate, autoBestRate, isFullscreen, showControls, showPlayIcon, showSpeedMenu,
+    volume, isMuted, desiredRate, autoBestRate, autoFullscreen, isFullscreen, showControls, showPlayIcon, showSpeedMenu,
     pendingAutoFullscreen, autoMuted,
     seekPreviewTime, seekPreviewPercent, isSeeking, hoverTime, hoverPercent, preloadStrategy,
   } = media
@@ -41,9 +41,17 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
 
   const togglePlay = () => {
     if (!videoEl.value) return
-    consumeAutoFullscreen()   // 这一下就是「用户激活」，挂起的自动全屏趁现在兑现
-    if (isPlaying.value) videoEl.value.pause()
-    else videoEl.value.play()
+    restoreSound()
+    if (isPlaying.value) {
+      videoEl.value.pause()
+    } else {
+      // 开播这一下就是浏览器要的「用户激活」，自动全屏在这里兑现最稳：
+      // 不看 pendingAutoFullscreen（它只在首个 canplay 置位，错过就没了），
+      // 只要开关开着且还没全屏就进——「点中央播放键 = 播放 + 全屏 + 横屏」必须是确定行为。
+      if (autoFullscreen.value && !document.fullscreenElement) void enterAutoFullscreen()
+      else consumeAutoFullscreen()
+      void videoEl.value.play()
+    }
 
     showPlayIcon.value = true
     if (playIconTimer) clearTimeout(playIconTimer)

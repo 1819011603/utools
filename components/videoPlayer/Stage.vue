@@ -102,7 +102,7 @@
           v-if="showPlayIcon || pausedIdle"
           class="absolute inset-0 flex items-center justify-center"
           :class="pausedIdle ? 'cursor-pointer' : 'pointer-events-none'"
-          :data-no-gesture="pausedIdle ? '' : undefined"
+          data-no-gesture
           @click="pausedIdle && togglePlay()"
         >
           <!-- 整块可点而不只是那枚 80px 的圆：手机上要瞄准那个圈太难，「点了没反应」多半是没点中 -->
