@@ -202,7 +202,11 @@
         </div>
       </Transition>
 
-      <!-- 锁定按钮：锁上后它是唯一还能点的东西，所以点画面任意处都会让它露 3 秒 -->
+      <!--
+        锁定按钮：锁上后它是唯一还能点的东西，所以点画面任意处都会让它露 3 秒。
+        锁定态用半透明的紫→粉→蓝渐变，跟进度条/长按提示同一套色；
+        原来那块实心琥珀在黑画面上跳得像个警告标（本意只是「状态不同」，不是「出事了」）。
+      -->
       <Transition name="pop">
         <button
           v-if="isLocked ? showLockBtn : (showControls || !isPlaying)"
@@ -211,8 +215,8 @@
                  flex items-center justify-center backdrop-blur-sm ring-1 transition-all duration-300
                  hover:scale-110 active:scale-95"
           :class="isLocked
-            ? 'bg-amber-500/80 ring-amber-200/40 shadow-lg shadow-amber-900/40'
-            : 'bg-black/55 ring-white/15 hover:bg-black/75'"
+            ? 'bg-gradient-to-br from-violet-400/60 via-fuchsia-400/45 to-sky-400/50 ring-white/25 shadow-lg shadow-violet-950/30'
+            : 'bg-gradient-to-br from-white/15 to-white/5 ring-white/15 hover:from-white/25 hover:to-white/10'"
           :title="isLocked ? '解锁' : '锁定屏幕（屏蔽手势与控制栏）'"
           @click="toggleLock"
         >
