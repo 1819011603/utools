@@ -17,35 +17,48 @@ const MAX_EPISODES = 40
 // 解析各集的并发。太高会被源站限流，也更容易撞 CF 的并发子请求限制。
 const EPISODE_CONCURRENCY = 4
 
-// 播放器域名缓存。这个值全站通用、极少变，而**每一集取址都要用**——
+// 播放器地址缓存。这个值全站通用、极少变，而**每一集取址都要用**——
 // 按需取址的站点不缓存的话，每播一集都要多抓一次配置文件。TTL 与 resolve.ts 的 cookieCache 对齐。
-const playerOriginCache = new Map<string, { origin: string; at: number }>()
-const PLAYER_ORIGIN_TTL = 30 * 60 * 1000
+const playerCache = new Map<string, { player: PlayerInfo; at: number }>()
+const PLAYER_TTL = 30 * 60 * 1000
 
 /**
- * 抠出来的播放器地址 → origin。抠不到、或不是个合法地址一律空串：
+ * 站点自带的「解析播放器」地址（见 ParseRule.playerOrigin）。同一个值有两用：
+ *   · `origin` → 防盗链候选值（这类站点的防盗链认的是播放器域名，不是播放页域名）
+ *   · `prefix` → 拼 embedUrl 用的前缀（它本身就是 `https://…/?url=` 这种形态）
+ */
+interface PlayerInfo {
+  origin: string
+  prefix: string
+}
+
+const NO_PLAYER: PlayerInfo = { origin: '', prefix: '' }
+
+/**
+ * 抠出来的播放器地址 → { origin, prefix }。抠不到、或不是个合法地址一律空：
  * 这只是个候选值，为它中断整个解析不值得。（配置是 JSON，`/` 都是 `\/` 转义过的）
  */
-function originOf(raw?: string): string {
-  try { return new URL(decodeMaccmsUrl(raw ?? '')).origin } catch { return '' }
+function playerOf(raw?: string): PlayerInfo {
+  const prefix = decodeMaccmsUrl(raw ?? '')
+  try { return { origin: new URL(prefix).origin, prefix } } catch { return NO_PLAYER }
 }
 
 /**
- * 取防盗链域名（见 ParseRule.playerOrigin）。两种来源：
+ * 取播放器地址。两种来源：
  *   · 给了 `url` → 去站点自己的播放器配置文件里找，按 host 缓存
- *   · 没给 `url` → 域名就写在播放页上，直接对本页 HTML 跑正则
+ *   · 没给 `url` → 地址就写在播放页上，直接对本页 HTML 跑正则
  */
-async function resolvePlayerOrigin(rule: ParseRule, ctx: ParserContext, html: string): Promise<string> {
+async function resolvePlayer(rule: ParseRule, ctx: ParserContext, html: string): Promise<PlayerInfo> {
   const cfg = rule.playerOrigin
-  if (!cfg?.re) return ''
+  if (!cfg?.re) return NO_PLAYER
 
   // 写在播放页上的那种（实测 kpkuang 的 data-pars）：不发请求，也**绝不能按 host 缓存**——
-  // 每条线路的解析播放器不同，缓存会把上一条线路的域名喂给下一条，表现是切线路后开始 403
-  if (!cfg.url) return originOf(html.match(new RegExp(cfg.re, 'i'))?.[1])
+  // 每条线路的解析播放器不同，缓存会把上一条线路的地址喂给下一条，表现是切线路后开始 403
+  if (!cfg.url) return playerOf(html.match(new RegExp(cfg.re, 'i'))?.[1])
 
   const key = ctx.host + cfg.url
-  const hit = playerOriginCache.get(key)
-  if (hit && Date.now() - hit.at < PLAYER_ORIGIN_TTL) return hit.origin
+  const hit = playerCache.get(key)
+  if (hit && Date.now() - hit.at < PLAYER_TTL) return hit.player
 
   try {
     const res = await ctx.fetchPage(absolutize(cfg.url, ctx.pageUrl), ctx.cookie)
@@ -54,11 +67,11 @@ async function resolvePlayerOrigin(rule: ParseRule, ctx: ParserContext, html: st
     const from = cfg.fromRe ? html.match(new RegExp(cfg.fromRe, 'i'))?.[1] : ''
     const scoped = from ? res.body.match(new RegExp(cfg.re.replace('%FROM%', from), 'i')) : null
     const m = scoped ?? res.body.match(new RegExp(cfg.re.replace('"%FROM%"', '"[^"]+"'), 'i'))
-    const origin = originOf(m?.[1])
-    playerOriginCache.set(key, { origin, at: Date.now() })
-    return origin
+    const player = playerOf(m?.[1])
+    playerCache.set(key, { player, at: Date.now() })
+    return player
   } catch {
-    return ''
+    return NO_PLAYER
   }
 }
 
@@ -107,16 +120,37 @@ const DIRECT_MEDIA_EXT = /\.(mp4|m4v|mkv|mov|webm|flv|ts|mp3|m4a|aac|flac)(?:$|[
 const isPlayableUrl = (url: string) => isM3u8Url(url) || DIRECT_MEDIA_EXT.test(url)
 
 /**
+ * 把「第三方站点的播放页地址」拼成能内嵌的播放器地址。
+ *
+ * 拼法照抄站点自己的（kpkuang 的 `template/vfed/asset/js/global_dec.js` 里 `fed.player.iframe`：
+ * `src = data-pars + (data-stat!=0 && 含'&' ? encodeURIComponent(d) : d)`）：
+ *
+ * - **前缀为空 = 抠出来的地址本身就是个能内嵌的播放器页**，原样用。实测 kpkuang 的
+ *   超清 AB/BY/EV 三条线就是这样：`data-pars=""`、`data-play` 直接是 `abyssplayer.com/…`
+ *   这类播放器地址。站点自己也是原样塞进 iframe 的，这时**不能编码**。
+ * - 有前缀时**只在地址含 `&` 时才整串 percent 编码**：不含 `&` 的地址编码之后解析站认不出来。
+ *
+ * 站点真正的判据是 `data-stat`（我们抓不到语义、也不该为一个站点加字段），
+ * 但实测这一页 28 条线路里「前缀空 ⟺ data-stat=0」恒成立，两种拼法结果逐条相同。
+ */
+function buildEmbedUrl(prefix: string, url: string): string {
+  if (!prefix) return url
+  return prefix + (url.includes('&') ? encodeURIComponent(url) : url)
+}
+
+/**
  * 抠这一集的播放地址。取不到时连**为什么**一起带出来——
  * 「页面把地址留空」和「抠到了但那是第三方站点的播放页」是两回事，
  * 界面上都说成前者的话，用户会一直以为是我们的正则写坏了（实测被问过）。
  */
 interface SourceProbe {
   url?: string
+  /** 抠到的是第三方播放页，而站点自己是内嵌播放的 → 照它的拼法拼出的内嵌地址 */
+  embedUrl?: string
   reason?: string
 }
 
-function probeSource(html: string, rule: ParseRule): SourceProbe {
+function probeSource(html: string, rule: ParseRule, playerPrefix = ''): SourceProbe {
   if (!rule.sourceRe) return {}
   const raw = html.match(new RegExp(rule.sourceRe, 'i'))?.[1]
   if (!raw) return {}
@@ -131,13 +165,17 @@ function probeSource(html: string, rule: ParseRule): SourceProbe {
   // 有些线路给的是第三方站点的**播放页**而不是直链（见 ParseRule.sourceMediaOnly）。
   // 它是个合法 http 地址，不在这筛掉就会一路喂到播放器里黑屏
   if (rule.sourceMediaOnly && !isPlayableUrl(url)) {
+    // 站点自己就是把这个地址塞进 iframe 播的（前缀写在播放页的 data-pars 上，可能为空）。
+    // 我们照它的拼法拼出同一个地址交给浏览器内嵌——真实地址由解析服务在浏览器里现算，
+    // 服务端拿不到，但那一步本来也不需要我们做。
+    // 判据是「规则配了 playerOrigin」而不是「拼出了前缀」：前缀为空恰恰是
+    // 「地址本身就是播放器页」那一档（实测 kpkuang 超清 AB/BY/EV 三条线），一样能内嵌
+    if (rule.playerOrigin) return { embedUrl: buildEmbedUrl(playerPrefix, url) }
     const host = hostOf(url) || url
     return { reason: `这条线路给的不是视频地址，而是第三方站点的播放页（${host}），要靠站点自带的解析服务在浏览器里现算才变得出真实地址，我们拿不到。换一条给直链的线路即可。` }
   }
   return { url }
 }
-
-const parseSource = (html: string, rule: ParseRule) => probeSource(html, rule).url
 
 export function createHtmlParser(rule: ParseRule): SiteParser {
   return {
@@ -148,16 +186,17 @@ export function createHtmlParser(rule: ParseRule): SiteParser {
 
     async parse(ctx: ParserContext, html: string): Promise<ParseResult> {
       const { lines, activeIndex } = parseLines(html, rule, ctx.pageUrl)
-      const source = probeSource(html, rule)
+
+      // 播放器地址要在抠源之前拿到：抠出来的是第三方播放页时，得靠它的 prefix 拼 embedUrl。
+      // 防盗链域名同样优先从站点自己的配置里现取，规则里写死的只当兜底。
+      // 按需取址的单集请求（only=1）也走这里，所以每集都能拿到最新的值。
+      const player = await resolvePlayer(rule, ctx, html)
+      const source = probeSource(html, rule, player.prefix)
       const currentVideoUrl = source.url
 
-      if (!currentVideoUrl && !lines.length) {
+      if (!currentVideoUrl && !source.embedUrl && !lines.length) {
         throw createError({ statusCode: 502, statusMessage: '页面结构不匹配，规则需要更新' })
       }
-
-      // 防盗链域名优先从站点自己的播放器配置里现取，规则里写死的只当兜底。
-      // 按需取址的单集请求（only=1）也走这里，所以每集都能拿到最新的域名。
-      const playerOrigin = await resolvePlayerOrigin(rule, ctx, html)
 
       const base = {
         ruleId: rule.id,
@@ -165,8 +204,9 @@ export function createHtmlParser(rule: ParseRule): SiteParser {
         title: (rule.titleRe && decodeEntities(html.match(new RegExp(rule.titleRe, 'i'))?.[1] ?? '')) || parseTitle(html),
         pageUrl: ctx.pageUrl,
         currentVideoUrl,
-        referer: playerOrigin ? playerOrigin + '/' : rule.referer,
-        origin: playerOrigin || rule.origin,
+        embedUrl: source.embedUrl,
+        referer: player.origin ? player.origin + '/' : rule.referer,
+        origin: player.origin || rule.origin,
       }
 
       // 按需取址的单集请求（only=1）：只要这一集的地址。
@@ -187,6 +227,9 @@ export function createHtmlParser(rule: ParseRule): SiteParser {
       let lineUnsupported = false
       // 不给直链的**具体原因**，界面上要区分「页面把地址留空」和「给的是第三方播放页」
       let unsupportedReason: string | undefined
+      // 这条线路给的是第三方播放页、只能内嵌播（见 base.embedUrl）。
+      // 它不算「线路坏了」，但也**不能交作业单**——我们的播放器放不了这种地址
+      let embedLine = !currentVideoUrl && !!source.embedUrl
 
       // ── 按需取址：解析阶段一集都不抓，只交一张作业单出去 ──
       // 逐集抓页是一集一个子请求，长剧要分多批、上百个请求，慢且容易被源站限流，
@@ -196,28 +239,34 @@ export function createHtmlParser(rule: ParseRule): SiteParser {
         // 界面上要有个能复制的真实地址，前端也就不必再为它多发一次请求
         const cur = target.episodes.find(ep => ep.pageUrl === ctx.pageUrl)
         if (cur && currentVideoUrl) cur.videoUrl = currentVideoUrl
+        if (cur && source.embedUrl) cur.embedUrl = source.embedUrl
 
         // 「这条线路给不给直链」还是要探一下——否则用户要播到某一集才发现整条线路是坏的。
         // 手上已有本线路的地址时白探一次没意义，只有切到别的线路时才花这一个请求。
         if (!cur) {
           const probe = target.episodes[0]
+          // base 里那份 embedUrl 是从 ctx.pageUrl 抠的，属于**另一条**线路，
+          // 先作废；探测失败（下面的 catch）时也不能把它带出去
+          base.embedUrl = undefined
+          embedLine = false
           try {
             const sub = await ctx.fetchPage(probe.pageUrl, ctx.cookie)
-            const s = probeSource(sub.body, rule)
-            if (s.url) probe.videoUrl = s.url
-            else { lineUnsupported = true; unsupportedReason = s.reason }
-            // 防盗链域名可能是**每条线路一份**（实测 kpkuang：睿映线认 soul.flixfiend.top、
-            // 电影天堂线认 vip.dyttzyplay.com）。而 base 里那份是从 ctx.pageUrl 抠的，
-            // 它属于**另一条**线路——不按探测页重算一遍就会把别人的域名带出去，第一集直接 403
-            const lineOrigin = await resolvePlayerOrigin(rule, ctx, sub.body)
-            if (lineOrigin) {
-              base.origin = lineOrigin
-              base.referer = lineOrigin + '/'
+            // 播放器地址可能是**每条线路一份**（实测 kpkuang：睿映线认 soul.flixfiend.top、
+            // 电影天堂线认 vip.dyttzyplay.com），同样属于另一条线路——
+            // 不按探测页重算一遍就会把别人的域名带出去，第一集直接 403
+            const linePlayer = await resolvePlayer(rule, ctx, sub.body)
+            if (linePlayer.origin) {
+              base.origin = linePlayer.origin
+              base.referer = linePlayer.origin + '/'
             }
+            const s = probeSource(sub.body, rule, linePlayer.prefix)
+            if (s.url) probe.videoUrl = s.url
+            else if (s.embedUrl) { probe.embedUrl = base.embedUrl = s.embedUrl; embedLine = true }
+            else { lineUnsupported = true; unsupportedReason = s.reason }
           } catch {
             // 探测失败不等于线路不可用（可能只是这一发超时），放行让播放时再试
           }
-        } else if (!currentVideoUrl) {
+        } else if (!currentVideoUrl && !source.embedUrl) {
           lineUnsupported = true
           unsupportedReason = source.reason
         }
@@ -236,22 +285,29 @@ export function createHtmlParser(rule: ParseRule): SiteParser {
           remaining: 0,
           lineUnsupported: lineUnsupported || undefined,
           lineUnsupportedReason: unsupportedReason,
-          clientTask: lineUnsupported ? undefined : clientTask,
+          // 内嵌线路不交作业单：作业单是给我们自己的播放器逐集取直链用的，
+          // 而这条线路压根没有直链，交出去只会让每一集都报「未给出直链」
+          clientTask: lineUnsupported || embedLine ? undefined : clientTask,
         }
       }
 
       if (target?.episodes.length) {
         const resolveOne = async (ep: ParsedEpisode) => {
           // 传入的那一集已经解析过了，不重复请求
-          if (ep.pageUrl === ctx.pageUrl && currentVideoUrl) {
+          if (ep.pageUrl === ctx.pageUrl && (currentVideoUrl || source.embedUrl)) {
             ep.videoUrl = currentVideoUrl
+            ep.embedUrl = source.embedUrl
             return
           }
           try {
             const sub = await ctx.fetchPage(ep.pageUrl, ctx.cookie)
             if (this.challenge?.detect(sub.body)) { ep.error = '需要重新校验'; return }
-            const s = probeSource(sub.body, rule)
+            // 内嵌线路的播放器前缀是每条线路一份、写在各自的播放页上，只能逐集现取
+            // （写在页面上的那种只跑正则不发请求；配置文件那种按 host 缓存）
+            const linePlayer = rule.sourceMediaOnly ? await resolvePlayer(rule, ctx, sub.body) : NO_PLAYER
+            const s = probeSource(sub.body, rule, linePlayer.prefix)
             if (s.url) ep.videoUrl = s.url
+            else if (s.embedUrl) ep.embedUrl = s.embedUrl
             else { ep.error = '该线路未给出直链'; unsupportedReason = unsupportedReason ?? s.reason }
           } catch (e) {
             // 单集失败不影响整体：标记后继续
@@ -272,7 +328,7 @@ export function createHtmlParser(rule: ParseRule): SiteParser {
         // 只在第一批探：后续批次已经知道这条线路是好的，不必再多花一个来回。
         if (offset === 0 && todo.length) {
           await resolveOne(todo[0])
-          if (!todo[0].videoUrl) {
+          if (!todo[0].videoUrl && !todo[0].embedUrl) {
             lineUnsupported = true
             remaining = 0   // 整条线路都取不到，别让前端再去拉后续批次
             for (let i = 1; i < todo.length; i++) todo[i].error = '该线路未给出直链'
@@ -283,6 +339,9 @@ export function createHtmlParser(rule: ParseRule): SiteParser {
         } else {
           await pool(todo, EPISODE_CONCURRENCY, resolveOne)
         }
+
+        // 目标线路不一定是传入地址那条，base.embedUrl 属于后者，按目标线路的实测结果订正
+        base.embedUrl = target.episodes.find(ep => ep.embedUrl)?.embedUrl
       }
 
       return {

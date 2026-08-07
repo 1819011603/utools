@@ -149,6 +149,10 @@ curl -s 'http://localhost:3000/api/resolve?step=extract&only=1&url=<urlencoded �
   先 `curl http://localhost:3000/video-player` 再测。
 - **每次换新的 `--user-data-dir`**。复用 profile 会把上一轮的交接槽带进来，
   既测不到「别人打开链接」那条真实路径，还会让上一份列表的 `index` 串进来。
+- **URL 里写 `127.0.0.1:3000`，不要写 `localhost:3000`**。dev server 只听 IPv4，
+  而 headless Chrome 把 `localhost` 解到 `::1` → 整轮采样都是 `ERR_CONNECTION_REFUSED`
+  页面（`document.title` 恰好也是 `localhost`，很像页面没渲染出来，容易误判成功能坏了）。
+  另外加 `--no-proxy-server`，免得系统代理把本机请求也接走。
 
 ## 5. 落地点
 

@@ -111,9 +111,10 @@
             <UButton size="xs" variant="ghost" icon="i-heroicons-share" title="复制带地址和线路的本页链接" @click="copyPageLink">
               分享本页
             </UButton>
-            <!-- 按需取址的站点这里只有当前一集的地址，复制「全部」会误导 -->
+            <!-- 按需取址的站点这里只有当前一集的地址，复制「全部」会误导；
+                 内嵌线路压根没有地址可复制 -->
             <UButton
-              v-if="!isLazy"
+              v-if="!isLazy && !isEmbedLine"
               size="xs"
               variant="soft"
               icon="i-heroicons-clipboard"
@@ -121,8 +122,10 @@
             >
               复制全部地址
             </UButton>
-            <!-- 解析未完成时禁用：长剧要分多批拉，中途点会只把已解析的那部分带过去 -->
+            <!-- 解析未完成时禁用：长剧要分多批拉，中途点会只把已解析的那部分带过去。
+                 内嵌线路不显示：这条线路的地址进不了我们的播放器（见 isEmbedLine） -->
             <UButton
+              v-if="!isEmbedLine"
               size="xs"
               icon="i-heroicons-play"
               :disabled="!playableCount || busy"
@@ -170,6 +173,58 @@
           :description="result.lineUnsupportedReason || '这类线路的页面把播放地址留空，改由播放器运行时另行获取，服务端拿不到。换一条线路即可。'"
         />
 
+        <!-- 只能用站点自带播放器内嵌播的线路。说清「换了什么」而不只是「能播」——
+             用的是它的播放器，我们那套抗卡/下载/倍速在这条线路上一个都没有 -->
+        <UAlert
+          v-if="isEmbedLine"
+          color="blue"
+          variant="soft"
+          icon="i-heroicons-tv"
+          :title="`「${currentLine?.name}」线路用站点自带的播放器播放`"
+          description="这条线路给的不是视频地址，而是第三方站点（爱奇艺 / 芒果 / 腾讯等）的播放页，真实地址由站点自带的解析服务在浏览器里现算，服务端拿不到。这里直接内嵌它的播放器：能播，但画质、广告、进度条都是它的，我们的抗卡、下载、倍速在这条线路上都用不了。想用本站播放器请换一条给直链的线路。"
+        />
+
+        <!-- 内嵌播放器 -->
+        <div v-if="isEmbedLine" class="space-y-2">
+          <div class="flex items-center justify-between gap-2">
+            <div class="text-sm font-medium text-gray-700 dark:text-gray-300 truncate">
+              <template v-if="embedIndex >= 0">正在播放：{{ currentLine?.episodes[embedIndex]?.title || `第 ${embedIndex + 1} 集` }}</template>
+              <template v-else>内嵌播放器</template>
+            </div>
+            <!-- 逃生口：部分解析站不允许被别的域套 iframe（X-Frame-Options），
+                 内嵌位置会是一片空白，此时只能整页打开 -->
+            <UButton
+              v-if="embedSrc"
+              size="xs"
+              variant="ghost"
+              icon="i-heroicons-arrow-top-right-on-square"
+              :to="embedSrc"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              在新标签打开
+            </UButton>
+          </div>
+          <div class="relative w-full rounded-lg overflow-hidden bg-black" style="aspect-ratio: 16 / 9">
+            <!-- sandbox 少给两项是有意的：不给 allow-popups / allow-top-navigation，
+                 这类解析站的广告靠弹窗和顶层跳转，不给就自然被关在框里。
+                 allow-same-origin 必须给（播放器要读自己的存储和接口），跨域 iframe 给它不影响本页安全 -->
+            <iframe
+              v-if="embedSrc"
+              :key="embedSrc"
+              :src="embedSrc"
+              class="absolute inset-0 w-full h-full"
+              allowfullscreen
+              allow="fullscreen; encrypted-media; autoplay"
+              sandbox="allow-scripts allow-same-origin allow-forms allow-presentation"
+            />
+            <div v-else class="absolute inset-0 flex items-center justify-center gap-2 text-sm text-gray-400">
+              <UIcon v-if="embedPending >= 0" name="i-heroicons-arrow-path" class="w-4 h-4 animate-spin" />
+              <span>{{ embedPending >= 0 ? '正在获取这一集的播放地址…' : '点下面任意一集开始播放' }}</span>
+            </div>
+          </div>
+        </div>
+
         <UAlert
           v-if="result.remaining > 0 && !busy"
           color="orange"
@@ -200,7 +255,8 @@
         <!-- 选集 -->
         <div class="space-y-2">
           <div class="text-sm font-medium text-gray-700 dark:text-gray-300">
-            <template v-if="isLazy">选集（共 {{ currentLine?.episodes.length || 0 }} 集，播到哪集取哪集）</template>
+            <template v-if="isEmbedLine">选集（共 {{ currentLine?.episodes.length || 0 }} 集，点一集在上面的内嵌播放器里播）</template>
+            <template v-else-if="isLazy">选集（共 {{ currentLine?.episodes.length || 0 }} 集，播到哪集取哪集）</template>
             <template v-else>选集（{{ resolvedCount }}/{{ currentLine?.episodes.length || 0 }} 解析成功）</template>
           </div>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -210,15 +266,13 @@
               class="flex items-center gap-2 p-2 rounded-lg text-sm bg-gray-50 dark:bg-gray-800"
             >
               <UIcon
-                :name="ep.videoUrl ? 'i-heroicons-check-circle' : isLazy ? 'i-heroicons-bolt' : 'i-heroicons-x-circle'"
+                :name="epIcon(ep, i)"
                 class="w-4 h-4 shrink-0"
-                :class="ep.videoUrl ? 'text-green-500' : isLazy ? 'text-blue-400' : 'text-gray-400'"
+                :class="epIconClass(ep, i)"
               />
               <div class="min-w-0 flex-1">
                 <div class="font-medium truncate">{{ ep.title || `第 ${i + 1} 集` }}</div>
-                <div class="text-xs text-gray-400 truncate">
-                  {{ ep.videoUrl || ep.error || (isLazy ? '播放时现取地址' : '未解析') }}
-                </div>
+                <div class="text-xs text-gray-400 truncate">{{ epDesc(ep, i) }}</div>
               </div>
               <UButton
                 v-if="ep.videoUrl"
@@ -228,9 +282,21 @@
                 title="复制地址"
                 @click="copyOne(ep.videoUrl)"
               />
+              <!-- 内嵌线路：换的是上面 iframe 的 src，不去播放器 -->
+              <UButton
+                v-if="isEmbedLine"
+                size="2xs"
+                :variant="i === embedIndex ? 'solid' : 'ghost'"
+                :color="i === embedIndex ? 'violet' : 'gray'"
+                icon="i-heroicons-play"
+                :loading="embedPending === i"
+                :disabled="busy || (embedPending >= 0 && embedPending !== i)"
+                title="在上面的内嵌播放器里播这一集"
+                @click="playEmbed(i)"
+              />
               <!-- 按需取址时每一集都能播（地址由播放器现取），不能按 videoUrl 判 -->
               <UButton
-                v-if="ep.videoUrl || isLazy"
+                v-else-if="ep.videoUrl || isLazy"
                 size="2xs"
                 variant="ghost"
                 icon="i-heroicons-play"
@@ -269,7 +335,7 @@
 </template>
 
 <script setup lang="ts">
-import type { ParseResult, ParseRule } from '~/composables/videoParseRules'
+import type { ParsedEpisode, ParseResult, ParseRule } from '~/composables/videoParseRules'
 
 const toast = useToast()
 
@@ -312,6 +378,74 @@ const hasSignedUrl = computed(() =>
   resolvedEpisodes.value.some(e => /[?&](sign|signature|timestamp|token|auth_key|expires)=/i.test(e.videoUrl || '')),
 )
 
+// ── 内嵌线路（只能用站点自带的解析播放器播，见 ParseResult.embedUrl）──
+// 这条线路一个视频地址都没有，所以上面那些按 videoUrl 算的计数在这里全是 0，
+// 界面得整块换成「内嵌 iframe + 点选集换 src」
+const isEmbedLine = computed(() => !!result.value?.embedUrl)
+const embedSrc = ref('')
+const embedIndex = ref(-1)     // 内嵌播的是第几集，-1 = 还没点
+const embedPending = ref(-1)   // 正在现取第几集的内嵌地址，-1 = 空闲
+
+/** 选集行的状态呈现。三种线路（直链 / 按需取址 / 内嵌）各一套说法，写成内联三元没法看 */
+const epIcon = (ep: ParsedEpisode, i: number) => {
+  if (ep.videoUrl) return 'i-heroicons-check-circle'
+  if (isEmbedLine.value) return i === embedIndex.value ? 'i-heroicons-play-circle' : 'i-heroicons-tv'
+  return isLazy.value ? 'i-heroicons-bolt' : 'i-heroicons-x-circle'
+}
+const epIconClass = (ep: ParsedEpisode, i: number) => {
+  if (ep.videoUrl) return 'text-green-500'
+  if (isEmbedLine.value) return i === embedIndex.value ? 'text-violet-500' : 'text-blue-400'
+  return isLazy.value ? 'text-blue-400' : 'text-gray-400'
+}
+const epDesc = (ep: ParsedEpisode, i: number) => {
+  if (ep.videoUrl) return ep.videoUrl
+  if (ep.error) return ep.error
+  if (isEmbedLine.value) return i === embedIndex.value ? '正在内嵌播放' : '点右侧按钮内嵌播放'
+  return isLazy.value ? '播放时现取地址' : '未解析'
+}
+
+/**
+ * 内嵌播这一集。地址是**每集一份**、写在各自的播放页上，只能现取
+ * （服务端 only=1 只解析这一集、不碰选集表）。取过就留在 ep 上，再点不重取。
+ */
+const playEmbed = async (i: number) => {
+  const ep = currentLine.value?.episodes[i]
+  if (!ep || busy.value || embedPending.value >= 0) return
+
+  if (!ep.embedUrl) {
+    embedPending.value = i
+    // 先清掉上一集，否则等待期间画面还停在上一集，看着像点了没反应
+    embedSrc.value = ''
+    embedIndex.value = -1
+    try {
+      const res = await $fetch<ParseResult>('/api/resolve', {
+        query: {
+          step: 'extract',
+          url: ep.pageUrl,
+          only: '1',
+          ...(userRules.value.length ? { rules: JSON.stringify(userRules.value) } : {}),
+        },
+      })
+      ep.embedUrl = res?.embedUrl
+    } catch (e: any) {
+      toast.add({
+        title: '取这一集的播放地址失败',
+        description: e?.statusMessage || e?.data?.statusMessage || e?.message,
+        color: 'red',
+      })
+    } finally {
+      embedPending.value = -1
+    }
+  }
+
+  if (!ep.embedUrl) {
+    toast.add({ title: '这一集没给出播放地址', description: '换一集或换一条线路试试', color: 'orange' })
+    return
+  }
+  embedIndex.value = i
+  embedSrc.value = ep.embedUrl
+}
+
 // 已探明不给直链的线路（本次解析内记忆），置灰避免用户反复去点
 const deadLines = ref(new Set<number>())
 
@@ -341,6 +475,13 @@ const startResolve = async (line?: number) => {
     })
     powCookie.value = cookie
     result.value = res
+
+    // 内嵌播放器归位：换线路/换片子后 iframe 还停在上一条线路的那一集，
+    // 而下面的集名早就换了，对不上。服务端探测到的那一集就是起点
+    embedSrc.value = res.embedUrl || ''
+    embedIndex.value = res.embedUrl
+      ? (res.lines[res.activeLineIndex]?.episodes.findIndex(e => e.embedUrl === res.embedUrl) ?? -1)
+      : -1
 
     if (res.remaining > 0) {
       const total = res.lines[res.activeLineIndex]?.episodes.length ?? 0

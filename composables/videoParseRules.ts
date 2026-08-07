@@ -43,7 +43,10 @@ export interface ParseRule {
    * 由来：有些站点的部分线路给的是第三方站点的播放页（实测 kpkuang 的芒果线给
    * `www.mgtv.com/b/…`、超清 AB 线给 `abyssplayer.com/…`），要它自家的解析服务才变得出
    * 视频，我们拿不到。这类地址是合法 http 地址，不筛掉就会一路喂到播放器里黑屏，
-   * 而报错信息只会是「加载失败」——不如当 lineUnsupported 明确报出来。
+   * 而报错信息只会是「加载失败」。
+   *
+   * 筛掉之后的去向看有没有配 `playerOrigin`：配了就拼成 `ParseResult.embedUrl`
+   * 用站点自带的播放器内嵌播，没配才当 lineUnsupported 报出来。
    */
   sourceMediaOnly?: boolean
 
@@ -92,7 +95,10 @@ export interface ParseRule {
   origin?: string
 
   /**
-   * 从站点自己的播放器配置里**动态取**防盗链域名，取代写死的 origin/referer。
+   * 从站点自己的配置/播放页里**动态取**「解析播放器地址」。同一个值有两用：
+   *   · 它的 origin → 防盗链候选值，取代写死的 origin/referer
+   *   · 它整串（形如 `https://…/?url=`）→ 拼 `ParseResult.embedUrl` 的前缀，
+   *     即 `sourceMediaOnly` 筛掉第三方播放页之后，用它内嵌播的那个地址
    *
    * 由来：这类站点的视频挂在毫不相干的 CDN 上（`v.fengbao10.com`），防盗链认的却是
    * 站点自己的播放器页（`cjbfq.netflixgc.tv/player/ec.php?...&url=<视频地址>`）。
@@ -353,6 +359,11 @@ export interface ParsedEpisode {
   title: string          // 「第 1 集」
   pageUrl: string        // 该集的播放页绝对地址
   videoUrl?: string      // 解析出的 m3u8/mp4；解析失败时为空
+  /**
+   * 这一集的「站点自带播放器」地址，见 ParseResult.embedUrl。
+   * 只有解析线路才有，且是逐集现取的（解析页点到哪集才填哪集），取过就缓存在这不再重取。
+   */
+  embedUrl?: string
   error?: string
 }
 
@@ -440,6 +451,18 @@ export interface ParseResult {
   title?: string         // 影片名（取自 <title>）
   pageUrl: string
   currentVideoUrl?: string
+  /**
+   * 这条线路只能用**站点自带的解析播放器内嵌播**时给出的 iframe 地址。
+   *
+   * 由来：部分线路抠出来的不是视频地址，而是第三方站点的播放页（`www.iqiyi.com/v_…`、
+   * `www.mgtv.com/b/…`）。真实地址由站点自带的解析服务在浏览器里现算，服务端拿不到——
+   * 但站点自己也就是把这个地址塞进 `<iframe src="解析播放器?url=第三方播放页">` 而已，
+   * 我们照它的拼法拼出同一个地址内嵌在解析页上即可（用的是它的播放器，不是我们的）。
+   *
+   * 有它时 `currentVideoUrl` 必为空、`clientTask` 必不下发（我们的播放器放不了这种地址），
+   * 也**不算 lineUnsupported**——线路是好的，只是播放器不是我们的。
+   */
+  embedUrl?: string
   lines: ParsedLine[]
   activeLineIndex: number
   // 分批解析：单请求有子请求上限，长剧要多批才拉得完。

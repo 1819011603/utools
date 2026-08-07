@@ -486,6 +486,36 @@ ncat 系挂了 cdndefend：首访返回 **HTTP 850** + 挑战页，要求暴力�
   而这个值会顶掉播放器标题栏 → 用 `titleRe` 从书名号里取
 - 两站都开 `lazy: true`：ylsp 实测 7 条线路 × 186 集，不开要分 5 批上百个请求
 
+### kpkuang（看片狂人）实测结论 — 「每条线路的防盗链域名都不一样」
+
+苹果 CMS 的 FED 模板，但**不走 `player_aaaa`**，地址在播放器 iframe 的属性上，
+所以催生了两个新的规则字段。接同类站点（FED 模板 + 第三方解析线路）直接照抄这条。
+
+- **地址在 `data-play`，是「3 个随机字符 + base64」**：前缀每次刷新都变，直接 atob 只得到乱码。
+  `sourceDecode: 'base64-scan'` → `decodeScannedBase64` **不写死剥 3 个**，
+  从偏移 0 逐个试到解出 http 开头为止（前缀长度对站点来说改成 2 或 4 的成本是 0）
+- **防盗链域名每条线路一份，且就写在播放页的 `data-pars` 上**（那是这条线路用的解析播放器前缀）：
+  睿映线认 `soul.flixfiend.top`、电影天堂线认 `vip.dyttzyplay.com`、芒果线认 `jx.xmflv.com`，
+  而视频分别挂在 `cdn.ryplay11.com` / `vip.dytt-tvs.com` 之类毫不相干的 CDN 上。
+  于是 `playerOrigin.url` 改成**可选**：不给 url 就对当前页 HTML 跑正则，不发请求。
+  这种**绝不能按 host 缓存**（配置文件那种才能）——一缓存就把上一条线路的域名喂给下一条，
+  表现是切线路后开始 403。
+- **`?line=N` 指到别的线路时，必须按探测页重算一遍域名**：`base` 里那份是从 `ctx.pageUrl` 抠的，
+  它属于用户传进来那条线路，跟 N 无关。不重算就把别人的域名带出去，第一集直接 403
+- **26 条线路里有 4 条给的是第三方站点的播放页而不是直链**（芒果线给 `www.mgtv.com/b/…`、
+  「爱奇艺-VIP解析」给 `www.iqiyi.com/v_…`、超清 AB/BY/EV 给 `abyssplayer.com/…`）。
+  它们是合法 http 地址，不筛掉就一路喂进播放器黑屏 → `sourceMediaOnly: true`，
+  当 `lineUnsupported` 报出来。**这类线路做不到**：真实地址由第三方解析服务
+  （虾米解析 `jx.xmflv.com` 等）在浏览器里用混淆过的 JS 现算，页面上没有、
+  也没有可调的公开接口（试过 `api.php`/`jx.php` 都 404），跨域 iframe 又读不到里面的东西。
+  于是补了 `ParseResult.lineUnsupportedReason`——原来的固定文案说的是 ncat 4K 线那种
+  「页面把地址留空」，用在这里会让人以为是我们的正则写坏了（实测被问过）
+- 选集容器**必须从 `fed-play-item` 起锚**：页面上另有两个空的 `<ul class="fed-part-rows">`
+  （选集区前后各一个），直接匹配这个 ul 会多出两组、整张线路×集数表错位一位。
+  且 class 后面不能收在 `"` 上——超清 AB/BY/EV 三条线的这个 ul 带了 `style` 属性（会漏 3 组）
+- active 标记是 `uk-active`，且在**外层 `<li>`** 上而不是 `<a>` 上，所以 `lineRe` 捕获的是 li 的 class
+- 实测 26 条线路 × 最多 71 集（各线路集数不等：71 / 32 / 31 / 26 / 21 都有），开 `lazy: true`
+
 ### 刷新链接（就地重新解析）
 
 部分线路给的是带签名的地址（`?sign=…&timestamp=…`），过一阵会失效，表现为播着播着 403。
