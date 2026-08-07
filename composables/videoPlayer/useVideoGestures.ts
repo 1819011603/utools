@@ -70,6 +70,8 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
   let lastTapX = 0
   let activePointer: number | null = null
   let pointerKind = 'mouse'
+  let lastTouchAt = 0    // 最近一次触摸的时刻，用来滤掉浏览器补发的兼容鼠标事件
+  let tapWasShown = false  // 按下那一刻控制栏是不是开着（单击的目标态由它定，见 onTap）
 
   const clearTimers = () => {
     if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null }
@@ -100,10 +102,26 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
     revealLockBtn()
   }
 
-  /** 单击：只管控制栏显隐，不碰播放状态 */
-  const toggleControls = () => {
-    showControls.value = !showControls.value
+  /**
+   * 单击：只管控制栏显隐，不碰播放状态。
+   *
+   * 目标态取「按下那一刻」的相反值，而不是定时器烧到时的取反——中间隔着 280ms 的双击窗口，
+   * 触摸端浏览器会在这段里补发一套兼容鼠标事件，`mousemove` 先把控制栏顶成显示，
+   * 再取反就成了「弹出来 0.3 秒又收回去」（踩过，一开始误以为是自动收起时间太短）。
+   */
+  const applyTapControls = () => {
+    showControls.value = !tapWasShown
     if (showControls.value) controls.hideControlsDelayed()
+  }
+
+  /**
+   * 容器上的 mousemove 入口：触摸抬手后浏览器补发的那套鼠标事件与真实鼠标长得一模一样，
+   * 只能按「刚刚有过触摸」来滤。不滤的话触摸端根本关不掉控制栏。
+   */
+  const onMouseMove = () => {
+    if (performance.now() - lastTouchAt < 900) return
+    if (isLocked.value) return
+    controls.handleMouseMove()
   }
 
   const fmtDelta = (sec: number) => `${sec >= 0 ? '+' : '-'}${Math.abs(Math.round(sec))}s`
@@ -123,6 +141,8 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
 
     activePointer = e.pointerId
     pointerKind = e.pointerType
+    if (e.pointerType !== 'mouse') lastTouchAt = performance.now()
+    tapWasShown = showControls.value
     const rect = rectOf(e)
     startX = e.clientX
     startY = e.clientY
@@ -202,6 +222,7 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
     if (activePointer !== e.pointerId) return
     activePointer = null
     clearTimers()
+    if (e.pointerType !== 'mouse') lastTouchAt = performance.now()
     ;(e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId)
 
     if (boosting) {                       // 长按结束：只收加速，不算点击
@@ -248,7 +269,7 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
 
     // 单击要等双击窗口过完才能确定，否则双击会先闪一下控制栏
     if (singleTapTimer) clearTimeout(singleTapTimer)
-    singleTapTimer = setTimeout(() => { singleTapTimer = null; toggleControls() }, DOUBLE_TAP_MS)
+    singleTapTimer = setTimeout(() => { singleTapTimer = null; applyTapControls() }, DOUBLE_TAP_MS)
   }
 
   /**
@@ -272,7 +293,7 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
   return {
     showLockBtn, toggleLock, revealLockBtn,
     brightness, gestureHud, seekFlash, touchAction, controlsVisible,
-    onPointerDown, onPointerMove, onPointerUp, onPointerCancel,
+    onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onMouseMove,
     disposeGestures,
   }
 }

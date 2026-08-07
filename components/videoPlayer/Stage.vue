@@ -35,7 +35,7 @@
         isFullscreen ? 'fixed inset-0 z-50 rounded-none' : '',
       ]"
       :style="{ touchAction }"
-      @mousemove="handleMouseMove"
+      @mousemove="onMouseMove"
       @mouseleave="hideControlsDelayed"
       @pointerdown="onPointerDown"
       @pointermove="onPointerMove"
@@ -309,10 +309,11 @@ const {
   hlsStats, playlist, playlistTitle, hasPrev, hasNext,
   currentVideoName, volumeIcon, supportsPiP, canDownload,
   togglePlay, skip, startSeek, updateHoverTime, setVolume, toggleMute, setPlaybackRate,
-  toggleFullscreen, togglePiP, handleMouseMove, hideControlsDelayed, keepControlsAlive,
+  // 容器的 mousemove 走手势层的 onMouseMove（要滤掉触摸补发的兼容鼠标事件），不直接用 handleMouseMove
+  toggleFullscreen, togglePiP, hideControlsDelayed, keepControlsAlive,
   // 手势层（useVideoGestures）
   isLocked, showLockBtn, toggleLock, brightness, gestureHud, seekFlash, touchAction, controlsVisible,
-  onPointerDown, onPointerMove, onPointerUp, onPointerCancel, boostActive, boostRate,
+  onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onMouseMove, boostActive, boostRate,
   playPrev, playNext,
   isDownloading, downloadProgress, downloadVideo, cancelDownload,
   onTimeUpdate, onLoadedMetadata, onLoadedData, onVideoEnded, onWaiting, onCanPlay,
