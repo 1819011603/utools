@@ -53,11 +53,11 @@
 
     <!-- 实测策略引擎 -->
     <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm border-t border-gray-200 dark:border-gray-700 pt-2">
-      <div><span class="text-gray-500">单连接速度：</span><span class="font-medium">{{ strategy.perConnKBps }} KB/s</span></div>
+      <div><span class="text-gray-500">单连接速度：</span><span class="font-medium">{{ formatSpeed(strategy.perConnKBps) }}</span></div>
       <div>
         <span class="text-gray-500">聚合速度：</span>
         <span class="font-medium" :class="dualChannel && !dualChannelUnavailable ? 'text-green-500' : ''">
-          {{ aggregateKBps }} KB/s
+          {{ formatSpeed(aggregateKBps) }}
           <span class="text-xs text-gray-400">({{ aggregateMbps }} Mbps)</span>
         </span>
       </div>

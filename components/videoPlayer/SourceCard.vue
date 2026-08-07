@@ -80,7 +80,7 @@
         <UFormGroup label=" " class="pt-1">
           <UCheckbox
             v-model="manifestOnly"
-            label="仅代理 Manifest"
+            label="代理 Manifest"
             :disabled="manifestOnlyDisabled"
             :title="manifestOnlyDisabled
               ? '需先启用代理（伪装下载器或注入 Origin/Referer），否则代理不介入，此项无效'

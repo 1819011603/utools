@@ -26,8 +26,8 @@ export interface VideoConnStrategyDeps {
 }
 
 /** 线性阶梯每一级的展示文案（下标即 step） */
-const STRATEGY_STEP_LABELS = ['直连', '代理清单·分片直连', '代理·伪装', '代理·防盗链']
-const MAX_STRATEGY_STEP = 3
+const STRATEGY_STEP_LABELS = ['直连', '代理清单·分片直连', '代理·伪装', '代理·防盗链', '代理·防盗链·主域']
+const MAX_STRATEGY_STEP = 4
 
 export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   const { media, tier } = deps
@@ -59,17 +59,24 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   const ladderMode = ref(false)
   let lastStrategyUrl = ''
 
-  // ── 「仅代理 Manifest」/「双通道」的可用性判定 ──
+  // ── 「代理 Manifest」/「双通道」的可用性判定 ──
 
-  // 「仅代理 Manifest」需要代理确实介入才有意义：伪装模式下它表示「代理 manifest 补 CORS + 分片直连」，
+  // 「代理 Manifest」需要代理确实介入才有意义：伪装模式下它表示「代理 manifest 补 CORS + 分片直连」，
   // 注入头模式下表示「manifest 走防盗链 + 分片直连」。两者都没有时代理压根不会介入，勾了无效 → 禁用。
   const manifestOnlyDisabled = computed(() =>
     !disguiseAsDownloader.value && !requestOrigin.value.trim() && !requestReferer.value.trim())
 
-  // 双通道需要分片「直连」和「经代理」两条路都通。有探测结果就用实测，否则按当前配置推断。
+  // 分片轴是否真的被实测过。清单通了但没解析出分片时（master 下钻失败/空列表），
+  // probeAxis 压根不会跑，四个通道全留在 'skip'——那是「没测」不是「测过不通」。
+  // 拿它当证据会把双通道永久钉死在禁用，提示还振振有词说「实测分片无法直连」（踩过）。
+  const axisMeasured = (a: AxisProbe): boolean => CHANNEL_ORDER.some(c => (a[c] ?? 'skip') !== 'skip')
+
+  // 双通道需要分片「直连」和「经代理」两条路都通。有实测就用实测，否则按当前配置推断。
   const dualChannelUnavailable = computed(() => {
     const r = probeResult.value
-    if (r && !r.degraded) return !(r.segment.direct === 'ok' && r.segment.disguise === 'ok')
+    if (r && !r.degraded && axisMeasured(r.segment)) {
+      return !(r.segment.direct === 'ok' && r.segment.disguise === 'ok')
+    }
     // 无探测数据（手动/规则/兜底阶梯）：跟 getProxyUrl 对分片(.ts)的判定保持一致——
     // 分片走代理时直连 lane 必 403/CORS，没有分流可言。
     if (disguiseAsDownloader.value) return !manifestOnly.value
@@ -83,7 +90,7 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
       return '分片在直连 CDN 与本站代理两个 origin 间分流，把并发从 6 提到 ~12（代价：占用服务器出口流量）'
     }
     const r = probeResult.value
-    if (r && !r.degraded) {
+    if (r && !r.degraded && axisMeasured(r.segment)) {
       if (r.segment.direct !== 'ok') return '实测分片无法直连（须走代理）→ 直连通道会失败'
       return '实测分片无法经代理获取（如源站端口非标被 CF 吞、服务器 IP 被封）→ 代理通道会失败'
     }
@@ -158,9 +165,13 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     } else if (step === 2) {             // 代理+伪装全程：服务端补 CORS、不发 Origin/Referer
       disguiseAsDownloader.value = true
       requestOrigin.value = ''; requestReferer.value = ''; manifestOnly.value = false
-    } else {                             // 代理+注入 Origin/Referer：防盗链站点，全程代理
+    } else if (step === 3) {             // 代理+注入 Origin/Referer：防盗链站点，全程代理
       disguiseAsDownloader.value = false
       requestOrigin.value = host; requestReferer.value = host ? host + '/' : ''; manifestOnly.value = false
+    } else {                             // 同上，但注入主域：防盗链只认主域的站点（见 parentOrigin）
+      const root = parentOrigin(videoUrl.value) || host
+      disguiseAsDownloader.value = false
+      requestOrigin.value = root; requestReferer.value = root ? root + '/' : ''; manifestOnly.value = false
     }
   }
 
@@ -319,7 +330,9 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
       : [{ name: '视频', axis: r.segment }]
     return axes.map(({ name, axis }) => ({
       name,
-      cells: CHANNEL_ORDER.map(c => ({ channel: c, label: CHANNEL_LABEL[c], reach: axis[c], ms: axis.ms[c] })),
+      // axis[c] 兜 'skip'：加通道之前写进 localStorage 的旧探测结果没有新字段，
+      // 直接渲染 undefined 会得到一个没有底色、也没有 title 的空格子
+      cells: CHANNEL_ORDER.map(c => ({ channel: c, label: CHANNEL_LABEL[c], reach: axis[c] ?? 'skip', ms: axis.ms[c] })),
     }))
   })
 

@@ -9,13 +9,37 @@ import { useM3u8 } from './useM3u8'
  * CORS 头、防盗链、端口、证书都是各自独立的，一根轴表达不了真实世界。
  */
 
-// 三条通道，优先级从高到低（越靠前越省一跳）
-export type Channel = 'direct' | 'disguise' | 'headers'
-export const CHANNEL_ORDER: Channel[] = ['direct', 'disguise', 'headers']
+// 四条通道，优先级从高到低（越靠前越省一跳）
+export type Channel = 'direct' | 'disguise' | 'headers' | 'rootRef'
+export const CHANNEL_ORDER: Channel[] = ['direct', 'disguise', 'headers', 'rootRef']
 export const CHANNEL_LABEL: Record<Channel, string> = {
   direct: '直连',
   disguise: '代理·伪装',
   headers: '代理·防盗链',
+  rootRef: '代理·防盗链·主域',
+}
+
+/**
+ * 源站主域的 origin：`https://v3.ddys.ai` → `https://ddys.ai`。
+ *
+ * `headers` 通道注入的是视频地址自己的 origin，可不少站点的防盗链只认主域——
+ * 播放页在 `ddys.ai`、视频在 `v3.ddys.ai`，注入三级域名照样 403（实测 ddys.ai 三条路全挂，
+ * 手填 `https://ddys.ai` 立刻能播）。所以多备一条「主域」通道，前三条全不通时才试。
+ *
+ * 只剥一层子域：剥多了会命中公共后缀（`example.co.uk` 再剥就成了 `co.uk`，那不是任何人的站点）。
+ * 端口也不带——播放页几乎不会跟媒体流共用非标端口。
+ */
+export function parentOrigin(url: string): string {
+  try {
+    const u = new URL(url.startsWith('//') ? 'https:' + url : url)
+    const host = u.hostname
+    if (host.includes('[') || /^[\d.]+$/.test(host)) return ''   // IP 没有主域可言
+    const labels = host.split('.')
+    if (labels.length < 3) return ''                             // 本来就是主域
+    const parent = labels.slice(1).join('.')
+    if (/^(co|com|net|org|gov|edu|ac)\.[a-z]{2}$/i.test(parent)) return ''   // 剥到公共后缀了
+    return `${u.protocol}//${parent}`
+  } catch { return '' }
 }
 
 // 'unknown' 专门留给「超时」——慢 ≠ 不可达，不能据此判死，否则慢源会被误判成要代理
@@ -26,6 +50,7 @@ export interface AxisProbe {
   direct: Reach
   disguise: Reach
   headers: Reach
+  rootRef: Reach
   ms: Partial<Record<Channel, number>>   // 各通道实测耗时，供 UI 展示与排查
 }
 
@@ -40,15 +65,18 @@ export interface ProbeResult {
   degraded: boolean                 // 探测本身没结论（全 unknown/全败）→ 调用方退回线性阶梯兜底
   segmentUrl?: string
   keyUrl?: string
+  rootOrigin?: string               // rootRef 通道实际注入的主域 origin（空=该源没有主域可剥）
 }
 
 const DEFAULT_TIMEOUT = 8000     // 单条通道超时
 const OVERALL_TIMEOUT = 12000    // 整轮探测硬上限（探测阻塞起播，不能让多个超时叠加）
-const emptyAxis = (): AxisProbe => ({ direct: 'skip', disguise: 'skip', headers: 'skip', ms: {} })
+const emptyAxis = (): AxisProbe => ({ direct: 'skip', disguise: 'skip', headers: 'skip', rootRef: 'skip', ms: {} })
 
-// 「代理·防盗链」是最后一档：只有直连和伪装都没通才值得试。
+// 「代理·防盗链」是倒数第二档：只有直连和伪装都没通才值得试。
 // 绝大多数源站根本不校验防盗链，无脑并发探它只会白等一个 8s 超时尾巴（实测 sintel 就卡在这）。
 const needsHeadersChannel = (axis: AxisProbe): boolean => axis.direct !== 'ok' && axis.disguise !== 'ok'
+// 「主域」是压箱底的一档：前三条全不通才试，且得真有主域可剥（见 parentOrigin）
+const needsRootRefChannel = (axis: AxisProbe): boolean => needsHeadersChannel(axis) && axis.headers !== 'ok'
 
 // ── 通道 URL 构造 ──
 // 必须与 useVideoProxy.getProxyUrl 生成的 URL 形态一一对应，否则「探通了但播不了」。
@@ -149,16 +177,22 @@ export async function probeReachability(
   let selfOrigin = opts.origin ?? ''
   try { if (!selfOrigin) selfOrigin = new URL(url).origin } catch {}
   const referer = opts.referer || (selfOrigin ? selfOrigin.replace(/\/$/, '') + '/' : '')
-  const hdr = { origin: selfOrigin, referer }
+  // 主域兜底：只在自动推导时用（用户显式指定了 origin 就该听用户的，不该背着他换域名）
+  const rootOrigin = opts.origin ? '' : parentOrigin(url)
+  // rootRef 与 headers 只差注入哪一对头，URL 形态完全相同
+  const hdrFor = (c: Channel) => c === 'rootRef'
+    ? { origin: rootOrigin, referer: rootOrigin + '/' }
+    : { origin: selfOrigin, referer }
 
   const result: ProbeResult = {
     at: Date.now(), isHls,
     manifest: emptyAxis(), segment: emptyAxis(),
     manifestChannel: null, segmentChannel: null,
     dualChannel: false, degraded: false,
+    rootOrigin,
   }
 
-  // 探一根轴：直连 + 伪装并发，两者都没通才追加防盗链那一档
+  // 探一根轴：直连 + 伪装并发，两者都没通才追加防盗链，防盗链也没通才试主域
   const probeAxis = async (axis: AxisProbe, urlOf: (c: Channel) => string) => {
     const run = async (c: Channel) => {
       const { reach, ms } = await probeUrl(urlOf(c), timeoutMs, deadline)
@@ -167,23 +201,24 @@ export async function probeReachability(
     }
     await Promise.all([run('direct'), run('disguise')])
     if (needsHeadersChannel(axis) && !expired()) await run('headers')
+    if (rootOrigin && needsRootRefChannel(axis) && !expired()) await run('rootRef')
   }
 
   // ── 非 HLS（MP4 等）：只有一根轴，探文件本身即可，两轴同值 ──
   if (!isHls) {
-    await probeAxis(result.manifest, c => buildChannelUrl(url, c, hdr))
+    await probeAxis(result.manifest, c => buildChannelUrl(url, c, hdrFor(c)))
     result.segment = { ...result.manifest, ms: { ...result.manifest.ms } }
     result.manifestChannel = result.segmentChannel = pickChannel(result.manifest)
     result.degraded = result.manifestChannel === null
     return result
   }
 
-  // ── Phase 1：manifest 三路并发 ──
+  // ── Phase 1：manifest 多路并发 ──
   // 复用 useM3u8：它对 /api/proxy 开头的 URL 原样使用，正好能喂任意通道的成品 URL。
   const { fetchM3u8Manifest, pickBestVariant, resolveUrl } = useM3u8(u => u)
 
   const loadManifest = async (channel: Channel) => {
-    const target = buildChannelUrl(url, channel, { ...hdr, noseg: true })
+    const target = buildChannelUrl(url, channel, { ...hdrFor(channel), noseg: true })
     if (isMixedContent(target)) return { reach: 'fail' as Reach, ms: 0 }
     const t0 = performance.now()
     const ctrl = new AbortController()
@@ -230,6 +265,8 @@ export async function probeReachability(
   if (result.manifest.direct !== 'ok') {
     // 直连已经不通了，这里再串行等两个超时会把首访拖到二三十秒 → 两路一起上
     await Promise.all([runManifest('disguise'), runManifest('headers')])
+    // 三条都不通才试主域：多数站点的防盗链认自己的 origin，这一路平时是纯浪费
+    if (rootOrigin && needsRootRefChannel(result.manifest) && !expired()) await runManifest('rootRef')
   }
   result.manifestChannel = pickChannel(result.manifest)
 
@@ -254,11 +291,11 @@ export async function probeReachability(
   // ── Phase 2：分片轴 ──
   // AES key 折进分片轴：noseg=1 时服务端只重写 .m3u8，key 会留成直连地址、由浏览器直接取，
   // 所以 key 跟分片走同一条通道。key 这条通道不通 → 整条通道判不可用（自然降级到需要代理的通道）。
-  await probeAxis(result.segment, c => buildChannelUrl(result.segmentUrl!, c, hdr))
+  await probeAxis(result.segment, c => buildChannelUrl(result.segmentUrl!, c, hdrFor(c)))
   if (result.keyUrl) {
     const keyUrl = result.keyUrl
     await Promise.all(CHANNEL_ORDER.filter(c => result.segment[c] === 'ok').map(async c => {
-      const key = await probeUrl(buildChannelUrl(keyUrl, c, hdr), timeoutMs, deadline)
+      const key = await probeUrl(buildChannelUrl(keyUrl, c, hdrFor(c)), timeoutMs, deadline)
       if (key.reach !== 'ok') result.segment[c] = key.reach
       result.segment.ms[c] = Math.max(result.segment.ms[c] ?? 0, key.ms)
     }))
@@ -271,6 +308,7 @@ export async function probeReachability(
     const pending: Array<Promise<void>> = []
     if (result.manifest.disguise === 'skip') pending.push(runManifest('disguise'))
     if (result.manifest.headers === 'skip' && result.segment.headers === 'ok') pending.push(runManifest('headers'))
+    if (result.manifest.rootRef === 'skip' && result.segment.rootRef === 'ok' && rootOrigin) pending.push(runManifest('rootRef'))
     await Promise.all(pending)
     result.manifestChannel = pickChannel(result.manifest)
   }
@@ -307,10 +345,12 @@ export function resolveConnConfig(r: ProbeResult, selfOrigin: string): ConnConfi
   const man = r.manifestChannel
   if (!seg || !man) return null
 
-  const withHeaders = (manifestOnly: boolean): ConnConfig => ({
+  // headers 注入源站自己的 origin，rootRef 注入主域——两者只差这一对头
+  const originOf = (c: Channel) => (c === 'rootRef' ? (r.rootOrigin || selfOrigin) : selfOrigin)
+  const withHeaders = (manifestOnly: boolean, origin: string): ConnConfig => ({
     disguiseAsDownloader: false,
-    requestOrigin: selfOrigin,
-    requestReferer: selfOrigin ? selfOrigin.replace(/\/$/, '') + '/' : '',
+    requestOrigin: origin,
+    requestReferer: origin ? origin.replace(/\/$/, '') + '/' : '',
     manifestOnly,
     dualChannel: r.dualChannel,
   })
@@ -319,9 +359,11 @@ export function resolveConnConfig(r: ProbeResult, selfOrigin: string): ConnConfi
 
   if (seg !== 'direct') {
     // 分片要代理 → manifest 也必须过代理（分片 URL 的重写只发生在服务端 rewriteM3u8）。
-    // 所以只能选一种「manifest 和分片同时可达」的代理口味；两种都凑不齐就判没结论，交回兜底。
+    // 所以只能选一种「manifest 和分片同时可达」的代理口味；一种都凑不齐就判没结论，交回兜底。
     if (seg === 'disguise' && r.manifest.disguise === 'ok') return asDisguise(false)
-    if (r.manifest.headers === 'ok' && r.segment.headers === 'ok') return withHeaders(false)
+    if (seg === 'rootRef' && r.manifest.rootRef === 'ok') return withHeaders(false, originOf('rootRef'))
+    if (r.manifest.headers === 'ok' && r.segment.headers === 'ok') return withHeaders(false, selfOrigin)
+    if (r.manifest.rootRef === 'ok' && r.segment.rootRef === 'ok') return withHeaders(false, originOf('rootRef'))
     if (r.manifest.disguise === 'ok' && r.segment.disguise === 'ok') return asDisguise(false)
     return null
   }
@@ -334,7 +376,7 @@ export function resolveConnConfig(r: ProbeResult, selfOrigin: string): ConnConfi
     // 「代理·伪装 manifest + 分片直连」——旧线性阶梯根本表达不出来的组合
     return { disguiseAsDownloader: true, requestOrigin: '', requestReferer: '', manifestOnly: true, dualChannel: r.dualChannel }
   }
-  return withHeaders(true)
+  return withHeaders(true, originOf(man))
 }
 
 // 探测结论的一句话描述，供 UI 展示

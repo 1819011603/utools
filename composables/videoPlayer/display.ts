@@ -13,6 +13,17 @@ export function formatClock(ts: number): string {
   return new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
+/**
+ * KB/s → 可读速度。上千就换成 MB/s：高速源动辄四五位数，一串 `12480 KB/s` 得数位数才知道多快。
+ * 1024 而不是 1000——上游 `perConnKBps` 就是按 1024 从 bps 折下来的，两边得同一套进制。
+ */
+export function formatSpeed(kbps: number): string {
+  if (!isFinite(kbps) || kbps <= 0) return '0 KB/s'
+  if (kbps < 1024) return `${Math.round(kbps)} KB/s`
+  const mb = kbps / 1024
+  return `${mb.toFixed(mb >= 10 ? 1 : 2)} MB/s`
+}
+
 /** 秒 → mm:ss / h:mm:ss */
 export function formatTime(seconds: number): string {
   if (!isFinite(seconds) || isNaN(seconds)) return '00:00'
