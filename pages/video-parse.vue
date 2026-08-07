@@ -181,7 +181,7 @@
           variant="soft"
           icon="i-heroicons-tv"
           :title="`「${currentLine?.name}」线路用站点自带的播放器播放`"
-          description="这条线路给的不是视频地址，而是第三方站点（爱奇艺 / 芒果 / 腾讯等）的播放页，真实地址由站点自带的解析服务在浏览器里现算，服务端拿不到。这里直接内嵌它的播放器：能播，但画质、广告、进度条都是它的，我们的抗卡、下载、倍速在这条线路上都用不了。想用本站播放器请换一条给直链的线路。"
+          description="这条线路给的不是视频地址，而是第三方站点（爱奇艺 / 芒果 / 腾讯等）的播放页，真实地址由站点自带的解析服务在浏览器里现算，服务端拿不到。这里直接内嵌它的播放器：能播，但画质、广告、进度条都是它的，我们的抗卡、下载、倍速在这条线路上都用不了。部分播放器检测不到广告就拒绝播放，所以内嵌框允许它弹窗——播放期间可能弹出广告页，关掉即可（顶层跳转仍被拦着，本页不会被劫走）。想用本站播放器请换一条给直链的线路。"
         />
 
         <!-- 内嵌播放器 -->
@@ -206,8 +206,17 @@
             </UButton>
           </div>
           <div class="relative w-full rounded-lg overflow-hidden bg-black" style="aspect-ratio: 16 / 9">
-            <!-- sandbox 少给两项是有意的：不给 allow-popups / allow-top-navigation，
-                 这类解析站的广告靠弹窗和顶层跳转，不给就自然被关在框里。
+            <!-- 后面两个 token 是被这些播放器的「反内嵌」自检逼出来的，各对一条线路，别顺手删：
+                 · allow-document-domain ← 超清EV线（ezplayer）拿 `document.domain = document.domain`
+                   试探，沙箱文档里这句必抛 SecurityError（消息里带 sandboxed），一抛就罢工，
+                   只显示「Opss! Sandboxed our player is not allowed」。跟广告无关，探的就是 sandbox 属性本身。
+                   放行它没有代价：document.domain 早已废弃，跨域 iframe 本来也降不到同源。
+                 · allow-popups ← 超清AB线（abyssplayer）点遮罩时要 `window.open(广告页)` 连续成功两次
+                   （失败两次就 document.write 掉播放器，报「Due to certain reasons (AdBlock/Sandbox)…」）。
+                   用户装了拦截插件照样过不了，那个我们兜不住。
+                 **故意不给** allow-popups-to-escape-sandbox（弹出窗继承同一套限制，落地页的二次跳转/
+                 自动下载仍被关着）和 allow-top-navigation*（那一项最恶心：点一下播放整页被劫走，
+                 用户只会以为是本站跳的）。
                  allow-same-origin 必须给（播放器要读自己的存储和接口），跨域 iframe 给它不影响本页安全 -->
             <iframe
               v-if="embedSrc"
@@ -216,7 +225,7 @@
               class="absolute inset-0 w-full h-full"
               allowfullscreen
               allow="fullscreen; encrypted-media; autoplay"
-              sandbox="allow-scripts allow-same-origin allow-forms allow-presentation"
+              sandbox="allow-scripts allow-same-origin allow-forms allow-presentation allow-popups allow-document-domain"
             />
             <div v-else class="absolute inset-0 flex items-center justify-center gap-2 text-sm text-gray-400">
               <UIcon v-if="embedPending >= 0" name="i-heroicons-arrow-path" class="w-4 h-4 animate-spin" />
@@ -290,7 +299,7 @@
                 :color="i === embedIndex ? 'violet' : 'gray'"
                 icon="i-heroicons-play"
                 :loading="embedPending === i"
-                :disabled="busy || (embedPending >= 0 && embedPending !== i)"
+                :disabled="busy"
                 title="在上面的内嵌播放器里播这一集"
                 @click="playEmbed(i)"
               />
@@ -407,10 +416,18 @@ const epDesc = (ep: ParsedEpisode, i: number) => {
 /**
  * 内嵌播这一集。地址是**每集一份**、写在各自的播放页上，只能现取
  * （服务端 only=1 只解析这一集、不碰选集表）。取过就留在 ep 上，再点不重取。
+ *
+ * 取址那一发要打源站、常要好几秒，期间**不能把别的集按住**：原来在等待中的那集之外
+ * 全部 disabled，用户看到的就是「整排突然置灰、点不动了」，只会以为页面坏了（实测被问过）。
+ * 现在改成后点的作废先点的——用自增序号认领结果，回来时序号已变就整个丢掉
+ * （包括错误提示：那是上一次点击的事，弹出来只会误导）。
  */
+let embedSeq = 0
+
 const playEmbed = async (i: number) => {
   const ep = currentLine.value?.episodes[i]
-  if (!ep || busy.value || embedPending.value >= 0) return
+  if (!ep || busy.value) return
+  const seq = ++embedSeq
 
   if (!ep.embedUrl) {
     embedPending.value = i
@@ -426,15 +443,18 @@ const playEmbed = async (i: number) => {
           ...(userRules.value.length ? { rules: JSON.stringify(userRules.value) } : {}),
         },
       })
+      if (seq !== embedSeq) return
       ep.embedUrl = res?.embedUrl
     } catch (e: any) {
+      if (seq !== embedSeq) return
       toast.add({
         title: '取这一集的播放地址失败',
         description: e?.statusMessage || e?.data?.statusMessage || e?.message,
         color: 'red',
       })
     } finally {
-      embedPending.value = -1
+      // 已被后来的点击接管时不能碰它，否则会把那一次的转圈图标提前抹掉
+      if (seq === embedSeq) embedPending.value = -1
     }
   }
 

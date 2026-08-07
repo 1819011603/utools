@@ -510,6 +510,25 @@ ncat 系挂了 cdndefend：首访返回 **HTTP 850** + 挑战页，要求暴力�
   也没有可调的公开接口（试过 `api.php`/`jx.php` 都 404），跨域 iframe 又读不到里面的东西。
   于是补了 `ParseResult.lineUnsupportedReason`——原来的固定文案说的是 ncat 4K 线那种
   「页面把地址留空」，用在这里会让人以为是我们的正则写坏了（实测被问过）
+- **内嵌这类播放器会撞上「反内嵌」自检，而且每家一套**（提示都提 Sandbox，
+  别当成防盗链或我们的规则问题去追）。两条线路实测到的两种，对应 iframe 上多给的两个 token：
+  - **超清EV线（ezplayer，`gms.ezplayer.me`）探的是 sandbox 属性本身，跟广告无关**：
+    `assets/index-*.js` 里 `if (window.top === window) return; try { document.domain = document.domain }
+    catch (e) { if (e.toString().includes('sandboxed')) … }`——沙箱文档里这句必抛 SecurityError，
+    一抛就报 `Opss! Sandboxed our player is not allowed`。放行只需 **`allow-document-domain`**，
+    没有代价（`document.domain` 早已废弃，跨域 iframe 本来也降不到同源）。
+    追这个别去猜 flag：直接把它的 bundle 拉下来搜 `Sandbox`，检测函数就在旁边
+  - **超清AB线（abyssplayer）要的是真广告**：点遮罩触发 `window.open(广告页)`，
+    失败计数到 2 就 `document.write` 掉播放器，报
+    `Due to certain reasons (AdBlock/Sandbox), ads are not being displayed`。给 **`allow-popups`** 能过，
+    但**用户装了拦截插件照样过不了**（弹窗域名被拦 → `window.open` 返回 null），这个兜不住
+  - 两者都**不给 `allow-popups-to-escape-sandbox`**（弹出窗继承同一套限制，落地页的二次跳转/
+    自动下载仍被关着），也**不给 `allow-top-navigation*`**——那一项才是最恶心的：
+    点一下播放整页被劫走，用户只会以为是本站跳的
+- **内嵌线路的选集不能在取址期间互相按住**：取址那一发要打源站、常要好几秒，
+  原来 `:disabled` 把非当前集全禁掉，表现是「整排突然置灰点不动」，从界面上看不出是在等谁（实测被问过）。
+  改成自增 `embedSeq` 认领结果，后点的作废先点的——连失败 toast 一起丢，
+  那是上一次点击的事，弹出来只会误导
 - 选集容器**必须从 `fed-play-item` 起锚**：页面上另有两个空的 `<ul class="fed-part-rows">`
   （选集区前后各一个），直接匹配这个 ul 会多出两组、整张线路×集数表错位一位。
   且 class 后面不能收在 `"` 上——超清 AB/BY/EV 三条线的这个 ul 带了 `style` 属性（会漏 3 组）
