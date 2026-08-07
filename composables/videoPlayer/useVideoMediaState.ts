@@ -66,7 +66,9 @@ export function useVideoMediaState() {
 
   // ── HLS ──
   const hlsConfig = ref<HlsTuning>({ ...DEFAULT_HLS_TUNING })
-  const hlsStats = ref<{ buffered: number; level: string } | null>(null)
+  // dropped/total：解码渲染侧的掉帧。与 buffered（网络侧）分属两条完全不同的瓶颈，
+  // 面板上要能一眼分开——「缓冲满但掉帧涨」是解码/GPU 问题，「缓冲空但不掉帧」才是网络问题
+  const hlsStats = ref<{ buffered: number; level: string; dropped: number; total: number } | null>(null)
   const playbackDiag = ref('—')
 
   // ── MP4 预加载 ──

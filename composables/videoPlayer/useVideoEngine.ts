@@ -159,7 +159,15 @@ export function useVideoEngine(deps: VideoEngineDeps) {
    * 否则后台那几十秒会被回填成一次假卡顿）→ 跑一拍闭环 → primePrefetch 直接把并发拉起来。
    */
   const onVisibilityChange = () => {
-    if (document.visibilityState !== 'visible' || !hls) return
+    if (!hls) return
+    // 切走时立刻把已播分片吐掉。后台标签页是浏览器做内存回收/压缩的首选对象，
+    // 而这份缓存可能有几百 MB 的 ArrayBuffer——留着它进后台，回来时要把这一大坨重新换页进来，
+    // 表现就是「整个浏览器像卡死一样」。已播的那部分反正也用不上了，走之前先扔
+    if (document.visibilityState === 'hidden') {
+      purgePlayedSegments()
+      return
+    }
+    if (document.visibilityState !== 'visible') return
     stall.resetSampler()
     stall.tick()
     prefetchTick()
@@ -172,9 +180,13 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     if (!hls || !videoEl.value) return
     const video = videoEl.value
     playbackDiag.value = describePlaybackState(video, getStuckSegment())
+    // 掉帧只有 <video> 自己知道（解码器丢的帧不会体现在任何缓冲读数上）
+    const q = video.getVideoPlaybackQuality?.()
     hlsStats.value = {
       buffered: getCachedAhead(video),   // 含预取缓存的有效已缓冲，不只 MSE 的 ~60s
       level: describeLevel(hls.levels[hls.currentLevel]),
+      dropped: q?.droppedVideoFrames ?? 0,
+      total: q?.totalVideoFrames ?? 0,
     }
   }
 

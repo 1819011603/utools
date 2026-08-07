@@ -29,6 +29,18 @@
       <div><span class="text-gray-500">已缓冲：</span><span class="font-medium">{{ (hlsStats?.buffered ?? 0).toFixed(1) }} 秒</span></div>
       <div><span class="text-gray-500">当前画质：</span><span class="font-medium">{{ hlsStats?.level }}</span></div>
       <div><span class="text-gray-500">缓冲进度：</span><span class="font-medium">{{ bufferedPercent.toFixed(1) }}%</span></div>
+      <!-- 掉帧是解码/渲染侧的唯一直接证据：缓冲读数再好看也照不出它。
+           判读方式写进 title，否则光看一个数字没人知道该跟什么比 -->
+      <div :title="'解码器丢掉、没能画出来的帧。判读：'
+        + '① 缓冲健康但掉帧在涨 → 解码/GPU/倍速太高；'
+        + '② 缓冲被吃空但掉帧不涨 → 网络或预取问题；'
+        + '③ 切标签页回来时一次性猛涨 → 内存换页/GC 卡住了主线程。'
+        + '偶尔零星几帧属正常。'">
+        <span class="text-gray-500">掉帧：</span>
+        <span class="font-medium" :class="droppedPercent > 1 ? 'text-red-500' : droppedPercent > 0.2 ? 'text-amber-500' : ''">
+          {{ hlsStats?.dropped ?? 0 }} 帧（{{ droppedPercent.toFixed(2) }}%）
+        </span>
+      </div>
       <div><span class="text-gray-500">播放进度：</span><span class="font-medium">{{ progressPercent.toFixed(1) }}%</span></div>
     </div>
 
@@ -104,6 +116,11 @@ const {
 const mseCeilingSecs = computed(() => Math.min(60, hlsConfig.value.maxMaxBufferLength))
 
 const cacheMB = computed(() => (prefetchInfo.value.bytes / 1024 / 1024).toFixed(0))
+
+const droppedPercent = computed(() => {
+  const s = hlsStats.value
+  return s && s.total > 0 ? (s.dropped / s.total) * 100 : 0
+})
 
 const toast = useToast()
 

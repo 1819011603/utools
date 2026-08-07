@@ -31,17 +31,24 @@ export interface HlsTuning {
 }
 
 /**
- * 首次进页面的默认值。缓冲相关一律给大值：真正的大量预读放在 JS 预取缓存里，
+ * 首次进页面的默认值。真正的大量预读放在 JS 预取缓存里，
  * 喂进 hls.js 的 MSE 值会在 useVideoEngine 里再用 Math.min 压到 30/60（见那里的注释）。
+ *
+ * **预读深度与内存上限都不能一味给大**（这两项曾经都是 3600，是页面偶发「整个浏览器卡死」的根因）：
+ * `maxBufferLength` 是 `effectivePrefetchTarget()` 的直接来源，给 3600 就是让引擎一路预读到
+ * 一小时之后，1080p 3Mbps 的片子能堆出 1GB+ 的 ArrayBuffer。而**后台标签页是浏览器做内存
+ * 压缩/回收的首选对象**——切走再切回来要把这一大坨整体换页回来，主线程整段阻塞，
+ * 表现就是「浏览器像卡死了一样，再切一次才好」。
+ * 抗卡真正吃紧的是「濒卡 <30s」那个区间，缓到 10 分钟和缓到 1 小时对流畅度的差别几乎为零，
+ * 内存却差 5 倍。要更深的人在「HLS 配置」卡片里自己调。
  */
 export const DEFAULT_HLS_TUNING: HlsTuning = {
-  maxBufferLength: 3600,
-  maxMaxBufferLength: 3600,
-  backBufferLength: 3600,
-  // 这一项**不能跟着上面几个一起给大值**：它是 JS 预取缓存的 LRU 天花板，
-  // 给 3600 意味着要堆到 3.6GB 才开始淘汰，长时间播放下 GC 压力足以让整个页面发卡（实测）。
-  // 1GB 大约对应 15~40 分钟预取，抗卡够用；真需要更深的人在「HLS 配置」里自己调
-  maxBufferSizeMB: 1024,
+  maxBufferLength: 600,        // 预读深度：10 分钟（~200MB @1080p 3Mbps）。只有这一项决定内存
+  // 下面两项进 hls.js 前都会被 Math.min 压到 60/30（见 useVideoEngine），填多大都只是个上界；
+  // 取 300 是为了跟「最大缓冲时长」输入框的 max 对齐，免得设置面板显示一个自己都填不进去的值
+  maxMaxBufferLength: 300,
+  backBufferLength: 300,
+  maxBufferSizeMB: 1024,       // LRU 天花板，兜住高码率源；正常由上面的预读深度先到顶
   fragLoadingTimeOut: 300000,
   fragLoadingMaxRetry: 3,
   enableWorker: true,
