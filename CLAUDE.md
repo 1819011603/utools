@@ -97,7 +97,17 @@ server/api/resolve.ts 播放页解析接口（薄壳，站点策略在 server/pa
 | `useVideoPlayerController.ts` | **装配层**：接线 + 持久化 + 挂载卸载 |
 | `useReachabilityProbe.ts` / `useHlsPrefetch.ts` / `useSegmentCache.ts` / `useStallTracker.ts` / `useM3u8.ts` / `useVideoDownload.ts` / `useVideoProxy.ts` / `videoDiag.ts` | 底层引擎 |
 
-UI 分块：`SourceCard` / `PlaylistPanel` / `Stage` / `HlsSettings` / `StatsPanel` / `PreloadSettings` / `Shortcuts`。
+UI 分块：`SourceCard` / `PlaylistPanel` / `Stage` / `SettingsMenu` / `ConnSettings` / `HlsSettings` /
+`StatsPanel` / `PreloadSettings` / `Shortcuts` / `CollapseCard`。
+
+**页面只有三样东西是常显的：输入框、播放器、选集**。其余全在下方 `CollapseCard` 里**默认折叠**
+（摊开会把播放器和选集挤出屏幕，手机上要滑三屏才看得到第 2 集）：
+
+- 看片当下才改的（自动全屏 / 自动最佳倍速 / 跳过片头片尾）→ 控制栏的齿轮菜单 `SettingsMenu`，手不用离开画面。
+  它浮在黑画面上，**不能用 UCheckbox/UInput**（亮色主题压在黑底上一片糊），用原生控件自己配色
+- 排查问题才看的（连接策略 / 探测矩阵 / HLS 配置 / 预加载 / 快捷键）→ 折叠区。
+  连接那块的开合复用 `showAdvancedProxy`，播放器标题栏的策略徽标点一下就掀开它（一个 ref 两处用）
+- 折叠区里的组件**不要自带 `UCard`**：`CollapseCard` 自己就是卡片，套两层会出现卡中卡
 
 **依赖方向单向**：`gestures → engine/events/controls → conn/tier/playlist → media/handoff`。反向需求一律用回调
 （`deps.reload`、`registerTickHook`、`registerDestroyHook`、`registerAutoPlayHook`）——

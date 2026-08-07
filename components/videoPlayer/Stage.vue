@@ -12,6 +12,18 @@
           <UBadge :color="isHls ? 'violet' : 'blue'" variant="soft" size="xs">
             {{ isHls ? 'HLS/M3U8' : 'MP4' }}
           </UBadge>
+          <!--
+            连接策略只在这里露一个徽标：整块设置已挪到页面下方的折叠区（平时是噪音，出问题才看）。
+            点它就把那块展开——`showAdvancedProxy` 同时也是折叠区的开合状态，一个 ref 两处用。
+          -->
+          <UBadge
+            :color="isProbing ? 'gray' : 'sky'" variant="soft" size="xs"
+            class="cursor-pointer hover:ring-1 hover:ring-sky-400 transition-shadow"
+            title="点击展开连接与防盗链设置（含可达性探测矩阵）"
+            @click="showAdvancedProxy = !showAdvancedProxy"
+          >
+            {{ isProbing ? '探测中…' : strategyLabel }}
+          </UBadge>
         </div>
         <div class="flex items-center gap-2 text-sm text-gray-500">
           <template v-if="hlsStats">
@@ -77,13 +89,24 @@
         </div>
       </div>
 
-      <!-- 播放/暂停的中央图标：外圈同时炸开一圈光晕，比单纯淡出有「按下去了」的实感 -->
+      <!--
+        中央播放/暂停图标：切换时闪一下（外圈炸开光晕），**暂停期间则常驻**——
+        暂停后画面是一张静止图，没有任何东西表明「是暂停了还是卡死了」。
+        常驻的这枚可以直接点（自动播放被浏览器拦下时它就是唯一的入口）。
+      -->
       <Transition name="pop">
-        <div v-if="showPlayIcon" class="absolute inset-0 flex items-center justify-center pointer-events-none">
-          <div class="relative">
-            <span class="absolute inset-0 rounded-full bg-white/25 blast" />
-            <div class="w-20 h-20 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center
-                        ring-1 ring-white/20">
+        <div
+          v-if="showPlayIcon || pausedIdle"
+          class="absolute inset-0 flex items-center justify-center"
+          :class="pausedIdle ? '' : 'pointer-events-none'"
+        >
+          <div class="relative" :class="pausedIdle ? 'cursor-pointer' : ''" data-no-gesture @click="togglePlay">
+            <span v-if="showPlayIcon" class="absolute inset-0 rounded-full bg-white/25 blast" />
+            <div
+              class="w-20 h-20 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center
+                     ring-1 ring-white/20 transition-transform"
+              :class="pausedIdle ? 'hover:scale-110 active:scale-95' : ''"
+            >
               <UIcon :name="isPlaying ? 'i-heroicons-pause' : 'i-heroicons-play'" class="w-10 h-10 text-white" />
             </div>
           </div>
@@ -295,6 +318,9 @@
             </div>
 
             <div class="flex items-center gap-2 shrink-0">
+              <!-- 自动全屏 / 自动倍速 / 跳过片头片尾：全是看片当下才改的，放这儿手不用离开画面 -->
+              <VideoPlayerSettingsMenu />
+
               <div ref="speedMenuRef" class="relative">
                 <button
                   class="text-white hover:text-violet-400 transition-colors px-2 py-1 rounded text-sm font-medium"
@@ -356,11 +382,11 @@ import { onClickOutside } from '@vueuse/core'
 
 const {
   videoEl, playerContainer, progressBar, speedMenuRef, videoKey, videoUrl,
-  isHls, isPlaying, isBuffering, isResolvingUrl, isProbing, isFullscreen,
+  isHls, isPlaying, isBuffering, isResolvingUrl, isProbing, isFullscreen, isVideoLoaded,
   showControls, showPlayIcon, showSpeedMenu,
   currentTime, duration, volume, playbackRate, desiredRate, autoBestRate, autoRateCap,
   progressPercent, bufferedPercent, seekPreviewTime, seekPreviewPercent, hoverTime, hoverPercent,
-  hlsStats, playlist, playlistTitle, hasPrev, hasNext,
+  hlsStats, playlist, playlistTitle, hasPrev, hasNext, strategyLabel, showAdvancedProxy,
   currentVideoName, volumeIcon, supportsPiP, canDownload,
   togglePlay, skip, startSeek, updateHoverTime, setVolume, toggleMute, setPlaybackRate,
   // 容器的 mousemove 走手势层的 onMouseMove（要滤掉触摸补发的兼容鼠标事件），不直接用 handleMouseMove
@@ -376,6 +402,11 @@ const {
 
 // 倍速菜单点击外部关闭
 onClickOutside(speedMenuRef, () => { showSpeedMenu.value = false })
+
+// 「停在那儿了」：暂停且不是在加载/取址中。加载中另有转圈遮罩，两个叠一起只会打架。
+// 自动播放被浏览器拦下时也是这个状态——那正是最需要一枚大播放键的时候。
+const pausedIdle = computed(() =>
+  isVideoLoaded.value && !isPlaying.value && !isBuffering.value && !isResolvingUrl.value)
 </script>
 
 <!--

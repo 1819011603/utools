@@ -25,9 +25,53 @@
     </UCard>
 
     <VideoPlayerStage v-if="isVideoLoaded" />
-    <VideoPlayerHlsSettings v-if="isHls" />
-    <VideoPlayerPreloadSettings v-if="isVideoLoaded && !isHls" />
-    <VideoPlayerShortcuts />
+
+    <!--
+      下半部分一律默认折叠：这几块都是「出问题才看」或「设一次就不动」的东西，
+      摊开来会把播放器和选集挤到屏幕外——手机上尤其明显（要滑三屏才看得到第 2 集）。
+      连接那块的开合直接复用 showAdvancedProxy，播放器标题栏上的策略徽标点一下就能把它掀开。
+    -->
+    <div class="space-y-3">
+      <VideoPlayerCollapseCard
+        v-model="showAdvancedProxy"
+        title="连接与防盗链"
+        icon="i-heroicons-signal"
+        icon-class="text-sky-500"
+        :hint="isVideoLoaded ? strategyLabel : ''"
+      >
+        <VideoPlayerConnSettings />
+      </VideoPlayerCollapseCard>
+
+      <VideoPlayerCollapseCard
+        v-if="isHls"
+        v-model="openHls"
+        title="HLS 配置与统计"
+        icon="i-heroicons-cog-6-tooth"
+        icon-class="text-gray-500"
+      >
+        <VideoPlayerHlsSettings />
+      </VideoPlayerCollapseCard>
+
+      <VideoPlayerCollapseCard
+        v-if="isVideoLoaded && !isHls"
+        v-model="openPreload"
+        title="MP4 预加载"
+        icon="i-heroicons-arrow-down-tray"
+        icon-class="text-gray-500"
+      >
+        <VideoPlayerPreloadSettings />
+      </VideoPlayerCollapseCard>
+
+      <VideoPlayerCollapseCard
+        v-model="openKeys"
+        title="快捷键与手势"
+        icon="i-heroicons-command-line"
+        icon-class="text-amber-500"
+        hint="双击左右 ±5s · 按住右侧 2x · 滑动调进度/音量"
+      >
+        <VideoPlayerShortcuts />
+      </VideoPlayerCollapseCard>
+    </div>
 
     <UAlert
       v-if="errorMessage"
@@ -62,7 +106,13 @@ const ctx = useVideoPlayerController()
 provide(VIDEO_PLAYER_KEY, ctx)
 
 // 本页模板只用到这几项，其余全在子组件里各自 inject
-const { isVideoLoaded, isHls, errorMessage, isResolvingUrl, resolveStage } = ctx
+const { isVideoLoaded, isHls, errorMessage, isResolvingUrl, resolveStage, showAdvancedProxy, strategyLabel } = ctx
+
+// 折叠区的开合。连接那块用控制器里的 showAdvancedProxy（播放器标题栏的策略徽标也要能掀开它），
+// 其余三块只有本页用得到，就近放着
+const openHls = ref(false)
+const openPreload = ref(false)
+const openKeys = ref(false)
 
 onMounted(() => ctx.mount())
 onUnmounted(() => ctx.unmount())

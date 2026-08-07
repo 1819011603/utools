@@ -1,32 +1,25 @@
 <template>
-  <UCard>
-    <template #header>
-      <div class="flex items-center gap-2">
-        <UIcon name="i-heroicons-command-line" class="w-5 h-5 text-amber-500" />
-        <span class="font-semibold">快捷键</span>
-      </div>
-    </template>
+  <div>
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+    <div v-for="item in SHORTCUTS" :key="item.keys" class="flex items-center gap-2">
+      <kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-800 rounded text-xs font-mono">{{ item.keys }}</kbd>
+      <span class="text-gray-600 dark:text-gray-400">{{ item.desc }}</span>
+    </div>
+  </div>
 
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-      <div v-for="item in SHORTCUTS" :key="item.keys" class="flex items-center gap-2">
-        <kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-800 rounded text-xs font-mono">{{ item.keys }}</kbd>
+  <div class="mt-5 pt-4 border-t border-gray-200 dark:border-gray-800">
+    <div class="flex items-center gap-2 mb-3">
+      <UIcon name="i-heroicons-hand-raised" class="w-5 h-5 text-violet-500" />
+      <span class="font-semibold text-sm">画面手势（触摸 / 鼠标通用）</span>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+      <div v-for="item in GESTURES" :key="item.act" class="flex items-start gap-2">
+        <span class="px-2 py-1 bg-gray-100 dark:bg-gray-800 rounded text-xs shrink-0">{{ item.act }}</span>
         <span class="text-gray-600 dark:text-gray-400">{{ item.desc }}</span>
       </div>
     </div>
-
-    <div class="mt-5 pt-4 border-t border-gray-200 dark:border-gray-800">
-      <div class="flex items-center gap-2 mb-3">
-        <UIcon name="i-heroicons-hand-raised" class="w-5 h-5 text-violet-500" />
-        <span class="font-semibold text-sm">画面手势（触摸 / 鼠标通用）</span>
-      </div>
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-        <div v-for="item in GESTURES" :key="item.act" class="flex items-start gap-2">
-          <span class="px-2 py-1 bg-gray-100 dark:bg-gray-800 rounded text-xs shrink-0">{{ item.act }}</span>
-          <span class="text-gray-600 dark:text-gray-400">{{ item.desc }}</span>
-        </div>
-      </div>
-    </div>
-  </UCard>
+  </div>
+  </div>
 </template>
 
 <script setup lang="ts">
