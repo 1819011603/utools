@@ -181,7 +181,7 @@
           variant="soft"
           icon="i-heroicons-tv"
           :title="`「${currentLine?.name}」线路用站点自带的播放器播放`"
-          description="这条线路给的不是视频地址，而是第三方站点（爱奇艺 / 芒果 / 腾讯等）的播放页，真实地址由站点自带的解析服务在浏览器里现算，服务端拿不到。这里直接内嵌它的播放器：能播，但画质、广告、进度条都是它的，我们的抗卡、下载、倍速在这条线路上都用不了。部分播放器检测不到广告就拒绝播放，所以内嵌框允许它弹窗——播放期间可能弹出广告页，关掉即可（顶层跳转仍被拦着，本页不会被劫走）。想用本站播放器请换一条给直链的线路。"
+          :description="`这条线路给的不是视频地址，而是第三方站点（爱奇艺 / 芒果 / 腾讯等）的播放页，真实地址由站点自带的解析服务在浏览器里现算，服务端拿不到。这里直接内嵌它的播放器：能播，但画质、广告、进度条都是它的，我们的抗卡、下载、倍速在这条线路上都用不了。${embedSandbox ? '已勾选「限制广告」：广告的弹窗和整页跳转会被挡住，但部分播放器（如超清EV线）会因此拒绝播放，播不了就取消勾选。' : '播放器拥有完整权限，点画面时可能弹出广告或整页跳去广告站（浏览器回退可返回）；想挡住就勾上「限制广告」，代价是部分线路会拒绝播放。'}想用本站播放器请换一条给直链的线路。`"
         />
 
         <!-- 内嵌播放器 -->
@@ -191,41 +191,59 @@
               <template v-if="embedIndex >= 0">正在播放：{{ currentLine?.episodes[embedIndex]?.title || `第 ${embedIndex + 1} 集` }}</template>
               <template v-else>内嵌播放器</template>
             </div>
-            <!-- 逃生口：部分解析站不允许被别的域套 iframe（X-Frame-Options），
-                 内嵌位置会是一片空白，此时只能整页打开 -->
-            <UButton
-              v-if="embedSrc"
-              size="xs"
-              variant="ghost"
-              icon="i-heroicons-arrow-top-right-on-square"
-              :to="embedSrc"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              在新标签打开
-            </UButton>
+            <div class="flex items-center gap-2 shrink-0">
+              <UTooltip v-if="embedSrc" text="快捷键 Enter 全屏 / Esc 退出（焦点落进播放器后按键归它，点一下播放器外面即可恢复）">
+                <UButton
+                  size="xs"
+                  variant="ghost"
+                  icon="i-heroicons-arrows-pointing-out"
+                  @click="toggleEmbedFullscreen()"
+                >
+                  全屏
+                </UButton>
+              </UTooltip>
+              <!-- 「限制广告」= 给 iframe 挂 sandbox。默认关（见 EMBED_SANDBOX 的注释：
+                   开着的话超清EV线这类探 sandbox 的播放器一帧都播不出来）。
+                   开关而不是确认弹窗：它是个能来回切的状态，不是一次性授权 -->
+              <UTooltip
+                v-if="embedSrc"
+                :text="embedSandbox ? '已挡住广告的顶层跳转。部分播放器（如超清EV线）会因此拒绝播放' : '播放器拥有完整权限，点画面可能被广告劫持整页跳转'"
+              >
+                <UCheckbox v-model="embedSandbox" label="限制广告" :ui="{ label: 'text-xs' }" />
+              </UTooltip>
+              <!-- 逃生口：部分解析站不允许被别的域套 iframe（X-Frame-Options），
+                   内嵌位置会是一片空白，此时只能整页打开 -->
+              <UButton
+                v-if="embedSrc"
+                size="xs"
+                variant="ghost"
+                icon="i-heroicons-arrow-top-right-on-square"
+                :to="embedSrc"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                在新标签打开
+              </UButton>
+            </div>
           </div>
-          <div class="relative w-full rounded-lg overflow-hidden bg-black" style="aspect-ratio: 16 / 9">
-            <!-- 后面两个 token 是被这些播放器的「反内嵌」自检逼出来的，各对一条线路，别顺手删：
-                 · allow-document-domain ← 超清EV线（ezplayer）拿 `document.domain = document.domain`
-                   试探，沙箱文档里这句必抛 SecurityError（消息里带 sandboxed），一抛就罢工，
-                   只显示「Opss! Sandboxed our player is not allowed」。跟广告无关，探的就是 sandbox 属性本身。
-                   放行它没有代价：document.domain 早已废弃，跨域 iframe 本来也降不到同源。
-                 · allow-popups ← 超清AB线（abyssplayer）点遮罩时要 `window.open(广告页)` 连续成功两次
-                   （失败两次就 document.write 掉播放器，报「Due to certain reasons (AdBlock/Sandbox)…」）。
-                   用户装了拦截插件照样过不了，那个我们兜不住。
-                 **故意不给** allow-popups-to-escape-sandbox（弹出窗继承同一套限制，落地页的二次跳转/
-                 自动下载仍被关着）和 allow-top-navigation*（那一项最恶心：点一下播放整页被劫走，
-                 用户只会以为是本站跳的）。
-                 allow-same-origin 必须给（播放器要读自己的存储和接口），跨域 iframe 给它不影响本页安全 -->
+          <!-- 全屏的是这个外框而不是 iframe 本身：iframe 全屏后我们的边框圆角、
+               「正在获取地址」那层遮罩全都跟不进去，退出时还会闪一下 -->
+          <div
+            ref="embedStage"
+            class="relative w-full rounded-lg overflow-hidden bg-black"
+            :class="isEmbedFullscreen ? 'h-full rounded-none' : ''"
+            :style="isEmbedFullscreen ? undefined : 'aspect-ratio: 16 / 9'"
+          >
+            <!-- key 里必须带上 sandbox 档位：sandbox 是文档创建时定死的，光改属性不重建
+                 iframe 一点用没有，切开关会看着毫无变化（Vue 只会 patch 属性） -->
             <iframe
               v-if="embedSrc"
-              :key="embedSrc"
+              :key="embedSrc + (embedSandbox ? '#box' : '')"
               :src="embedSrc"
               class="absolute inset-0 w-full h-full"
               allowfullscreen
               allow="fullscreen; encrypted-media; autoplay"
-              sandbox="allow-scripts allow-same-origin allow-forms allow-presentation allow-popups allow-document-domain"
+              :sandbox="embedSandbox ? EMBED_SANDBOX : undefined"
             />
             <div v-else class="absolute inset-0 flex items-center justify-center gap-2 text-sm text-gray-400">
               <UIcon v-if="embedPending >= 0" name="i-heroicons-arrow-path" class="w-4 h-4 animate-spin" />
@@ -393,7 +411,68 @@ const hasSignedUrl = computed(() =>
 const isEmbedLine = computed(() => !!result.value?.embedUrl)
 const embedSrc = ref('')
 const embedIndex = ref(-1)     // 内嵌播的是第几集，-1 = 还没点
+
+/**
+ * 内嵌框的 sandbox，由「限制广告」开关控制，**默认关**。
+ *
+ * 挂上它能挡住这些解析站最恶心的那一手——广告脚本拿到顶层跳转能力，
+ * 点一下画面整页被劫走，用户只会以为是本站跳的。但**它同时会让一部分线路彻底播不了**，
+ * 而这一整块 UI 的存在意义就是「能播」，所以默认让位给可用性，把选择权做成开关摆在旁边。
+ *
+ * 挂上时给的两个 token 是被播放器的反内嵌自检逼出来的：
+ * · allow-popups ← 超清AB线（abyssplayer）点遮罩要 `window.open(广告页)` 连续成功两次，
+ *   失败两次就 document.write 掉播放器。**故意不给** allow-popups-to-escape-sandbox：
+ *   弹出窗继承同一套限制，落地页的二次跳转/自动下载仍被关着
+ * · allow-same-origin 是播放器读自己存储和接口的前提，跨域 iframe 给它不影响本页安全
+ *
+ * 而**有的播放器探的是 sandbox 属性本身**（超清EV线 ezplayer：`document.domain = document.domain`
+ * 在沙箱文档里必抛 SecurityError，一抛就报 `Opss! Sandboxed our player is not allowed`）。
+ * 这种加什么 token 都没用——规范里的「sandboxed document.domain flag」只要挂了 sandbox 就必然置位，
+ * **没有任何 token 能取消**（`allow-document-domain` 不是合法 token，写上去只会被静默忽略，
+ * 表现和没改一模一样，别再往这个方向试了）。这类线路只能整个摘掉属性，也就是关掉这个开关。
+ */
+const EMBED_SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-presentation allow-popups'
+const EMBED_SANDBOX_KEY = 'video-parse-embed-sandbox'
+// 记住选择：开关是「每次都得重设一遍」的话，等于每换一集就要再点一次
+const embedSandbox = ref(false)
 const embedPending = ref(-1)   // 正在现取第几集的内嵌地址，-1 = 空闲
+
+// ── 内嵌播放器全屏 ──
+// 站点自带播放器的全屏按钮埋在它自己的控制栏里（有的还被广告遮住），给一个我们这边的入口。
+// 退出不用管：Esc 由浏览器自己处理，我们只跟着 fullscreenchange 同步样式
+const embedStage = ref<HTMLElement | null>(null)
+const isEmbedFullscreen = ref(false)
+
+const toggleEmbedFullscreen = () => {
+  if (document.fullscreenElement) {
+    document.exitFullscreen().catch(() => {})
+    return
+  }
+  // 用户手势之外调用会被拒（如从 setTimeout 里），静默吞掉即可
+  embedStage.value?.requestFullscreen?.().catch(() => {})
+}
+
+const onFullscreenChange = () => {
+  isEmbedFullscreen.value = !!document.fullscreenElement && document.fullscreenElement === embedStage.value
+}
+
+/**
+ * Enter 全屏。**必须放掉输入框里的 Enter**——地址输入框自己绑了 Enter 触发解析，
+ * 抢过来的话用户敲回车会变成全屏，解析反而没了。
+ *
+ * 已知边界：焦点一旦落进播放器（点了画面），按键就归那个跨域 iframe 了，
+ * 我们这层收不到任何 keydown，这是浏览器的安全边界，没有绕法。
+ * 所以按钮上的 tooltip 写清「点一下播放器外面即可恢复」，
+ * 否则用户只会觉得快捷键时灵时不灵。
+ */
+const onKeydown = (e: KeyboardEvent) => {
+  if (e.key !== 'Enter' || e.altKey || e.ctrlKey || e.metaKey) return
+  if (!isEmbedLine.value || !embedSrc.value) return
+  const el = e.target as HTMLElement | null
+  if (el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable)) return
+  e.preventDefault()
+  toggleEmbedFullscreen()
+}
 
 /** 选集行的状态呈现。三种线路（直链 / 按需取址 / 内嵌）各一套说法，写成内联三元没法看 */
 const epIcon = (ep: ParsedEpisode, i: number) => {
@@ -497,7 +576,8 @@ const startResolve = async (line?: number) => {
     result.value = res
 
     // 内嵌播放器归位：换线路/换片子后 iframe 还停在上一条线路的那一集，
-    // 而下面的集名早就换了，对不上。服务端探测到的那一集就是起点
+    // 而下面的集名早就换了，对不上。服务端探测到的那一集就是起点。
+    // 「限制广告」不复位：它是用户的偏好，不是某条线路的临时状态
     embedSrc.value = res.embedUrl || ''
     embedIndex.value = res.embedUrl
       ? (res.lines[res.activeLineIndex]?.episodes.findIndex(e => e.embedUrl === res.embedUrl) ?? -1)
@@ -722,8 +802,20 @@ const clearAllHistory = () => {
   parseHistory.value = []
 }
 
+watch(embedSandbox, v => {
+  try { localStorage.setItem(EMBED_SANDBOX_KEY, v ? '1' : '0') } catch { /* 隐私模式下写不了，无所谓 */ }
+})
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', onKeydown)
+  document.removeEventListener('fullscreenchange', onFullscreenChange)
+})
+
 onMounted(() => {
+  window.addEventListener('keydown', onKeydown)
+  document.addEventListener('fullscreenchange', onFullscreenChange)
   userRules.value = loadUserParseRules()
+  embedSandbox.value = localStorage.getItem(EMBED_SANDBOX_KEY) === '1'
   // 支持 /video-parse?url=…&line=N 直接带地址进来自动解析
   const q = parseQueryParams()
   if (q.url) {

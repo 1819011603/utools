@@ -515,9 +515,19 @@ ncat 系挂了 cdndefend：首访返回 **HTTP 850** + 挑战页，要求暴力�
   - **超清EV线（ezplayer，`gms.ezplayer.me`）探的是 sandbox 属性本身，跟广告无关**：
     `assets/index-*.js` 里 `if (window.top === window) return; try { document.domain = document.domain }
     catch (e) { if (e.toString().includes('sandboxed')) … }`——沙箱文档里这句必抛 SecurityError，
-    一抛就报 `Opss! Sandboxed our player is not allowed`。放行只需 **`allow-document-domain`**，
-    没有代价（`document.domain` 早已废弃，跨域 iframe 本来也降不到同源）。
-    追这个别去猜 flag：直接把它的 bundle 拉下来搜 `Sandbox`，检测函数就在旁边
+    一抛就报 `Opss! Sandboxed our player is not allowed`。
+    **这种没有 token 可解**：规范里的「sandboxed document.domain flag」只要挂了 `sandbox` 就必然置位，
+    而 `allow-document-domain` **压根不是合法 token**（合法的只有 allow-scripts / allow-same-origin /
+    allow-forms / allow-popups / allow-popups-to-escape-sandbox / allow-modals / allow-downloads /
+    allow-presentation / allow-orientation-lock / allow-pointer-lock / allow-top-navigation*），
+    非法 token 被静默忽略，改完现象跟没改一模一样——**别再往加 flag 的方向试**。
+    唯一出路是整个摘掉 `sandbox` 属性。于是做成「限制广告」开关（`embedSandbox`，
+    存 `video-parse-embed-sandbox`）——**默认关**：挂着 sandbox 能挡广告的顶层跳转，
+    但会让一部分线路彻底播不了，而这一整块 UI 的存在意义就是「能播」，
+    所以默认让位给可用性，把选择权摆在旁边（开关而不是一次性确认弹窗：它是个能来回切的状态）。
+    换线路**不复位**，那是用户偏好不是线路状态。
+    iframe 的 `:key` 必须带上这个档位：**sandbox 是文档创建时定死的**，光 patch 属性不重建 iframe 毫无效果。
+    追这类问题别猜 flag：把它的 bundle 拉下来搜 `Sandbox`，检测函数就在旁边
   - **超清AB线（abyssplayer）要的是真广告**：点遮罩触发 `window.open(广告页)`，
     失败计数到 2 就 `document.write` 掉播放器，报
     `Due to certain reasons (AdBlock/Sandbox), ads are not being displayed`。给 **`allow-popups`** 能过，
@@ -632,6 +642,7 @@ CF Pages 上没有这些变量，出口直连，不受影响。
 | --- | --- |
 | `video-player-state` | 播放器全量状态（地址/播放列表/进度/音量/倍速/代理设置/HLS 配置/档位覆盖） |
 | `video-parse-rules` | 用户自定义解析规则（`/video-parse`） |
+| `video-parse-embed-sandbox` | 内嵌播放器是否挂 sandbox（「限制广告」开关，默认关） |
 | `video-player-learned-profiles` | 按 host 学到的服务器档位 + 可达性探测结果（`reach`，TTL 30 分钟） |
 | `video-player-handoff` | 长播放列表交接槽 `{ urls, names, title, source, lazy, index, at }`，TTL 1 天，`/video-parse` → `/video-player` 传值 |
 | `video-player-origin-history` / `-referer-history` | Origin/Referer 输入历史（下拉复用） |
