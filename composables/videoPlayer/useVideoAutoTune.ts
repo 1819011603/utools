@@ -12,6 +12,9 @@ import type { VideoConnStrategy } from './useVideoConnStrategy'
 import type { VideoEngine } from './useVideoEngine'
 
 // ── 自动最佳倍速的调参常数 ──
+// 倍速取值的对齐粒度（0.25 的整数倍，避免出现 1.37x 这种数）。
+// 注意它**不再是每次调整的步长上限**：早先每次只挪一个台阶，从 1x 爬到 3x 要 8 次 × 25s 惰性期
+// ≈ 200 秒，慢到用户以为没生效。现在算出目标就直接给到，惰性期只管「多久才允许再调一次」。
 const RATE_STEP = 0.25
 // 自动模式默认最高提到 2x。倍速菜单里选了更高的档位就以那个为上限（见 autoRateCap）——
 // 「自动」的语义是「在 [1, 上限] 内按带宽取值」，而 desiredRate 默认是 1，
@@ -55,19 +58,20 @@ export function useVideoAutoTune(deps: VideoAutoTuneDeps) {
 
   /**
    * 计算并应用「实际生效倍速」：
-   *  - 自动最佳倍速开启：在 [1, autoRateCap] 内逼近可持续上限，每次一个 0.25x 台阶。
+   *  - 自动最佳倍速开启：在 [1, autoRateCap] 内取可持续上限，**一次到位**（不走 0.25x 台阶）。
    *    上限取「带宽模型」与「缓冲实况」两者中更宽松的那个：缓冲已经很深（≥2×吃紧阈值且没在卡）
    *    就直接按 autoRateCap 走——深缓冲是比带宽估算更硬的证据，估算保守时不该拖着不提速。
    *    提速还要缓冲健康 + 已连续流畅 20s（缓冲很深时免掉流畅时长这一条，见 bufferRich）；
    *    降速只要目标持续低于当前 8s。
-   *    任何一次调整后进入 25s 惰性期——不停微调比慢一点更难受，且倍速一变就要重排预取节奏。
-   *  - 用户刚勾上开关 / 刚改上限（nudge 待兑现）：直接跳到目标值，不走台阶也不看流畅时长。
+   *    节流全部交给 25s 惰性期（`RATE_HOLD_MS`）——它管「多久允许再调一次」，
+   *    幅度不再另行设限：爬台阶的做法从 1x 到 3x 要 200 秒，慢到像是没生效。
+   *  - 用户刚勾上开关 / 刚改上限（nudge 待兑现）：跳过惰性期与流畅时长门槛立刻给到目标值。
    *    这是明确的用户动作，必须立刻有反应；后续再由闭环按缓冲实况上下调。
    *  - 关闭：完全用用户选择倍速（可 <1 手动慢放），立即生效。
    */
   const applyEffectiveRate = () => {
     const guard = tier.guardRateCeiling.value   // 抗卡守卫上限（PANIC=1，否则 Infinity）
-    // 抗卡阶梯第一步「先降速」：生效倍速高于守卫上限时立即压下（绕过惰性期/步进，保命优先）
+    // 抗卡阶梯第一步「先降速」：生效倍速高于守卫上限时立即压下（绕过惰性期与确认期，保命优先）
     if (isHls.value && guard < playbackRate.value - 1e-6) {
       setRate(Math.max(1, guard))
       lastAutoRateAt = performance.now()
@@ -88,7 +92,7 @@ export function useVideoAutoTune(deps: VideoAutoTuneDeps) {
     const bufferRich = s.playableSecs >= Math.max(tier.effectiveTierParams.value.lowSecs * 2, 60)
       && !stall.isStalling.value
     const modelCeil = s.maxFluentRate > 0 ? s.maxFluentRate : 1
-    // 目标 = min(自动上限, 上限证据, 守卫上限)，≥1，向下对齐 0.25 台阶
+    // 目标 = min(自动上限, 上限证据, 守卫上限)，≥1，向下对齐到 0.25 的整数倍
     const rawCeil = Math.min(autoRateCap.value, bufferRich ? autoRateCap.value : modelCeil, guard)
     const target = Math.max(1, Math.floor(rawCeil / RATE_STEP + 1e-6) * RATE_STEP)
 
@@ -98,14 +102,14 @@ export function useVideoAutoTune(deps: VideoAutoTuneDeps) {
       if (now - downSince < RATE_DOWN_CONFIRM_MS) return
       downSince = 0
       lastAutoRateAt = now
-      setRate(Math.max(target, cur - RATE_STEP))
+      setRate(target)          // 一次降到位：慢慢往下挪只是让卡顿多持续几十秒
       return
     }
     downSince = 0
     if (target < cur + 1e-6) return                        // 已到位
-    // 用户刚勾开关/刚改上限：直接给到目标值，不看惰性期也不等流畅时长（点了必须马上有反应）。
+    // 用户刚勾开关/刚改上限：不看惰性期也不等流畅时长，立刻给到目标值（点了必须马上有反应）。
     // 额度按「兑现」清而不按时间过期：点击那一刻带宽模型可能还没采到样（maxFluentRate=0）→ target 就是 1，
-    // 分支根本走不到；旧实现给的 5s 墙钟一过额度作废，之后只剩 0.25x/25s 的慢爬，看着就是「点了没用」（踩过）。
+    // 分支根本走不到；旧实现给的 5s 墙钟一过额度就作废，之后只能干等下一次惰性期（踩过）。
     if (nudgePending) {
       nudgePending = false
       lastAutoRateAt = now
@@ -119,7 +123,7 @@ export function useVideoAutoTune(deps: VideoAutoTuneDeps) {
     // 起播被浏览器拦截 / 用户手动暂停期间它永远攒不够 20s，会把提速彻底锁死（踩过）。
     if (!bufferRich && stall.getSmoothSecs() < RATE_UP_SMOOTH_SECS) return
     lastAutoRateAt = now
-    setRate(Math.min(target, cur + RATE_STEP))
+    setRate(target)            // 一次提到位；撑不住会在 8s 确认期后自动降回来
   }
 
   /** 用户主动改上限 / 刚勾上开关：解除惰性期，并挂一次「立刻跳到目标」的额度 */
