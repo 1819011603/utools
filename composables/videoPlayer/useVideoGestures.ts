@@ -1,0 +1,280 @@
+/**
+ * 画面手势层：单击唤出控制栏、双击左右 ±5s / 中间播放暂停、长按右侧临时 2x、
+ * 横滑调进度、竖滑调音量与亮度、锁定屏幕。
+ *
+ * 为什么单独一层而不是塞进 useVideoUiControls：那边是「按钮点了要干什么」，
+ * 这里是「一次指针交互到底算什么」——同一个 pointerdown 可能变成点击/双击/长按/拖拽四种之一，
+ * 判定过程带一堆定时器和临时量，混进去会把控制栏那份也搅浑。
+ *
+ * 鼠标与触摸走同一套 Pointer Events，只在两处按 `pointerType` 分叉（见 onTap）：
+ * 触摸端「双击中间 = 播放/暂停」，鼠标端「双击 = 全屏」——后者是桌面几十年的肌肉记忆，
+ * 换掉的代价比统一带来的收益大。两端**都不再单击即播放/暂停**：那会让「想看看进度到哪了」
+ * 这种最常见的意图必然误触一次暂停。
+ */
+import type { VideoMediaState } from './useVideoMediaState'
+import type { VideoUiControls } from './useVideoUiControls'
+import type { VideoAutoTune } from './useVideoAutoTune'
+
+/** 双击判定窗口。再长会让单击唤出控制栏明显发木（那一下要等窗口过完才执行） */
+const DOUBLE_TAP_MS = 280
+/** 长按加速的触发时长。短于 350ms 会和「按下去想拖但还没动」撞车 */
+const LONG_PRESS_MS = 400
+/** 超过这个位移就判为拖拽，不再是点击（触摸按下时手指本来就会漂几个像素） */
+const MOVE_SLOP = 12
+const DOUBLE_TAP_SEEK = 5
+/** 横滑整个宽度对应的最大跨度：长片按比例映射会让 1px ≈ 10 秒，根本对不准 */
+const SEEK_SPAN_MAX = 600
+/** 左右边缘各占多少判为「快退/快进区」，中间留给播放暂停 */
+const SIDE_ZONE = 0.3
+
+export interface VideoGesturesDeps {
+  media: VideoMediaState
+  controls: VideoUiControls
+  autoTune: VideoAutoTune
+}
+
+type HudKind = 'seek' | 'volume' | 'light'
+type DragMode = null | 'seek' | 'volume' | 'light'
+
+export function useVideoGestures(deps: VideoGesturesDeps) {
+  const { media, controls, autoTune } = deps
+  // isLocked 在裸状态里（快捷键那边也要读它，见 useVideoMediaState 的注释）
+  const { videoEl, duration, volume, isMuted, showControls, isPlaying, isFullscreen, isLocked } = media
+
+  /** 锁定态下唯一还认的交互：点一下让解锁按钮露 3 秒 */
+  const showLockBtn = ref(false)
+  /** 画面亮度（纯前端 CSS filter，改不了背光，但暗环境下够用） */
+  const brightness = ref(1)
+  /** 中央 HUD：拖拽过程中的实时读数 */
+  const gestureHud = ref<{ kind: HudKind; text: string; percent?: number; delta?: string } | null>(null)
+  /** 双击 ±5s 的左右水波纹反馈（key 自增以重放动画） */
+  const seekFlash = ref<{ side: 'left' | 'right'; key: number } | null>(null)
+
+  let lockBtnTimer: ReturnType<typeof setTimeout> | null = null
+  let longPressTimer: ReturnType<typeof setTimeout> | null = null
+  let singleTapTimer: ReturnType<typeof setTimeout> | null = null
+  let seekFlashTimer: ReturnType<typeof setTimeout> | null = null
+  let flashSeq = 0
+
+  // 一次指针交互的临时量
+  let startX = 0
+  let startY = 0
+  let startAt = 0
+  let startTime = 0      // 按下那一刻的播放位置
+  let startVolume = 1
+  let startBright = 1
+  let dragMode: DragMode = null
+  let seekTarget = 0
+  let boosting = false
+  let lastTapAt = 0
+  let lastTapX = 0
+  let activePointer: number | null = null
+  let pointerKind = 'mouse'
+
+  const clearTimers = () => {
+    if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null }
+  }
+
+  const vibrate = (ms: number) => {
+    try { navigator.vibrate?.(ms) } catch { /* iOS 没有，忽略 */ }
+  }
+
+  const flashSide = (side: 'left' | 'right') => {
+    seekFlash.value = { side, key: ++flashSeq }
+    if (seekFlashTimer) clearTimeout(seekFlashTimer)
+    seekFlashTimer = setTimeout(() => { seekFlash.value = null }, 600)
+  }
+
+  const revealLockBtn = () => {
+    showLockBtn.value = true
+    if (lockBtnTimer) clearTimeout(lockBtnTimer)
+    lockBtnTimer = setTimeout(() => { showLockBtn.value = false }, 3000)
+  }
+
+  const toggleLock = () => {
+    isLocked.value = !isLocked.value
+    if (isLocked.value) {
+      showControls.value = false
+      autoTune.setBoost(false)
+    }
+    revealLockBtn()
+  }
+
+  /** 单击：只管控制栏显隐，不碰播放状态 */
+  const toggleControls = () => {
+    showControls.value = !showControls.value
+    if (showControls.value) controls.hideControlsDelayed()
+  }
+
+  const fmtDelta = (sec: number) => `${sec >= 0 ? '+' : '-'}${Math.abs(Math.round(sec))}s`
+
+  // ── 指针事件 ──
+
+  /** 控制栏、按钮这些自己有交互的区域不参与手势判定 */
+  const fromControls = (e: PointerEvent) =>
+    !!(e.target as HTMLElement | null)?.closest?.('[data-no-gesture]')
+
+  const rectOf = (e: PointerEvent) => (e.currentTarget as HTMLElement).getBoundingClientRect()
+
+  const onPointerDown = (e: PointerEvent) => {
+    if (fromControls(e)) return
+    if (e.pointerType === 'mouse' && e.button !== 0) return
+    if (isLocked.value) { revealLockBtn(); return }
+
+    activePointer = e.pointerId
+    pointerKind = e.pointerType
+    const rect = rectOf(e)
+    startX = e.clientX
+    startY = e.clientY
+    startAt = performance.now()
+    startTime = videoEl.value?.currentTime ?? 0
+    startVolume = volume.value
+    startBright = brightness.value
+    dragMode = null
+    boosting = false
+
+    ;(e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId)
+
+    // 长按右半屏 → 临时加速。左半屏留空：那里是「按住不动想看清画面」的常见位置，
+    // 两边都加速会让人分不清自己触发了什么
+    const onRight = (e.clientX - rect.left) / rect.width > 0.5
+    clearTimers()
+    if (onRight) {
+      longPressTimer = setTimeout(() => {
+        if (dragMode) return
+        boosting = true
+        autoTune.setBoost(true)
+        vibrate(15)
+      }, LONG_PRESS_MS)
+    }
+  }
+
+  const onPointerMove = (e: PointerEvent) => {
+    if (activePointer !== e.pointerId) return
+    const rect = rectOf(e)
+    const dx = e.clientX - startX
+    const dy = e.clientY - startY
+
+    if (!dragMode) {
+      if (boosting) return                                   // 加速中不再改判成拖拽
+      if (Math.abs(dx) < MOVE_SLOP && Math.abs(dy) < MOVE_SLOP) return
+      clearTimers()
+      if (Math.abs(dx) > Math.abs(dy)) dragMode = 'seek'
+      // 竖滑只在全屏里开：非全屏时页面还要能上下滚，抢走垂直方向等于把播放器变成滚动黑洞
+      else if (isFullscreen.value) dragMode = (e.clientX - rect.left) / rect.width > 0.5 ? 'volume' : 'light'
+      else return
+    }
+
+    if (dragMode === 'seek') {
+      if (!duration.value) return
+      const span = Math.min(duration.value, SEEK_SPAN_MAX)
+      const delta = (dx / rect.width) * span
+      seekTarget = Math.max(0, Math.min(duration.value, startTime + delta))
+      gestureHud.value = {
+        kind: 'seek',
+        text: `${formatTime(seekTarget)} / ${formatTime(duration.value)}`,
+        delta: fmtDelta(seekTarget - startTime),
+        percent: duration.value ? (seekTarget / duration.value) * 100 : 0,
+      }
+      return
+    }
+
+    // 竖滑：向上为增。用容器高度的 70% 走完 0→100%，全程拖到底又太钝
+    const ratio = -dy / (rect.height * 0.7)
+    if (dragMode === 'volume') {
+      const v = Math.max(0, Math.min(1, startVolume + ratio))
+      volume.value = v
+      if (videoEl.value) {
+        videoEl.value.volume = v
+        // 拖音量时还静着音只会让人以为坏了
+        if (v > 0 && isMuted.value) { isMuted.value = false; videoEl.value.muted = false }
+      }
+      gestureHud.value = { kind: 'volume', text: `${Math.round(v * 100)}%`, percent: v * 100 }
+    } else {
+      const b = Math.max(0.25, Math.min(1.6, startBright + ratio))
+      brightness.value = b
+      // 0.25~1.6 映射成 0~100% 的读数，用户看的是相对亮度不是滤镜系数
+      gestureHud.value = { kind: 'light', text: `${Math.round((b - 0.25) / 1.35 * 100)}%`, percent: (b - 0.25) / 1.35 * 100 }
+    }
+  }
+
+  const onPointerUp = (e: PointerEvent) => {
+    if (activePointer !== e.pointerId) return
+    activePointer = null
+    clearTimers()
+    ;(e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId)
+
+    if (boosting) {                       // 长按结束：只收加速，不算点击
+      boosting = false
+      autoTune.setBoost(false)
+      return
+    }
+    if (dragMode) {
+      if (dragMode === 'seek' && videoEl.value && duration.value) videoEl.value.currentTime = seekTarget
+      dragMode = null
+      gestureHud.value = null
+      return
+    }
+    // 按了很久又没动也没触发加速（比如在左半屏），不当点击处理
+    if (performance.now() - startAt > 700) return
+
+    onTap(e, rectOf(e))
+  }
+
+  const onPointerCancel = () => {
+    activePointer = null
+    clearTimers()
+    if (boosting) { boosting = false; autoTune.setBoost(false) }
+    dragMode = null
+    gestureHud.value = null
+  }
+
+  const onTap = (e: PointerEvent, rect: DOMRect) => {
+    const now = performance.now()
+    const x = (e.clientX - rect.left) / rect.width
+    const isDouble = now - lastTapAt < DOUBLE_TAP_MS && Math.abs(e.clientX - lastTapX) < 60
+    lastTapAt = isDouble ? 0 : now      // 三连击不该被当成「第二次双击」
+    lastTapX = e.clientX
+
+    if (isDouble) {
+      if (singleTapTimer) { clearTimeout(singleTapTimer); singleTapTimer = null }
+      if (x < SIDE_ZONE) { controls.skip(-DOUBLE_TAP_SEEK); flashSide('left'); vibrate(10) }
+      else if (x > 1 - SIDE_ZONE) { controls.skip(DOUBLE_TAP_SEEK); flashSide('right'); vibrate(10) }
+      // 中间：触摸端播放/暂停，鼠标端仍是全屏（桌面双击全屏是几十年的肌肉记忆）
+      else if (pointerKind === 'mouse') void controls.toggleFullscreen()
+      else controls.togglePlay()
+      return
+    }
+
+    // 单击要等双击窗口过完才能确定，否则双击会先闪一下控制栏
+    if (singleTapTimer) clearTimeout(singleTapTimer)
+    singleTapTimer = setTimeout(() => { singleTapTimer = null; toggleControls() }, DOUBLE_TAP_MS)
+  }
+
+  /**
+   * 触摸行为：非全屏时放行竖向滚动（页面还要能翻），全屏时整块吃掉。
+   * 不设 `none` 的话浏览器会把横滑也当成滚动的起手式，pointermove 直接被 pointercancel 掐断。
+   */
+  const touchAction = computed(() => (isFullscreen.value ? 'none' : 'pan-y'))
+
+  /** 锁定时控制栏一律不出；`!isPlaying` 那条常显规则也得让位 */
+  const controlsVisible = computed(() => !isLocked.value && (showControls.value || !isPlaying.value))
+
+  const disposeGestures = () => {
+    clearTimers()
+    if (singleTapTimer) clearTimeout(singleTapTimer)
+    if (seekFlashTimer) clearTimeout(seekFlashTimer)
+    if (lockBtnTimer) clearTimeout(lockBtnTimer)
+    autoTune.setBoost(false)
+  }
+
+  // isLocked 来自 media，controller 已经平铺过一份，这里不再重复导出（键名会撞）
+  return {
+    showLockBtn, toggleLock, revealLockBtn,
+    brightness, gestureHud, seekFlash, touchAction, controlsVisible,
+    onPointerDown, onPointerMove, onPointerUp, onPointerCancel,
+    disposeGestures,
+  }
+}
+
+export type VideoGestures = ReturnType<typeof useVideoGestures>

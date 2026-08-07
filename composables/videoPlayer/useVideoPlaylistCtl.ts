@@ -153,9 +153,29 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
     await playByIndex(from)
   }
 
+  /**
+   * 切集期间的门闩。
+   *
+   * 切一集是**异步**的（按需取址一发请求 + 重建 hls.js，慢站点好几秒），而这期间旧的 `<video>`
+   * 还在原地播、`timeupdate` 照常每秒 4 次地打出来——「跳过片尾」正是挂在 timeupdate 上判的，
+   * 条件（剩余时间 ≤ 阈值）在整个切集过程中一直成立，于是 playNext 被连着调十几次，
+   * 每次都 +1 集。实测安卓上「第 15 集触发跳片尾 → 直接落到第 30 集」，正好是这几秒里跑掉的量。
+   * 用户手速快连点两下「下一集」是同一个问题的轻症版。
+   */
+  let switching = false
+
   const playByIndex = async (index: number) => {
     if (index < 0 || index >= playlist.value.length) return
+    if (switching) return
+    switching = true
+    try {
+      await doPlayByIndex(index)
+    } finally {
+      switching = false
+    }
+  }
 
+  const doPlayByIndex = async (index: number) => {
     saveCurrentProgress()
     currentIndex.value = index
 

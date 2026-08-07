@@ -30,6 +30,7 @@ export function useVideoEvents(deps: VideoEventsDeps) {
   } = media
 
   let isFirstLoad = true
+  let outroFired = false   // 本集是否已触发过「跳过片尾」（每次 loadedmetadata 复位）
   let progressSaveTimer: ReturnType<typeof setTimeout> | null = null
   let delayedPlayTimer: ReturnType<typeof setTimeout> | null = null
   let seekBufferingTimer: ReturnType<typeof setTimeout> | null = null
@@ -82,12 +83,15 @@ export function useVideoEvents(deps: VideoEventsDeps) {
       bufferedPercent.value = (aheadEnd / duration.value) * 100
     }
 
-    // 自动跳过片尾
-    if (skipOutro.value > 0 && duration.value > 0) {
+    // 自动跳过片尾。
+    // 一集只认一次（outroFired）：timeupdate 每秒来四次，而切集是异步的，
+    // 不上这道闩会在等待期间连着调十几次 playNext，一路跳到十几集之后
+    //（playByIndex 里还有一道门闩兜底，两处都留着——这里省掉的是无谓的重复调用）。
+    if (skipOutro.value > 0 && duration.value > 0 && !outroFired) {
       const remaining = duration.value - currentTime.value
       if (remaining > 0 && remaining <= skipOutro.value && playlist.hasNext.value) {
-        console.log('自动跳过片尾，播放下一集')
-        playlist.playNext()
+        outroFired = true
+        void playlist.playNext()
         return
       }
     }
@@ -105,6 +109,7 @@ export function useVideoEvents(deps: VideoEventsDeps) {
     if (!videoEl.value) return
     engine.markDataReceived()
     duration.value = videoEl.value.duration
+    outroFired = false   // 换了一集，片尾闩重新上膛
 
     // HLS 已经通过 hls.js 的 startPosition 直接从目标位置起播，这里不用再 seek 一次
     //（避免多余的 seek 打断刚起播的加载）；非 HLS 没有 startPosition 机制，仍需手动 seek。

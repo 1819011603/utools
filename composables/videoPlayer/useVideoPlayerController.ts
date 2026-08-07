@@ -65,6 +65,8 @@ export function useVideoPlayerController() {
 
   const events = useVideoEvents({ media, engine, conn, playlist })
   const controls = useVideoUiControls({ media, autoTune })
+  // 手势层建在控制层之上：它把「一次指针交互」翻译成控制层已有的动作
+  const gestures = useVideoGestures({ media, controls, autoTune })
 
   // 视频下载（HLS 分片并发 + AES 解密 + ffmpeg 合并 / MP4 直下）
   const download = useVideoDownload({
@@ -249,6 +251,7 @@ export function useVideoPlayerController() {
     engine.destroyHls()
     engine.clearLoadTimeout()
     controls.unbindGlobalKeys()
+    gestures.disposeGestures()
     events.disposeEvents()
     window.removeEventListener('beforeunload', playlist.saveCurrentProgress)
   }
@@ -265,6 +268,7 @@ export function useVideoPlayerController() {
     ...engine,
     ...autoTune,
     ...controls,
+    ...gestures,
     ...events,
     ...download,
     ...query,

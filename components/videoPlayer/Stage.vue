@@ -22,17 +22,26 @@
       </div>
     </template>
 
+    <!--
+      手势全部走 Pointer Events（鼠标/触摸同一套，见 useVideoGestures）：
+      单击唤出控制栏、双击左右 ±5s、长按右侧临时 2x、横滑进度、全屏内竖滑音量/亮度。
+      原来的 @click="togglePlay" 已移除——单击即暂停会让「只想看一眼进度」必然误触。
+    -->
     <div
       ref="playerContainer"
-      class="relative bg-black rounded-lg overflow-hidden group flex items-center justify-center"
+      class="relative bg-black rounded-lg overflow-hidden group flex items-center justify-center select-none"
       :class="[
         { 'cursor-none': isPlaying && !showControls },
         isFullscreen ? 'fixed inset-0 z-50 rounded-none' : '',
       ]"
+      :style="{ touchAction }"
       @mousemove="handleMouseMove"
       @mouseleave="hideControlsDelayed"
-      @click="togglePlay"
-      @dblclick="toggleFullscreen"
+      @pointerdown="onPointerDown"
+      @pointermove="onPointerMove"
+      @pointerup="onPointerUp"
+      @pointercancel="onPointerCancel"
+      @contextmenu.prevent
     >
       <!-- 播放器已移除本地文件，只放网络地址，crossorigin 恒为 anonymous -->
       <video
@@ -40,6 +49,7 @@
         :key="videoKey"
         class="max-w-full max-h-full"
         :class="isFullscreen ? 'w-auto h-full' : 'w-full aspect-video'"
+        :style="{ filter: brightness === 1 ? undefined : `brightness(${brightness})` }"
         crossorigin="anonymous"
         playsinline
         @timeupdate="onTimeUpdate"
@@ -75,17 +85,80 @@
         </div>
       </Transition>
 
+      <!-- 双击 ±5s 的落点反馈：不给这一下反馈的话，跳了 5 秒和「没点到」看起来一模一样 -->
+      <Transition name="fade">
+        <div
+          v-if="seekFlash"
+          :key="seekFlash.key"
+          class="absolute inset-y-0 w-[30%] flex items-center justify-center pointer-events-none bg-white/10"
+          :class="seekFlash.side === 'left' ? 'left-0 rounded-r-full' : 'right-0 rounded-l-full'"
+        >
+          <div class="flex flex-col items-center text-white">
+            <UIcon
+              :name="seekFlash.side === 'left' ? 'i-heroicons-backward-solid' : 'i-heroicons-forward-solid'"
+              class="w-8 h-8"
+            />
+            <span class="text-sm font-medium">5 秒</span>
+          </div>
+        </div>
+      </Transition>
+
+      <!-- 长按加速中的常驻提示：不显示的话松手前用户不知道自己触发了什么 -->
+      <Transition name="fade">
+        <div v-if="boostActive" class="absolute top-4 left-1/2 -translate-x-1/2 pointer-events-none">
+          <div class="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black/70 text-white text-sm font-medium">
+            <UIcon name="i-heroicons-forward-solid" class="w-4 h-4 animate-pulse" />
+            {{ boostRate }}x 快进中
+          </div>
+        </div>
+      </Transition>
+
+      <!-- 滑动手势的中央读数（进度/音量/亮度共用一张） -->
+      <Transition name="fade">
+        <div v-if="gestureHud" class="absolute inset-0 flex items-center justify-center pointer-events-none">
+          <div class="px-4 py-3 rounded-xl bg-black/70 text-white min-w-[140px] flex flex-col items-center gap-2">
+            <div class="flex items-center gap-2">
+              <UIcon
+                :name="gestureHud.kind === 'seek' ? 'i-heroicons-arrows-right-left'
+                  : gestureHud.kind === 'volume' ? volumeIcon : 'i-heroicons-sun'"
+                class="w-5 h-5"
+              />
+              <span class="font-mono text-sm">{{ gestureHud.text }}</span>
+              <span v-if="gestureHud.delta" class="text-violet-300 text-sm font-mono">{{ gestureHud.delta }}</span>
+            </div>
+            <div class="w-32 h-1 bg-white/25 rounded-full overflow-hidden">
+              <div class="h-full bg-violet-400" :style="{ width: (gestureHud.percent ?? 0) + '%' }" />
+            </div>
+          </div>
+        </div>
+      </Transition>
+
+      <!-- 锁定按钮：锁上后它是唯一还能点的东西，所以点画面任意处都会让它露 3 秒 -->
+      <Transition name="fade">
+        <button
+          v-if="isLocked ? showLockBtn : (showControls || !isPlaying)"
+          data-no-gesture
+          class="absolute left-3 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-black/55 text-white
+                 flex items-center justify-center hover:bg-black/75 transition-colors"
+          :title="isLocked ? '解锁' : '锁定屏幕（屏蔽手势与控制栏）'"
+          @click="toggleLock"
+        >
+          <UIcon :name="isLocked ? 'i-heroicons-lock-closed' : 'i-heroicons-lock-open'" class="w-5 h-5" />
+        </button>
+      </Transition>
+
       <Transition name="slide-up">
         <div
-          v-show="showControls || !isPlaying"
+          v-show="controlsVisible"
+          data-no-gesture
           class="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-4 pt-12"
           @click.stop
         >
           <!-- 进度条 -->
           <div
             ref="progressBar"
-            class="relative h-1.5 bg-white/30 rounded-full cursor-pointer group/progress mb-3"
-            @mousedown="startSeek"
+            class="relative h-1.5 bg-white/30 rounded-full cursor-pointer group/progress mb-3 touch-none"
+            @pointerdown="startSeek"
             @mousemove="updateHoverTime"
             @mouseleave="hoverTime = null"
           >
@@ -235,6 +308,9 @@ const {
   currentVideoName, volumeIcon, supportsPiP, canDownload,
   togglePlay, skip, startSeek, updateHoverTime, setVolume, toggleMute, setPlaybackRate,
   toggleFullscreen, togglePiP, handleMouseMove, hideControlsDelayed,
+  // 手势层（useVideoGestures）
+  isLocked, showLockBtn, toggleLock, brightness, gestureHud, seekFlash, touchAction, controlsVisible,
+  onPointerDown, onPointerMove, onPointerUp, onPointerCancel, boostActive, boostRate,
   playPrev, playNext,
   isDownloading, downloadProgress, downloadVideo, cancelDownload,
   onTimeUpdate, onLoadedMetadata, onLoadedData, onVideoEnded, onWaiting, onCanPlay,

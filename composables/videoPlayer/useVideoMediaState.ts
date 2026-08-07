@@ -45,6 +45,10 @@ export function useVideoMediaState() {
   const showSpeedMenu = ref(false)
   const showAdvancedProxy = ref(false)  // 展开手动连接设置（默认隐藏，全自动）
   const autoFullscreen = ref(true)
+  // 锁定屏幕：屏蔽手势、控制栏与快捷键（横屏握持时误触太容易）。
+  // 放在裸状态里而不是手势模块内，是因为快捷键在 controls 里，而 controls 是手势层的**下游**——
+  // 反过来 import 就成环了。
+  const isLocked = ref(false)
   const autoBestRate = ref(true)        // 自动最佳倍速：在 [1, 所选倍速] 内按带宽自动取值
 
   // ── 进度条 ──
@@ -79,7 +83,7 @@ export function useVideoMediaState() {
     videoUrl, videoUrlInput, isVideoLoaded, isHls, errorMessage, isLoading, isBuffering, isResolvingUrl, resolveStage,
     videoEl, playerContainer, progressBar, speedMenuRef,
     isPlaying, currentTime, duration, volume, isMuted, playbackRate, desiredRate, videoKey,
-    isFullscreen, showControls, showPlayIcon, showSpeedMenu, showAdvancedProxy, autoFullscreen, autoBestRate,
+    isFullscreen, showControls, showPlayIcon, showSpeedMenu, showAdvancedProxy, autoFullscreen, autoBestRate, isLocked,
     progressPercent, bufferedPercent, seekPreviewTime, seekPreviewPercent, isSeeking, hoverTime, hoverPercent,
     skipIntro, skipOutro, hasSkippedIntro, savedProgress, isRestoringFromSaved,
     hlsConfig, hlsStats, playbackDiag,

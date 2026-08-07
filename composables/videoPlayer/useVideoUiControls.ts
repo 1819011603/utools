@@ -69,26 +69,32 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     hoverTime.value = p * duration.value
   }
 
-  /** 开始拖动进度条。单击也走这条路（mouseup 时统一 seek），避免单击+拖拽两套逻辑双重 seek */
-  const startSeek = (e: MouseEvent) => {
+  /**
+   * 开始拖动进度条。单击也走这条路（抬手时统一 seek），避免单击+拖拽两套逻辑双重 seek。
+   * 用 pointer 事件而不是 mouse：手指拖进度条时浏览器不保证补发 mousemove，
+   * 只有触摸端「点一下能跳、拖不动」这一种表现。
+   */
+  const startSeek = (e: PointerEvent) => {
     if (!progressBar.value || !videoEl.value || !duration.value) return
 
     isSeeking.value = true
     updateSeekPreview(e)
 
-    const onMove = (ev: MouseEvent) => updateSeekPreview(ev)
-    const onUp = (ev: MouseEvent) => {
+    const onMove = (ev: PointerEvent) => updateSeekPreview(ev)
+    const onUp = (ev: PointerEvent) => {
       isSeeking.value = false
       seekPreviewTime.value = null
       if (progressBar.value && videoEl.value) {
         videoEl.value.currentTime = percentAt(ev) * duration.value
       }
-      document.removeEventListener('mousemove', onMove)
-      document.removeEventListener('mouseup', onUp)
+      document.removeEventListener('pointermove', onMove)
+      document.removeEventListener('pointerup', onUp)
+      document.removeEventListener('pointercancel', onUp)
     }
 
-    document.addEventListener('mousemove', onMove)
-    document.addEventListener('mouseup', onUp)
+    document.addEventListener('pointermove', onMove)
+    document.addEventListener('pointerup', onUp)
+    document.addEventListener('pointercancel', onUp)
   }
 
   // ── 音量 / 倍速 ──
@@ -120,14 +126,36 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
 
   // ── 全屏 / 画中画 ──
 
-  const toggleFullscreen = () => {
+  /**
+   * 进全屏时在手机上顺手锁横屏——竖屏全屏只是把 16:9 画面钉在屏幕中间，
+   * 上下两条黑边比不全屏还大，用户下一步动作必然是自己转手机。
+   * `orientation.lock` 只在真全屏的文档里被允许，所以必须等 requestFullscreen 兑现之后再调；
+   * 桌面浏览器与 iOS Safari 上它直接 reject，吞掉即可（不是错误路径，只是没这能力）。
+   */
+  const lockLandscape = async () => {
+    const so = screen.orientation as ScreenOrientation & { lock?: (o: string) => Promise<void> }
+    if (!so?.lock) return
+    // 只在窄屏（手机/平板）上锁：桌面窗口再窄也不该被强行转向
+    if (Math.min(screen.width, screen.height) > 900) return
+    try { await so.lock('landscape') } catch { /* 不支持或被拒，保持原样 */ }
+  }
+
+  const toggleFullscreen = async () => {
     if (!playerContainer.value) return
     if (document.fullscreenElement) {
-      document.exitFullscreen()
+      await document.exitFullscreen().catch(() => {})
+      try { screen.orientation?.unlock?.() } catch { /* 同上 */ }
       isFullscreen.value = false
-    } else {
-      playerContainer.value.requestFullscreen()
+      return
+    }
+    try {
+      await playerContainer.value.requestFullscreen()
       isFullscreen.value = true
+      await lockLandscape()
+    } catch {
+      // iOS Safari 不给容器全屏，只有 <video> 自己的原生全屏（自带横屏与系统控制条）
+      const v = videoEl.value as (HTMLVideoElement & { webkitEnterFullscreen?: () => void }) | undefined
+      if (v?.webkitEnterFullscreen) v.webkitEnterFullscreen()
     }
   }
 
@@ -141,7 +169,13 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     }
   }
 
-  const handleFullscreenChange = () => { isFullscreen.value = !!document.fullscreenElement }
+  // 用户按 Esc / 系统手势退出全屏时不会走 toggleFullscreen，横屏锁要在这里解
+  const handleFullscreenChange = () => {
+    isFullscreen.value = !!document.fullscreenElement
+    if (!isFullscreen.value) {
+      try { screen.orientation?.unlock?.() } catch { /* 桌面没有这能力 */ }
+    }
+  }
 
   // ── 控制栏显隐 ──
 
@@ -165,6 +199,8 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   // ── 快捷键 ──
   const handleKeydown = (e: KeyboardEvent) => {
     if (!isVideoLoaded.value) return
+    // 锁定是「什么都别动」，快捷键跟着一起停，否则锁了还能空格暂停会显得开关是坏的
+    if (media.isLocked.value) return
     // 忽略输入框、文本域中的按键
     const tag = (e.target as HTMLElement).tagName
     if (tag === 'INPUT' || tag === 'TEXTAREA') return
