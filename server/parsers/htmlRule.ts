@@ -6,8 +6,9 @@
  */
 import type { HtmlSourceTask, ParseRule, ParsedEpisode, ParsedLine, ParseResult } from '../../composables/videoParseRules'
 import type { ParserContext, SiteParser } from './types'
-import { absolutize, decodeEntities, decodeMaccmsUrl, parseTitle, pool } from './utils'
+import { absolutize, decodeEntities, decodeMaccmsUrl, decodeScannedBase64, hostOf, parseTitle, pool } from './utils'
 import { cdndefendChallenge } from './challenges/cdndefend'
+import { isM3u8Url } from '../../utils/mediaUrl'
 
 // 单次请求最多解析多少集。CF 免费版单请求 50 subrequest 硬顶，留出主页面那一发和余量，取 40。
 // 超出的不丢弃也不截断：用 offset 分批，前端拿到 remaining>0 就继续拉下一批，
@@ -22,12 +23,25 @@ const playerOriginCache = new Map<string, { origin: string; at: number }>()
 const PLAYER_ORIGIN_TTL = 30 * 60 * 1000
 
 /**
- * 从站点自己的播放器配置里取防盗链域名（见 ParseRule.playerOrigin）。
- * 取不到一律返回空串让上层退回写死的值——这只是个候选值，为它中断整个解析不值得。
+ * 抠出来的播放器地址 → origin。抠不到、或不是个合法地址一律空串：
+ * 这只是个候选值，为它中断整个解析不值得。（配置是 JSON，`/` 都是 `\/` 转义过的）
+ */
+function originOf(raw?: string): string {
+  try { return new URL(decodeMaccmsUrl(raw ?? '')).origin } catch { return '' }
+}
+
+/**
+ * 取防盗链域名（见 ParseRule.playerOrigin）。两种来源：
+ *   · 给了 `url` → 去站点自己的播放器配置文件里找，按 host 缓存
+ *   · 没给 `url` → 域名就写在播放页上，直接对本页 HTML 跑正则
  */
 async function resolvePlayerOrigin(rule: ParseRule, ctx: ParserContext, html: string): Promise<string> {
   const cfg = rule.playerOrigin
-  if (!cfg?.url || !cfg.re) return ''
+  if (!cfg?.re) return ''
+
+  // 写在播放页上的那种（实测 kpkuang 的 data-pars）：不发请求，也**绝不能按 host 缓存**——
+  // 每条线路的解析播放器不同，缓存会把上一条线路的域名喂给下一条，表现是切线路后开始 403
+  if (!cfg.url) return originOf(html.match(new RegExp(cfg.re, 'i'))?.[1])
 
   const key = ctx.host + cfg.url
   const hit = playerOriginCache.get(key)
@@ -40,8 +54,7 @@ async function resolvePlayerOrigin(rule: ParseRule, ctx: ParserContext, html: st
     const from = cfg.fromRe ? html.match(new RegExp(cfg.fromRe, 'i'))?.[1] : ''
     const scoped = from ? res.body.match(new RegExp(cfg.re.replace('%FROM%', from), 'i')) : null
     const m = scoped ?? res.body.match(new RegExp(cfg.re.replace('"%FROM%"', '"[^"]+"'), 'i'))
-    // 配置是 JSON，地址里的 `/` 都是 `\/` 转义过的
-    const origin = new URL(decodeMaccmsUrl(m?.[1] ?? '')).origin
+    const origin = originOf(m?.[1])
     playerOriginCache.set(key, { origin, at: Date.now() })
     return origin
   } catch {
@@ -89,15 +102,42 @@ function parseLines(html: string, rule: ParseRule, pageUrl: string): { lines: Pa
   return { lines, activeIndex }
 }
 
-function parseSource(html: string, rule: ParseRule): string | undefined {
-  if (!rule.sourceRe) return undefined
+/** 「像不像能直接送进播放器的媒体地址」。isM3u8Url 只答 HLS，直链 mp4 之类也得放过 */
+const DIRECT_MEDIA_EXT = /\.(mp4|m4v|mkv|mov|webm|flv|ts|mp3|m4a|aac|flac)(?:$|[?#])/i
+const isPlayableUrl = (url: string) => isM3u8Url(url) || DIRECT_MEDIA_EXT.test(url)
+
+/**
+ * 抠这一集的播放地址。取不到时连**为什么**一起带出来——
+ * 「页面把地址留空」和「抠到了但那是第三方站点的播放页」是两回事，
+ * 界面上都说成前者的话，用户会一直以为是我们的正则写坏了（实测被问过）。
+ */
+interface SourceProbe {
+  url?: string
+  reason?: string
+}
+
+function probeSource(html: string, rule: ParseRule): SourceProbe {
+  if (!rule.sourceRe) return {}
   const raw = html.match(new RegExp(rule.sourceRe, 'i'))?.[1]
-  if (!raw) return undefined
-  const url = rule.sourceDecode === 'maccms' ? decodeMaccmsUrl(raw) : raw
+  if (!raw) return {}
+  const url = rule.sourceDecode === 'maccms'
+    ? decodeMaccmsUrl(raw)
+    : rule.sourceDecode === 'base64-scan'
+      ? decodeScannedBase64(raw)
+      : raw
   // 解码没解到位就当没取到：把 base64 残串当地址喂给播放器，
   // 表现是「解析成功但一集都播不了」，比明确报错难查得多
-  return /^(https?:|\/\/)/i.test(url) ? url : undefined
+  if (!/^(https?:|\/\/)/i.test(url)) return {}
+  // 有些线路给的是第三方站点的**播放页**而不是直链（见 ParseRule.sourceMediaOnly）。
+  // 它是个合法 http 地址，不在这筛掉就会一路喂到播放器里黑屏
+  if (rule.sourceMediaOnly && !isPlayableUrl(url)) {
+    const host = hostOf(url) || url
+    return { reason: `这条线路给的不是视频地址，而是第三方站点的播放页（${host}），要靠站点自带的解析服务在浏览器里现算才变得出真实地址，我们拿不到。换一条给直链的线路即可。` }
+  }
+  return { url }
 }
+
+const parseSource = (html: string, rule: ParseRule) => probeSource(html, rule).url
 
 export function createHtmlParser(rule: ParseRule): SiteParser {
   return {
@@ -108,7 +148,8 @@ export function createHtmlParser(rule: ParseRule): SiteParser {
 
     async parse(ctx: ParserContext, html: string): Promise<ParseResult> {
       const { lines, activeIndex } = parseLines(html, rule, ctx.pageUrl)
-      const currentVideoUrl = parseSource(html, rule)
+      const source = probeSource(html, rule)
+      const currentVideoUrl = source.url
 
       if (!currentVideoUrl && !lines.length) {
         throw createError({ statusCode: 502, statusMessage: '页面结构不匹配，规则需要更新' })
@@ -144,6 +185,8 @@ export function createHtmlParser(rule: ParseRule): SiteParser {
       let batchTo = offset
       let remaining = 0
       let lineUnsupported = false
+      // 不给直链的**具体原因**，界面上要区分「页面把地址留空」和「给的是第三方播放页」
+      let unsupportedReason: string | undefined
 
       // ── 按需取址：解析阶段一集都不抓，只交一张作业单出去 ──
       // 逐集抓页是一集一个子请求，长剧要分多批、上百个请求，慢且容易被源站限流，
@@ -160,14 +203,23 @@ export function createHtmlParser(rule: ParseRule): SiteParser {
           const probe = target.episodes[0]
           try {
             const sub = await ctx.fetchPage(probe.pageUrl, ctx.cookie)
-            const src = parseSource(sub.body, rule)
-            if (src) probe.videoUrl = src
-            else lineUnsupported = true
+            const s = probeSource(sub.body, rule)
+            if (s.url) probe.videoUrl = s.url
+            else { lineUnsupported = true; unsupportedReason = s.reason }
+            // 防盗链域名可能是**每条线路一份**（实测 kpkuang：睿映线认 soul.flixfiend.top、
+            // 电影天堂线认 vip.dyttzyplay.com）。而 base 里那份是从 ctx.pageUrl 抠的，
+            // 它属于**另一条**线路——不按探测页重算一遍就会把别人的域名带出去，第一集直接 403
+            const lineOrigin = await resolvePlayerOrigin(rule, ctx, sub.body)
+            if (lineOrigin) {
+              base.origin = lineOrigin
+              base.referer = lineOrigin + '/'
+            }
           } catch {
             // 探测失败不等于线路不可用（可能只是这一发超时），放行让播放时再试
           }
         } else if (!currentVideoUrl) {
           lineUnsupported = true
+          unsupportedReason = source.reason
         }
 
         const clientTask: HtmlSourceTask = {
@@ -183,6 +235,7 @@ export function createHtmlParser(rule: ParseRule): SiteParser {
           batchTo: target.episodes.length,
           remaining: 0,
           lineUnsupported: lineUnsupported || undefined,
+          lineUnsupportedReason: unsupportedReason,
           clientTask: lineUnsupported ? undefined : clientTask,
         }
       }
@@ -197,9 +250,9 @@ export function createHtmlParser(rule: ParseRule): SiteParser {
           try {
             const sub = await ctx.fetchPage(ep.pageUrl, ctx.cookie)
             if (this.challenge?.detect(sub.body)) { ep.error = '需要重新校验'; return }
-            const src = parseSource(sub.body, rule)
-            if (src) ep.videoUrl = src
-            else ep.error = '该线路未给出直链'
+            const s = probeSource(sub.body, rule)
+            if (s.url) ep.videoUrl = s.url
+            else { ep.error = '该线路未给出直链'; unsupportedReason = unsupportedReason ?? s.reason }
           } catch (e) {
             // 单集失败不影响整体：标记后继续
             ep.error = (e as Error).message || '请求失败'
@@ -240,6 +293,7 @@ export function createHtmlParser(rule: ParseRule): SiteParser {
         batchTo,
         remaining,
         lineUnsupported: lineUnsupported || undefined,
+        lineUnsupportedReason: unsupportedReason,
       }
     },
   }

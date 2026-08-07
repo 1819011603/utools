@@ -75,6 +75,28 @@ export function decodeMaccmsUrl(raw: string): string {
   return s
 }
 
+/**
+ * 「随机前缀 + base64」的地址解码（实测 kpkuang 播放器 iframe 的 `data-play`）。
+ *
+ * 站点在 base64 串前塞了几个随机字符（实测恒为 3 个，但每次刷新值都不同），
+ * 直接 atob 只会得到一堆乱码。这里**不写死剥 3 个**，而是从偏移 0 逐个往后试到
+ * 解出 http 开头为止——前缀长度对站点来说改成 2 或 4 的成本是 0，写死就得跟着改代码。
+ */
+export function decodeScannedBase64(raw: string): string {
+  const s = (raw || '').trim()
+  for (let off = 0; off < Math.min(s.length, 8); off++) {
+    // atob 对长度不是 4 倍数的串会抛，先削掉原有 padding 再按当前长度补齐
+    const body = s.slice(off).replace(/=+$/, '')
+    try {
+      const out = atob(body + '='.repeat((4 - (body.length % 4)) % 4))
+      if (/^https?:\/\//i.test(out)) return out
+    } catch {
+      // 这个偏移不是 base64 的起点，继续往后挪
+    }
+  }
+  return s
+}
+
 /** pattern 与 URL 是否匹配。`/xxx/` 视为正则（匹配整个 URL），否则按 host 子串。 */
 export function patternMatches(pattern: string, url: string, host: string): boolean {
   if (!pattern) return false

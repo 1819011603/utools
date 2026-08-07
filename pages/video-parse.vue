@@ -167,7 +167,7 @@
           variant="soft"
           icon="i-heroicons-no-symbol"
           :title="`「${currentLine?.name}」线路不提供直链`"
-          description="这类线路的页面把播放地址留空，改由播放器运行时另行获取，服务端拿不到。换一条线路即可。"
+          :description="result.lineUnsupportedReason || '这类线路的页面把播放地址留空，改由播放器运行时另行获取，服务端拿不到。换一条线路即可。'"
         />
 
         <UAlert

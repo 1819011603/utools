@@ -12,6 +12,13 @@
 /** 短于此值的停顿一律不算卡顿：肉眼基本无感，计进去反而污染自愈判据（见 endStall） */
 const MIN_STALL_MS = 500
 
+/**
+ * 停顿中「往前跳不超过这么多秒」判定为恢复性微跳，不是用户跳转（见 onSeeking）。
+ * hls.js 的 gap controller 卡住时会 nudge（currentTime += 0.1），
+ * useVideoEvents.onWaiting 还会主动跳过 <3s 的缓冲空洞，两者都走 seeking 事件。
+ */
+const NUDGE_MAX_SEC = 3.5
+
 export function useStallTracker(getVideo: () => HTMLVideoElement | undefined) {
   const isStalling = ref(false)
   const stallCount = ref(0)      // 本会话累计卡顿次数
@@ -23,21 +30,27 @@ export function useStallTracker(getVideo: () => HTMLVideoElement | undefined) {
 
   const stalls: { at: number; ms: number }[] = []  // 明细，用于窗口统计
   let stallStart = 0             // 本次停顿开始时刻
+  let stallPos = 0               // 本次停顿时的播放位置（用于分辨恢复性微跳 vs 用户跳转）
   let smoothSince = 0            // 连续流畅起点（performance.now）；卡顿时为 0
   let smoothBefore = 0           // 进入停顿前的 smoothSince，微停顿结束后原样还回去
   let pausedAt = 0               // 手动暂停时刻（0=没在暂停）；恢复时把这段时长平移掉而非清零
   let lastCurrentTime = 0        // 上次记录的播放位置（timeupdate 兜底判前进）
+  let nudging = false            // 正在处理一次恢复性微跳，随之而来的那个 timeupdate 不算恢复
+  let tickPos = -1               // 上一拍的播放位置（-1=没有可用基准），位置采样兜底用
+  let tickAt = 0                 // 上一拍的时刻，停顿起点回填用
   let bound: HTMLVideoElement | null = null
 
   const now = () => performance.now()
 
-  const beginStall = () => {
+  // at：停顿起点。位置采样兜底发现的停顿其实从上一拍就开始了，要回填而不是记成现在（见 detectByPosition）
+  const beginStall = (at = now()) => {
     const v = getVideo()
     if (!v || v.paused || v.seeking || v.ended) return   // 暂停/跳转/播完引起的等待不算卡顿
     if (isStalling.value) return
     isStalling.value = true
-    stallStart = now()
-    lastStallAt.value = stallStart
+    stallStart = at
+    stallPos = v.currentTime
+    lastStallAt.value = at
     smoothBefore = smoothSince
     smoothSince = 0
   }
@@ -78,22 +91,43 @@ export function useStallTracker(getVideo: () => HTMLVideoElement | undefined) {
     isStalling.value = false
     smoothSince = 0
     pausedAt = 0
+    tickPos = -1
+    nudging = false
   }
 
   const onWaiting = () => beginStall()
   const onStalled = () => beginStall()
   const onPlaying = () => endStall()
-  const onSeeking = () => cancelStall()
+  // 停顿中的「往前微跳」是**恢复动作**而非用户跳转：hls.js 卡住时会 nudge 播放头，
+  // useVideoEvents.onWaiting 还会主动跳过缓冲空洞。一律按 seek 取消的话，正在发生的这次卡顿
+  // 会被整段抹掉——实测卡到肉眼可见，面板仍是「0 次 / 0.0s」。这种跳不结束停顿，
+  // 等真正播起来（playing / timeupdate 前进）才收尾，长停顿也不会被切成好几次。
+  const onSeeking = () => {
+    const v = getVideo()
+    if (isStalling.value && v) {
+      const delta = v.currentTime - stallPos
+      if (delta >= 0 && delta <= NUDGE_MAX_SEC) { tickPos = -1; nudging = true; return }
+    }
+    cancelStall()
+  }
   const onSeeked = () => {
+    const v = getVideo()
+    lastCurrentTime = v?.currentTime ?? 0
+    tickPos = -1                       // 位置跳了，下一拍重新取基准
+    nudging = false
+    if (isStalling.value) return       // 恢复性微跳：停顿还没结束，别把连续流畅的表打开
     smoothSince = now()
-    pausedAt = getVideo()?.paused ? now() : 0   // 暂停中拖进度条：开了表但立刻冻住
-    lastCurrentTime = getVideo()?.currentTime ?? 0
+    pausedAt = v?.paused ? now() : 0   // 暂停中拖进度条：开了表但立刻冻住
   }
   // 暂停只是把表冻住，不清零（清零的话每按一次暂停就白攒一遍连续流畅）
   const onPause = () => { if (smoothSince && !pausedAt) pausedAt = now() }
   const onTimeUpdate = () => {
     const v = getVideo()
     if (!v) return
+    // 恢复性微跳自己会带出一个 timeupdate（规范里 timeupdate 先于 seeked 触发），
+    // 位置确实前进了 0.1s，但画面并没有播起来。放过去会把一次长卡顿从中间截断，
+    // 切成若干段不到 0.5s 的碎片，再被 MIN_STALL_MS 逐个滤掉——面板又回到「0 次」。
+    if (nudging) { nudging = false; lastCurrentTime = v.currentTime; return }
     // 播放位置在前进 → 若还标着卡顿说明已恢复（playing 可能没触发），补一次结束
     if (v.currentTime > lastCurrentTime + 0.01) {
       if (isStalling.value) endStall()
@@ -124,6 +158,8 @@ export function useStallTracker(getVideo: () => HTMLVideoElement | undefined) {
     for (const [ev, fn] of EVENTS) v.addEventListener(ev, fn)
     smoothSince = v.paused ? 0 : now()   // 还没起播就先不计时，等 playing/timeupdate 开表
     pausedAt = 0
+    nudging = false
+    tickPos = -1                         // 换了元素，位置基准作废
     lastCurrentTime = v.currentTime
   }
 
@@ -141,9 +177,12 @@ export function useStallTracker(getVideo: () => HTMLVideoElement | undefined) {
     lastStallAt.value = 0
     stalls.length = 0
     stallStart = 0
+    stallPos = 0
     smoothSince = 0
     smoothBefore = 0
     pausedAt = 0
+    nudging = false
+    tickPos = -1
     smoothSecs.value = 0
     lastCurrentTime = getVideo()?.currentTime ?? 0
   }
@@ -162,9 +201,33 @@ export function useStallTracker(getVideo: () => HTMLVideoElement | undefined) {
     return ((pausedAt || now()) - smoothSince) / 1000
   }
 
-  /** 心跳每秒调：改绑（元素可能刚被重建）+ 刷新响应式读数 */
+  // ── 位置采样兜底 ──
+  // 只认 waiting/stalled 事件是不够的：空洞、解码停顿、事件在换流前后丢失都会让停顿无人发现，
+  // 而用户眼里的卡顿就是「画面不动」。每拍比一次播放头，一秒没前进就按卡顿记。
+  // 暂停/跳转/播完/倍速 0 全部排除——那些不是卡顿（手动暂停照旧不计，见 onPause）。
+  const detectByPosition = () => {
+    const v = getVideo()
+    const t = now()
+    if (!v || v.paused || v.seeking || v.ended || v.playbackRate <= 0 || !v.duration) {
+      tickPos = -1
+      tickAt = t
+      return
+    }
+    if (tickPos >= 0) {
+      if (v.currentTime > tickPos + 0.01) {
+        if (isStalling.value) endStall()
+      } else {
+        beginStall(tickAt)   // 停顿从上一拍就开始了，起点回填，否则每次都少记 1 秒
+      }
+    }
+    tickPos = v.currentTime
+    tickAt = t
+  }
+
+  /** 心跳每秒调：改绑（元素可能刚被重建）+ 位置采样兜底 + 刷新响应式读数 */
   const tick = () => {
     bind()
+    detectByPosition()
     smoothSecs.value = Math.round(getSmoothSecs())
   }
 

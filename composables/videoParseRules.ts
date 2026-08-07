@@ -31,8 +31,21 @@ export interface ParseRule {
    * 'maccms'：苹果 CMS（`player_aaaa`）系站点的地址按 `encrypt` 字段有三种形态——
    * 明文 / percent / base64 套 percent。解码器自适应解到 http 开头为止，**不读 encrypt 值**：
    * 同一站点不同线路的 encrypt 可以不同（实测 ylsp=0、netflixgc=2），按字段写死会漏。
+   *
+   * 'base64-scan'：base64 前面塞了几个随机字符（实测 kpkuang 的 `data-play` 恒为 3 个、
+   * 每次刷新都变）。逐个偏移试到解出 http 开头为止，不写死前缀长度。
    */
-  sourceDecode?: 'maccms'
+  sourceDecode?: 'maccms' | 'base64-scan'
+
+  /**
+   * 只接受媒体地址（m3u8 / mp4 之类），抠出来的是**网页地址**就当这条线路没给直链。
+   *
+   * 由来：有些站点的部分线路给的是第三方站点的播放页（实测 kpkuang 的芒果线给
+   * `www.mgtv.com/b/…`、超清 AB 线给 `abyssplayer.com/…`），要它自家的解析服务才变得出
+   * 视频，我们拿不到。这类地址是合法 http 地址，不筛掉就会一路喂到播放器里黑屏，
+   * 而报错信息只会是「加载失败」——不如当 lineUnsupported 明确报出来。
+   */
+  sourceMediaOnly?: boolean
 
   /**
    * 线路标签。捕获组约定：
@@ -90,8 +103,14 @@ export interface ParseRule {
    * 取到的优先于 origin/referer，取不到就退回它们（配置文件 404 之类）。
    */
   playerOrigin?: {
-    /** 配置文件地址，相对站点根 */
-    url: string
+    /**
+     * 配置文件地址，相对站点根。
+     *
+     * **留空 = 域名就写在播放页上**，直接对当前页的 HTML 跑 `re`，不发请求、也不按 host 缓存
+     * （实测 kpkuang 的 `data-pars`：每条线路的解析播放器不同，按 host 缓存会把上一条线路的
+     * 域名喂给下一条）。这种情况下 `fromRe` 无意义。
+     */
+    url?: string
     /** 从配置里抠播放器地址，取第 1 个捕获组；`%FROM%` 会被替换成当前线路的标识 */
     re: string
     /** 从播放页抠当前线路的标识（喂给上面的 `%FROM%`）。抠不到就退回配置里第一条 */
@@ -173,6 +192,36 @@ export const BUILTIN_PARSE_RULES: ParseRule[] = [
     // 配置文件取不到时的兜底（实测值，2026-08）
     referer: 'https://cjbfq.netflixgc.tv',
     origin: 'https://cjbfq.netflixgc.tv',
+    lazy: true,
+  },
+  {
+    id: 'kpkuang',
+    name: '看片狂人 (kpkuang)',
+    pattern: '/kpkuang\\d*\\.(org|com|net|cc|tv)/',
+    homepage: 'https://www.kpkuang.org/',
+    // 不是 player_aaaa 那一套：地址在播放器 iframe 的 data-play 上，
+    // 3 个随机字符 + base64（见 decodeScannedBase64）
+    sourceRe: 'data-play="([^"]+)"',
+    sourceDecode: 'base64-scan',
+    // 26 条线路里有几条给的是第三方站点的播放页而非直链，筛掉当「未给出直链」，见 sourceMediaOnly
+    sourceMediaOnly: true,
+    // active 标记在外层 <li> 上（uk-active），不在 <a> 上，所以捕获的是 li 的 class
+    lineRe: '<li class="(fed-drop-btns[^"]*)"[^>]*>\\s*<a[^>]*class="[^"]*line-select[^"]*"[^>]*data-linename="([^"]*)"',
+    activeFlagRe: '\\buk-active\\b',
+    // 必须从 fed-play-item 起锚：页面上另有两个空的 `<ul class="fed-part-rows">`
+    // （一个在选集区之前、一个在之后），直接匹配这个 ul 会多出两组、整张表错位一位。
+    // 另外 class 后面不能收在 `"` 上——超清 AB/BY/EV 三条线带了 style 属性（踩过：漏 3 组）
+    episodeGroupRe: '<li class="fed-play-item[^"]*">[\\s\\S]*?<ul class="fed-part-rows"[^>]*>([\\s\\S]*?)</ul>',
+    episodeRe: '<a class="fed-btns-info[^"]*"[^>]*href="([^"]+)"[^>]*>\\s*([^<]*?)\\s*</a>',
+    // title 是「《剧名》(年份) - 在线播放页面 - 当前播放:N - 线路:X - 站名」
+    titleRe: '<title>[^<]*《([^》]+)》',
+    // 防盗链域名**每条线路都不一样**，而且就写在播放页的 data-pars 上（那是这条线路用的
+    // 解析播放器前缀）：睿映线认 soul.flixfiend.top、电影天堂线认 vip.dyttzyplay.com、
+    // 芒果线认 jx.xmflv.com。所以不给 url —— 现抠当前页，也不按 host 缓存
+    playerOrigin: {
+      re: 'data-pars="(https?:[^"]*)"',
+    },
+    // 实测 26 条线路、最多 71 集
     lazy: true,
   },
 ]
@@ -398,7 +447,15 @@ export interface ParseResult {
   batchFrom: number
   batchTo: number
   remaining: number
-  lineUnsupported?: boolean  // 该线路页面不给直链（src 渲染成空串），整条线路都取不到
+  lineUnsupported?: boolean  // 该线路页面不给直链，整条线路都取不到
+  /**
+   * 不给直链的**具体原因**，界面上直接展示。留空则用「页面把地址留空」这个默认说法。
+   *
+   * 两种失败长得不一样：ncat 的 4K 线是 src 渲染成空串；kpkuang 的「爱奇艺-VIP解析」
+   * 抠到的是 `www.iqiyi.com/v_…` 这类第三方播放页。都说成前者的话，
+   * 用户只会以为是我们的正则写坏了（实测被问过）。
+   */
+  lineUnsupportedReason?: string
   referer?: string
   /** 防盗链认的 Origin 与播放页域名不同时，由规则显式给出（见 ParseRule.origin） */
   origin?: string
