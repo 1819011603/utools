@@ -36,7 +36,9 @@
       "Bash(node cdp-check.js 'http://localhost:3000/video-player?parseUrl=https%3A%2F%2Fwww.ylsp.lv%2Fplay%2F78312-2-1%2F&line=0&lineName=%E5%A4%A7%E9%99%860%E7%BA%BF&index=0&ep=10' 30000)",
       "Bash(node cdp-check.js 'http://localhost:3000/video-player?parseUrl=https%3A%2F%2Fwww.ylsp.lv%2Fplay%2F78312-2-1%2F&line=0&lineName=%E5%A4%A7%E9%99%860%E7%BA%BF&index=0&ep=%E7%AC%AC10%E9%9B%86' 26000)",
       "Bash(node cdp-check.js 'http://localhost:3000/video-player?parseUrl=https%3A%2F%2Fnetflixgc.net%2Fvodplay%2F81579-5-2.html&line=3&lineName=1080P-2&index=6&ep=%E7%AC%AC07%E9%9B%86' 26000)",
-      "Bash(\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless=new --remote-debugging-port=9344 --user-data-dir=/tmp/cdp-embed-1 --proxy-server=\"http://127.0.0.1:7897\" --proxy-bypass-list=\"127.0.0.1,localhost\" --no-first-run --disable-gpu --autoplay-policy=no-user-gesture-required about:blank)"
+      "Bash(\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless=new --remote-debugging-port=9344 --user-data-dir=/tmp/cdp-embed-1 --proxy-server=\"http://127.0.0.1:7897\" --proxy-bypass-list=\"127.0.0.1,localhost\" --no-first-run --disable-gpu --autoplay-policy=no-user-gesture-required about:blank)",
+      "Bash(git checkout *)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:3000/video-parse)"
     ],
     "ask": [
       "Bash(rm *)",
