@@ -7,7 +7,7 @@
           <!-- 解析页会把剧名一起带过来（交接槽的 title），有就顶掉「播放器」这个泛标题 -->
           <span class="font-semibold truncate">{{ playlistTitle || '播放器' }}</span>
           <UBadge v-if="playlistTitle && playlist.length > 1" color="violet" variant="soft" size="xs">
-            {{ getVideoName(videoUrl, currentIndex) }}
+            {{ currentVideoName }}
           </UBadge>
           <UBadge :color="isHls ? 'violet' : 'blue'" variant="soft" size="xs">
             {{ isHls ? 'HLS/M3U8' : 'MP4' }}
@@ -181,11 +181,13 @@
               <div ref="speedMenuRef" class="relative">
                 <button
                   class="text-white hover:text-violet-400 transition-colors px-2 py-1 rounded text-sm font-medium"
-                  :title="autoBestRate && playbackRate !== autoRateCap
-                    ? `自动最佳倍速：上限 ${autoRateCap}x，当前带宽下实际 ${playbackRate}x` : ''"
+                  :title="autoBestRate
+                    ? `自动最佳倍速：上限 ${autoRateCap}x，当前带宽下实际 ${playbackRate}x` : `倍速 ${playbackRate}x`"
                   @click="showSpeedMenu = !showSpeedMenu"
                 >
-                  {{ playbackRate }}x<span v-if="autoBestRate && playbackRate !== autoRateCap" class="text-white/50">/{{ autoRateCap }}</span>
+                  <!-- 「/上限」只要开着自动就常显：早先加了 playbackRate !== autoRateCap 的条件，
+                       生效倍速一爬到上限后缀就消失，控制栏上反而看不出自动还开着、上限是几 -->
+                  {{ playbackRate }}x<span v-if="autoBestRate" class="text-white/50">/{{ autoRateCap }}</span>
                 </button>
                 <Transition name="fade">
                   <div v-if="showSpeedMenu" class="absolute bottom-full right-0 mb-2 bg-black/90 rounded-lg overflow-hidden min-w-[80px]">
@@ -241,8 +243,8 @@ const {
   showControls, showPlayIcon, showSpeedMenu,
   currentTime, duration, volume, playbackRate, desiredRate, autoBestRate, autoRateCap,
   progressPercent, bufferedPercent, seekPreviewTime, seekPreviewPercent, hoverTime, hoverPercent,
-  hlsStats, playlist, currentIndex, playlistTitle, hasPrev, hasNext,
-  getVideoName, volumeIcon, supportsPiP, canDownload,
+  hlsStats, playlist, playlistTitle, hasPrev, hasNext,
+  currentVideoName, volumeIcon, supportsPiP, canDownload,
   togglePlay, skip, startSeek, updateHoverTime, setVolume, toggleMute, setPlaybackRate,
   toggleFullscreen, togglePiP, handleMouseMove, hideControlsDelayed,
   playPrev, playNext,

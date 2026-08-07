@@ -40,7 +40,7 @@ export function useVideoAutoTune(deps: VideoAutoTuneDeps) {
 
   let lastAutoRateAt = 0     // 上次自动调整时刻（惰性期起点）
   let downSince = 0          // 「带宽撑不住」持续起点（0=当前撑得住）
-  let nudgeUntil = 0         // 用户刚改上限：这之前的一次提速可跳过「连续流畅」门槛（点了要有反应）
+  let nudgePending = false   // 用户刚改上限：下一次提速可跳过台阶与「连续流畅」门槛（点了要有反应）
 
   /**
    * 自动模式的倍速上限：默认 2x；用户在倍速菜单里选了更高的档位就以那个为准。
@@ -58,9 +58,10 @@ export function useVideoAutoTune(deps: VideoAutoTuneDeps) {
    *  - 自动最佳倍速开启：在 [1, autoRateCap] 内逼近可持续上限，每次一个 0.25x 台阶。
    *    上限取「带宽模型」与「缓冲实况」两者中更宽松的那个：缓冲已经很深（≥2×吃紧阈值且没在卡）
    *    就直接按 autoRateCap 走——深缓冲是比带宽估算更硬的证据，估算保守时不该拖着不提速。
-   *    提速还要缓冲健康 + 已连续流畅 20s；降速只要目标持续低于当前 8s。
+   *    提速还要缓冲健康 + 已连续流畅 20s（缓冲很深时免掉流畅时长这一条，见 bufferRich）；
+   *    降速只要目标持续低于当前 8s。
    *    任何一次调整后进入 25s 惰性期——不停微调比慢一点更难受，且倍速一变就要重排预取节奏。
-   *  - 用户刚勾上开关 / 刚改上限（nudge 额度内）：直接跳到目标值，不走台阶也不看流畅时长。
+   *  - 用户刚勾上开关 / 刚改上限（nudge 待兑现）：直接跳到目标值，不走台阶也不看流畅时长。
    *    这是明确的用户动作，必须立刻有反应；后续再由闭环按缓冲实况上下调。
    *  - 关闭：完全用用户选择倍速（可 <1 手动慢放），立即生效。
    */
@@ -102,9 +103,11 @@ export function useVideoAutoTune(deps: VideoAutoTuneDeps) {
     }
     downSince = 0
     if (target < cur + 1e-6) return                        // 已到位
-    // 用户刚勾开关/刚改上限：直接给到目标值，不看惰性期也不等流畅时长（点了必须马上有反应）
-    if (now <= nudgeUntil) {
-      nudgeUntil = 0
+    // 用户刚勾开关/刚改上限：直接给到目标值，不看惰性期也不等流畅时长（点了必须马上有反应）。
+    // 额度按「兑现」清而不按时间过期：点击那一刻带宽模型可能还没采到样（maxFluentRate=0）→ target 就是 1，
+    // 分支根本走不到；旧实现给的 5s 墙钟一过额度作废，之后只剩 0.25x/25s 的慢爬，看着就是「点了没用」（踩过）。
+    if (nudgePending) {
+      nudgePending = false
       lastAutoRateAt = now
       setRate(target)
       return
@@ -112,16 +115,20 @@ export function useVideoAutoTune(deps: VideoAutoTuneDeps) {
     // 自动提速：惰性期内不动；缓冲不健康就别提（带宽模型看不到 append/解码这一段）
     if (now - lastAutoRateAt < RATE_HOLD_MS) return
     if (s.healthZone !== 'healthy') return
-    if (stall.getSmoothSecs() < RATE_UP_SMOOTH_SECS) return
+    // 缓冲很深就不必等「连续流畅」：该计时器在暂停时恒为 0（见 useStallTracker.onPause），
+    // 起播被浏览器拦截 / 用户手动暂停期间它永远攒不够 20s，会把提速彻底锁死（踩过）。
+    if (!bufferRich && stall.getSmoothSecs() < RATE_UP_SMOOTH_SECS) return
     lastAutoRateAt = now
     setRate(Math.min(target, cur + RATE_STEP))
   }
 
-  /** 用户主动改上限 / 刚勾上开关：解除惰性期，并给一次「立刻跳到目标」的额度 */
+  /** 用户主动改上限 / 刚勾上开关：解除惰性期，并挂一次「立刻跳到目标」的额度 */
   const resetRateCooldown = () => {
     lastAutoRateAt = 0
     downSince = 0
-    nudgeUntil = performance.now() + 5000   // 只给 5s 额度，用不上就作废，别留着日后突然提速
+    // 挂着不过期：条件一满足就兑现（多半就在同一次调用里），兑现即清。
+    // 关掉自动会走手动分支，这张额度到下次开启前都不会被用到，不存在「日后突然提速」。
+    nudgePending = true
   }
 
   // 倍速变化：立即顶格补取；若超出当前带宽可流畅倍速，提示（不拦截）

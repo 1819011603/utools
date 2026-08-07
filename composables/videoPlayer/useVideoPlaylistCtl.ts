@@ -38,6 +38,18 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
    */
   const progressKey = (): string => playlist.value[currentIndex.value] || videoUrl.value
 
+  /**
+   * 当前这一集的显示名。理由与 progressKey 完全相同——集名也是按「列表里那条地址」存的，
+   * 而按需取址时 videoUrl 是现取的真实地址（每次都不同），拿它去查 playlistNames 必然落空，
+   * 退化成显示 `ec54d9af…m3u8` 这种文件名，可播放列表里同一集却好端端写着「1」（踩过）。
+   */
+  const currentVideoName = computed(() => {
+    const name = handoff.getVideoName(progressKey(), currentIndex.value)
+    // 站点给的集名多半就是个纯数字（「1」「10」），标题栏上孤零零一个「1」看不出是什么。
+    // 只在这里补成「第N集」：播放列表格子窄、一屏要摆几十个，那边保持纯数字。
+    return /^\d{1,4}$/.test(name) ? `第${name}集` : name
+  })
+
   const saveCurrentProgress = () => {
     const key = progressKey()
     if (key && media.currentTime.value > 0) {
@@ -265,7 +277,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
 
   return {
     playlist, currentIndex, hasPrev, hasNext, isRefreshingLinks, lastRefreshAt,
-    progressKey, saveCurrentProgress, getSavedProgress, clearAllProgress,
+    progressKey, currentVideoName, saveCurrentProgress, getSavedProgress, clearAllProgress,
     parseAndLoad, playByIndex, playPrev, playNext, clearPlaylist, loadExample,
     resolveLazyUrl, refreshPlaylistLinks,
   }

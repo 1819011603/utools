@@ -176,7 +176,10 @@ export function useVideoDownload(opts: VideoDownloadOptions) {
 
     try {
       const idx = playlist.value.indexOf(url)
-      const filename = getVideoName(normalizedUrl, idx >= 0 ? idx : currentIndex.value) || `video_${Date.now()}`
+      // 集名按「列表里那条地址」存（同 progressKey）。从播放列表点下载时 url 本身就是它；
+      // 下载当前这一集时 videoUrl 可能是按需现取的真实地址，查不中会让文件名退化成一串 hash。
+      const nameKey = idx >= 0 ? normalizedUrl : (playlist.value[currentIndex.value] || normalizedUrl)
+      const filename = getVideoName(nameKey, idx >= 0 ? idx : currentIndex.value) || `video_${Date.now()}`
       const isHlsVideo = isHlsUrl(normalizedUrl)
 
       if (isHlsVideo) {
