@@ -8,6 +8,10 @@
  * 暴露：isStalling / stallCount / stallMsTotal / lastStallAt / smoothSecs（响应式，供面板展示），
  * getSmoothSecs()（连续流畅秒数）/ stallCountInWindow(ms)（窗口内卡顿次数，供自愈判据）。
  */
+
+/** 短于此值的停顿一律不算卡顿：肉眼基本无感，计进去反而污染自愈判据（见 endStall） */
+const MIN_STALL_MS = 500
+
 export function useStallTracker(getVideo: () => HTMLVideoElement | undefined) {
   const isStalling = ref(false)
   const stallCount = ref(0)      // 本会话累计卡顿次数
@@ -20,6 +24,7 @@ export function useStallTracker(getVideo: () => HTMLVideoElement | undefined) {
   const stalls: { at: number; ms: number }[] = []  // 明细，用于窗口统计
   let stallStart = 0             // 本次停顿开始时刻
   let smoothSince = 0            // 连续流畅起点（performance.now）；卡顿时为 0
+  let smoothBefore = 0           // 进入停顿前的 smoothSince，微停顿结束后原样还回去
   let lastCurrentTime = 0        // 上次记录的播放位置（timeupdate 兜底判前进）
   let bound: HTMLVideoElement | null = null
 
@@ -32,19 +37,27 @@ export function useStallTracker(getVideo: () => HTMLVideoElement | undefined) {
     isStalling.value = true
     stallStart = now()
     lastStallAt.value = stallStart
+    smoothBefore = smoothSince
     smoothSince = 0
   }
 
   const endStall = () => {
     if (isStalling.value) {
       const ms = now() - stallStart
+      isStalling.value = false
+      // 微停顿（< MIN_STALL_MS）不计数：一次 append/解码抖动几百毫秒，画面上几乎察觉不到，
+      // 记进去只会让面板显示「卡顿 1 次 / 0.0s」这种自相矛盾的读数，还会把连续流畅清零、
+      // 连带压住提速与档位判定。连续流畅也接着原来的起点算，当作没发生过。
+      if (ms < MIN_STALL_MS) {
+        smoothSince = smoothBefore || now()
+        return
+      }
       if (ms > 0) {
         stallCount.value++
         stallMsTotal.value += ms
         stalls.push({ at: stallStart, ms })
         if (stalls.length > 200) stalls.shift()
       }
-      isStalling.value = false
     }
     smoothSince = now()   // 恢复播放 → 重新开始累计连续流畅
   }
@@ -111,12 +124,21 @@ export function useStallTracker(getVideo: () => HTMLVideoElement | undefined) {
     stalls.length = 0
     stallStart = 0
     smoothSince = 0
+    smoothBefore = 0
     smoothSecs.value = 0
     lastCurrentTime = getVideo()?.currentTime ?? 0
   }
 
-  // 连续流畅秒数：卡顿中为 0，否则 = 距上次恢复的秒数
-  const getSmoothSecs = (): number => (isStalling.value || smoothSince === 0) ? 0 : (now() - smoothSince) / 1000
+  // 连续流畅秒数：卡顿中为 0，否则 = 距上次恢复的秒数。
+  // 停顿刚开始、还没够 MIN_STALL_MS 时先按微停顿算（多数确实撑不过 0.5s），读数不清零——
+  // 否则心跳正好采样在这半秒里，面板会闪一下「连续流畅 0s」再跳回七十几秒。
+  const getSmoothSecs = (): number => {
+    if (isStalling.value) {
+      if (!smoothBefore || now() - stallStart >= MIN_STALL_MS) return 0
+      return (now() - smoothBefore) / 1000
+    }
+    return smoothSince === 0 ? 0 : (now() - smoothSince) / 1000
+  }
 
   /** 心跳每秒调：改绑（元素可能刚被重建）+ 刷新响应式读数 */
   const tick = () => {
