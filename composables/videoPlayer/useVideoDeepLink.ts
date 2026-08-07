@@ -7,6 +7,7 @@
  *   urls           一次传多个，用 | 或换行分隔
  *   index          起播第几个（0 基）
  *   origin/referer 注入的防盗链头；proxy=1 全程代理；noref=1 伪装下载器；manifestOnly=0/1
+ *   parseUrl/line  源站播放页地址 + 线路，列表由播放器自己解析（解析来的列表首选这个）
  *   handoff=1      列表在 localStorage 交接槽里，query 只留标记
  */
 import type { QueryVideoParams } from './types'
@@ -72,6 +73,12 @@ export function useVideoDeepLink(deps: VideoDeepLinkDeps) {
           if (Number.isFinite(n)) result.index = n
           break
         }
+        case 'parseUrl': result.parseUrl = dec(val).trim(); break
+        case 'line': {
+          const n = Number.parseInt(dec(val), 10)
+          if (Number.isFinite(n) && n >= 0) result.line = n
+          break
+        }
         case 'origin': result.origin = dec(val).trim(); break
         case 'referer': result.referer = dec(val).trim(); break
         case 'proxy': result.proxy = isTrue(val); break
@@ -115,6 +122,25 @@ export function useVideoDeepLink(deps: VideoDeepLinkDeps) {
     // 只有网络地址能用链接表达（放行 //host/path，parseAndLoad 也接受这种协议相对写法）
     const shareable = urls.length > 0 && urls.every(u => /^(https?:)?\/\//i.test(u))
     const parts: string[] = []
+    const idx = Math.min(Math.max(playlist.currentIndex.value, 0), Math.max(urls.length - 1, 0))
+
+    // ── 解析来的列表：只写「从哪解析的 + 哪条线路 + 第几集」 ──
+    // 这是唯一能分享出去的形式。列表本身不写进地址栏：几十集顶爆长度上限，
+    // 而且解析出的地址不少带时效签名，隔几小时分享出去就是一堆死链；
+    // 换成来源则链接短、永不过期，别人打开自动解析到同一线路同一集。
+    const src = handoff.playlistSource.value
+    if (src?.pageUrl && urls.length) {
+      const q = ['parseUrl=' + encodeURIComponent(src.pageUrl)]
+      if (src.line > 0) q.push('line=' + src.line)
+      if (idx > 0) q.push('index=' + idx)
+      // 槽照写不误：本机刷新/回退时能直接读回来，省掉一次重新解析（几秒）
+      handoff.writeHandoff(urls, idx)
+      const search = '?' + q.join('&')
+      if (window.location.search !== search) {
+        window.history.replaceState(window.history.state, '', window.location.pathname + search + window.location.hash)
+      }
+      return
+    }
 
     if (shareable) {
       // 多个地址用 urls=a|b 而不是重复 url=，省地址栏长度
@@ -135,7 +161,6 @@ export function useVideoDeepLink(deps: VideoDeepLinkDeps) {
     // 按需取址的列表无论多短也必须走交接槽：urls= 里是源站播放页地址占位，
     // 光有它没有作业单谁也播不了，分享出去只会得到一堆打不开的链接。
     if ((search.length > 2000 || handoff.lazyTask.value) && shareable) {
-      const idx = Math.min(Math.max(playlist.currentIndex.value, 0), urls.length - 1)
       handoff.writeHandoff(urls, idx)
       search = '?handoff=1'
     }

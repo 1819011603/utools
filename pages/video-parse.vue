@@ -486,9 +486,16 @@ const playAll = (startIndex = 0) => {
     console.error('写入播放列表交接槽失败:', e)
   }
 
-  // 按需取址的列表无论多短都只能走交接槽：urls= 里是源站播放页地址占位，
-  // 没有随槽带过去的作业单，播放器拿到的就是一堆播不了的链接
-  if (isLazy.value) {
+  // 首选「从哪解析的 + 哪条线路 + 第几集」：链接短、可以直接分享，且不怕地址过期——
+  // 别人打开时播放器会拿这三个参数自己解析一遍（本机有交接槽则直接用槽，不重复解析）。
+  // 早先解析来的列表只有两种表达，都不能分享：?handoff=1（列表在本机 localStorage 里，
+  // 别人打开一片空白）、urls=a|b|c（几十集顶爆地址栏，带签名的地址过几小时还会变死链）。
+  const parsed = result.value
+  if (parsed?.pageUrl) {
+    params.set('parseUrl', parsed.pageUrl)
+    if (parsed.activeLineIndex > 0) params.set('line', String(parsed.activeLineIndex))
+    if (idx > 0) params.set('index', String(idx))
+  } else if (isLazy.value) {
     if (!handoffOk) {
       toast.add({ title: '浏览器存储不可用，该站点无法送进播放器', color: 'red' })
       return
@@ -516,11 +523,16 @@ const playAll = (startIndex = 0) => {
   //
   // 只是**候选值**，不是强制配置：播放器的可达性探测仍按 直连 → 代理·伪装 → 用这对头 → 主域
   // 的顺序逐级降级，直连能通就走直连，带上它不会平白多绕一层代理。
-  // 规则显式声明的 referer 优先（那是站点作者写死的正确值）。
+  //
+  // 走 parseUrl 时播放器自己解析也能拿到这对头，但命中交接槽那条路不会重新解析，
+  // 所以这里仍要带上。规则显式声明的那对头优先（那是站点作者写死的正确值）：
+  // 有的站点视频只认某个第三方域名，播放页域名照样 403
+  //（实测 netflixgc.net → cjbfq.netflixgc.tv），这时拿播放页 origin 兜底反而是错的。
   const srcOrigin = originOfPage(result.value?.pageUrl || inputUrl.value)
   if (result.value?.referer) params.set('referer', result.value.referer)
   else if (srcOrigin) params.set('referer', srcOrigin + '/')
-  if (srcOrigin) params.set('origin', srcOrigin)
+  const playOrigin = result.value?.origin || srcOrigin
+  if (playOrigin) params.set('origin', playOrigin)
 
   navigateTo('/video-player?' + params.toString())
 }

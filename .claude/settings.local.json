@@ -28,7 +28,8 @@
       "Bash(npx --yes tsx tmp-check.ts)",
       "Bash(curl -sS -m 40 -x http://127.0.0.1:7897 -o h.html -H \"user-agent: Mozilla/5.0\" \"https://4kvm.org/\")",
       "Bash(node -e ' *)",
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Edit(/.claude/skills/video-parse-site/**)"
     ],
     "ask": [
       "Bash(rm *)",

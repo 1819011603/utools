@@ -13,6 +13,11 @@ export interface VideoPlaylistDeps {
   syncUrl: () => void
   /** 加载 videoUrl 指向的视频 */
   loadVideo: () => Promise<void>
+  /**
+   * 把解析结果里的防盗链候选值交给连接策略。
+   * conn 与 playlist 同级（都在 media/handoff 之上），不能互相 import，所以走回调。
+   */
+  applyHints: (origin?: string, referer?: string) => void
 }
 
 export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
@@ -125,11 +130,20 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
       return
     }
 
+    // 手工贴进来的地址跟上一份来源没关系了，附加信息（作业单/来源/集名）留着只会张冠李戴：
+    // 作业单的占位地址对不上、来源会让地址栏写成上一部剧的 parseUrl，分享出去驴唇不对马嘴。
+    //
+    // 判据是「这批地址不全认识」而不是「列表变了」：onMounted 走 query 进来时也经过这里，
+    // 而那份 meta 是刚从交接槽读出来的，按「列表变了」清会把它冲掉
+    //（踩过一次，表现为播放列表一排 index.m3u8）。
+    // 注意要赶在 playlist 被覆盖**之前**判，否则 includes 恒真、等于没判。
+    const known = (u: string) =>
+      handoff.lazyIndexByUrl.value[u] !== undefined ||
+      handoff.playlistNames.value[u] !== undefined ||
+      playlist.value.includes(u)
+    if (!urls.every(known)) handoff.clearHandoffMeta()
+
     playlist.value = urls
-    // 手工贴进来的地址跟上一份作业单没关系了（占位地址对不上），留着只会把过期作业单持久化下去
-    if (handoff.lazyTask.value && !urls.every(u => handoff.lazyIndexByUrl.value[u] !== undefined)) {
-      handoff.setLazyTask(null, [])
-    }
     const from = typeof startIndex === 'number' && startIndex >= 0 && startIndex < urls.length ? startIndex : 0
     currentIndex.value = from
 
@@ -158,6 +172,50 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
     media.isRestoringFromSaved.value = true
 
     await deps.loadVideo()
+  }
+
+  /**
+   * 从「源站播放页地址 + 线路」现场解析出整份播放列表并起播（`?parseUrl=…&line=N&index=M`）。
+   *
+   * 这是分享链接的落地点：别人拿到链接时本机没有交接槽，列表得自己解析出来。
+   * 与「刷新链接」共用 resolvePlaylist（工作量证明 / 分批续拉 / 作业单都在里面），
+   * 两处各写一份必然漂移。
+   */
+  const loadFromParseSource = async (pageUrl: string, line = 0, index = 0) => {
+    media.isResolvingUrl.value = true
+    errorMessage.value = ''
+    try {
+      const { result } = await resolvePlaylist({ pageUrl, line, rules: loadUserParseRules() })
+      const { urls, names } = toPlaylist(result)
+      if (!urls.length) throw new Error('没有解析出可播放的地址')
+
+      // 上一份列表的集名/作业单/来源一律作废——这是一份全新的列表
+      handoff.clearHandoffMeta()
+      playlist.value = urls
+      handoff.setPlaylistNames(urls, names)
+      handoff.setLazyTask(result.clientTask?.lazy ? result.clientTask : null, urls)
+      if (result.title) handoff.playlistTitle.value = result.title
+      // 线路记解析结果实际用的那条：传入的 line 越界时服务端会退回 active 线路，
+      // 记成传入值会让地址栏与实际播的对不上，分享出去又是另一条线路
+      handoff.playlistSource.value = { pageUrl, line: result.activeLineIndex }
+
+      // 这类站点的防盗链常认播放页域名，而视频挂在毫不相干的 CDN 上，光看视频地址推不出来。
+      // 只是候选值，探测仍从直连起逐级降级（见 CLAUDE.md「连接方式只有一个来源」）
+      const srcOrigin = (() => { try { return new URL(pageUrl).origin } catch { return '' } })()
+      deps.applyHints(result.origin || srcOrigin, result.referer || (srcOrigin ? srcOrigin + '/' : ''))
+
+      videoUrlInput.value = urls.join('\n')
+      const from = index >= 0 && index < urls.length ? index : 0
+      currentIndex.value = from
+      deps.onDirty()
+      media.isRestoringFromSaved.value = true
+      await playByIndex(from)
+    } catch (e: any) {
+      const msg = e?.statusMessage || e?.data?.statusMessage || e?.message || '未知错误'
+      errorMessage.value = `解析播放列表失败：${msg}`
+    } finally {
+      media.isResolvingUrl.value = false
+    }
   }
 
   const playPrev = async () => { if (hasPrev.value) await playByIndex(currentIndex.value - 1) }
@@ -197,7 +255,8 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
     isRefreshingLinks.value = true
     const toast = useToast()
     try {
-      const { result } = await resolvePlaylist({ pageUrl: src.pageUrl, line: src.line })
+      // 用户自定义规则要带上：服务端没有 localStorage，不带的话自定义规则的站点刷不动
+      const { result } = await resolvePlaylist({ pageUrl: src.pageUrl, line: src.line, rules: loadUserParseRules() })
       const { urls, names } = toPlaylist(result)
       if (!urls.length) throw new Error('没有解析出可播放的地址')
 
@@ -279,7 +338,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
     playlist, currentIndex, hasPrev, hasNext, isRefreshingLinks, lastRefreshAt,
     progressKey, currentVideoName, saveCurrentProgress, getSavedProgress, clearAllProgress,
     parseAndLoad, playByIndex, playPrev, playNext, clearPlaylist, loadExample,
-    resolveLazyUrl, refreshPlaylistLinks,
+    resolveLazyUrl, refreshPlaylistLinks, loadFromParseSource,
   }
 }
 

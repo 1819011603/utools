@@ -44,6 +44,11 @@ export function useVideoPlayerController() {
     onDirty: () => saveState(),
     syncUrl: () => syncUrlToQuery(),
     loadVideo: () => engine.loadVideo(),
+    applyHints: (origin, referer) => {
+      if (origin) conn.originHint.value = origin
+      if (referer) conn.refererHint.value = referer
+      if (origin || referer) media.showAdvancedProxy.value = true
+    },
   })
 
   engine = useVideoEngine({
@@ -157,11 +162,24 @@ export function useVideoPlayerController() {
     // URL 参数优先于本地存储：外部直链打开时不该被上次的地址/播放列表覆盖
     const queryParams = parseQueryVideoParams()
 
+    // 老链接里的 origin/referer 收作候选值喂给探测（不再强制生效——连接方式一律自动决定）。
+    // proxy/noref/manifestOnly 直接忽略：它们是引擎的中间态，固化下来只会让探测绕远。
+    // 注意这几个键仍留在 PAGE_QUERY_KEYS 里，否则 `&origin=` 这段会被当成视频地址的一部分回写。
+    //
+    // 必须放在所有加载分支**之前**：走 ?parseUrl= 且命中交接槽时不会重新解析，
+    // 那条路上这对候选头只能从 query 来，漏了就只剩探测硬碰，防盗链站点直接一片红。
+    if (queryParams.origin !== undefined || queryParams.referer !== undefined) {
+      if (queryParams.origin !== undefined) conn.originHint.value = queryParams.origin
+      if (queryParams.referer !== undefined) conn.refererHint.value = queryParams.referer
+      media.showAdvancedProxy.value = true
+    }
+
     const savedState = loadSavedState()
     if (savedState) {
       hydrate(savedState)
-      // 没有 URL 参数时才恢复保存的视频地址
-      if (!queryParams.urls.length && savedState.videoUrlInput) {
+      // 没有 URL 参数时才恢复保存的视频地址（parseUrl 也算——那条路自己会装好列表，
+      // 先恢复上一份只会让旧作业单短暂串进来）
+      if (!queryParams.urls.length && !queryParams.parseUrl && savedState.videoUrlInput) {
         media.videoUrlInput.value = savedState.videoUrlInput
         playlist.playlist.value = savedState.playlist || []
         playlist.currentIndex.value = savedState.currentIndex ?? 0
@@ -170,16 +188,29 @@ export function useVideoPlayerController() {
       }
     }
 
-    if (queryParams.urls.length) {
-      media.videoUrlInput.value = queryParams.urls.join('\n')
-      // 老链接里的 origin/referer 收作候选值喂给探测（不再强制生效——连接方式一律自动决定）。
-      // proxy/noref/manifestOnly 直接忽略：它们是引擎的中间态，固化下来只会让探测绕远。
-      // 注意这几个键仍留在 PAGE_QUERY_KEYS 里，否则 `&origin=` 这段会被当成视频地址的一部分回写。
-      if (queryParams.origin !== undefined || queryParams.referer !== undefined) {
-        if (queryParams.origin !== undefined) conn.originHint.value = queryParams.origin
-        if (queryParams.referer !== undefined) conn.refererHint.value = queryParams.referer
-        media.showAdvancedProxy.value = true
+    if (queryParams.parseUrl) {
+      // 分享进来的链接：列表由「源站播放页 + 线路」现场解析。
+      // 但从 /video-parse 点进来、或本机刷新时，交接槽里就是同一份列表——
+      // 直接用，省掉一次好几秒的重新解析（这是最常走的路径，不能每次都重解析）。
+      const line = queryParams.line ?? 0
+      const p = handoff.readHandoff()
+      const fromSlot = p?.source?.pageUrl === queryParams.parseUrl && (p?.source?.line ?? 0) === line
+      const idx = queryParams.index ?? p?.index ?? 0
+
+      if (fromSlot && p) {
+        handoff.applyHandoffMeta(p)
+        playlist.playlist.value = p.urls
+        media.videoUrlInput.value = p.urls.join('\n')
+        playlist.currentIndex.value = Math.min(Math.max(idx, 0), p.urls.length - 1)
+        await nextTick()
+        media.isRestoringFromSaved.value = true
+        await playlist.playByIndex(playlist.currentIndex.value)
+      } else {
+        await nextTick()
+        await playlist.loadFromParseSource(queryParams.parseUrl, line, idx)
       }
+    } else if (queryParams.urls.length) {
+      media.videoUrlInput.value = queryParams.urls.join('\n')
       await nextTick()
       // playByIndex 内部会置 isRestoringFromSaved，直链进来即自动起播
       await playlist.parseAndLoad(queryParams.index)

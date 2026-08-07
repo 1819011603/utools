@@ -16,6 +16,16 @@ type Executor = (task: any, episodes: ParsedEpisode[], opts: ClientResolveOption
 
 const EXECUTORS: Record<ClientResolveTask['kind'], Executor> = {
   'wasm-url-signer': (task, episodes, opts) => runWasmUrlSigner(task, episodes, opts),
+  'html-source': (task, episodes, opts) => runHtmlSourceResolve(task, episodes, opts),
+}
+
+/**
+ * 作业单里「每集一项」的那个数组叫什么——各 kind 的字段名不同，但语义相同：
+ * 下标必须与 episodes 严格对齐，切片时要连它一起切。
+ */
+const ITEMS_KEY: Record<ClientResolveTask['kind'], 'argsList' | 'pageUrls'> = {
+  'wasm-url-signer': 'argsList',
+  'html-source': 'pageUrls',
 }
 
 export async function runClientResolve(
@@ -31,7 +41,9 @@ export async function runClientResolve(
 
 /** 只保留选中下标的作业单，用于按需取址（task.lazy）时一次只做一集 */
 export function sliceClientTask(task: ClientResolveTask, indices: number[]): ClientResolveTask {
-  return { ...task, argsList: indices.map(i => task.argsList[i]).filter(Boolean) }
+  const key = ITEMS_KEY[task.kind]
+  const items = (task as any)[key] as unknown[] | undefined
+  return { ...task, [key]: indices.map(i => items?.[i]).filter(Boolean) } as ClientResolveTask
 }
 
 /**
@@ -39,7 +51,8 @@ export function sliceClientTask(task: ClientResolveTask, indices: number[]): Cli
  * 拿不到就抛错——调用方要把原因显示出来，静默失败会表现成「点了没反应」。
  */
 export async function resolveOneUrl(task: ClientResolveTask, index: number): Promise<string> {
-  if (!task.argsList[index]) throw new Error('这一集没有取址参数，请重新解析')
+  const items = (task as any)[ITEMS_KEY[task.kind]] as unknown[] | undefined
+  if (!items?.[index]) throw new Error('这一集没有取址参数，请重新解析')
   const ep: ParsedEpisode = { title: '', pageUrl: '' }
   await runClientResolve(sliceClientTask(task, [index]), [ep])
   if (!ep.videoUrl) throw new Error(ep.error || '未取到播放地址')

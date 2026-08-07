@@ -26,12 +26,28 @@ export interface ParseRule {
   sourceRe: string
 
   /**
+   * sourceRe 抠出来的地址要怎么解码。留空 = 原样。
+   *
+   * 'maccms'：苹果 CMS（`player_aaaa`）系站点的地址按 `encrypt` 字段有三种形态——
+   * 明文 / percent / base64 套 percent。解码器自适应解到 http 开头为止，**不读 encrypt 值**：
+   * 同一站点不同线路的 encrypt 可以不同（实测 ylsp=0、netflixgc=2），按字段写死会漏。
+   */
+  sourceDecode?: 'maccms'
+
+  /**
    * 线路标签。捕获组约定：
    *   1 = class 上的修饰串（含 active 即当前线路）
    *   2 = 线路名        3 = 线路副标题（可选）
    * 顺序必须与 episodeGroupRe 匹配出的分组顺序一一对应。
    */
   lineRe?: string
+
+  /**
+   * 判定「当前线路」的标记，对 lineRe 的第 1 个捕获组匹配，默认 `active`。
+   * 各站的 class 名不一样（ylsp 用 `active`、netflixgc 用 `on`），
+   * 认错的表现是解析结果默认落到第一条线路上，而不是用户点开的那条。
+   */
+  activeFlagRe?: string
 
   /** 选集分组容器，取第 1 个捕获组作为该组的内层 HTML */
   episodeGroupRe?: string
@@ -40,11 +56,34 @@ export interface ParseRule {
   episodeRe?: string
 
   /**
+   * 剧名。留空则从 `<title>` 削掉站名后缀兜底，够用就别写。
+   * 有些站点的 title 是一长串 SEO 文案（实测 netflixgc 有 90 多个字符），
+   * 兜底削不干净——而这个值会顶掉播放器的标题栏，必须是干净的剧名。
+   */
+  titleRe?: string
+
+  /**
    * 播放时建议的 Referer。留空则用源站播放页的 origin 兜底（见 video-parse 的 playAll）。
    * 两者都只是**候选值**，播放器仍按 直连 → 代理·伪装 → 这对头 → 主域 逐级实测降级，
    * 直连能通就走直连，不会因为写了它就白白多绕一层代理。
    */
   referer?: string
+
+  /**
+   * 播放时建议的 Origin。**不填则用播放页 origin 兜底**，只有在源站的防盗链认的是
+   * 另一个域名时才需要显式写（实测 netflixgc.net 的视频只认 cjbfq.netflixgc.tv，
+   * 播放页域名和主域都是 403）。同 referer，仍只是候选值。
+   */
+  origin?: string
+
+  /**
+   * 按需取址：解析阶段只取传入的那一集，其余集播到哪集才去抓哪集的播放页。
+   *
+   * 这类规则的地址是**逐集抓页**抠出来的，一集一个子请求。长剧（实测 ylsp 186 集）
+   * 一次抓完既慢又容易被源站限流，而用户通常只看几集。默认应当打开——
+   * 只有集数很少、且确实要一次性拿到全部地址（比如给「复制全部」用）时才关。
+   */
+  lazy?: boolean
 }
 
 // 内置规则表——地址明文写在页面里、能用正则描述的站点都加在这，复制一条改 pattern 与几个正则即可。
@@ -65,6 +104,45 @@ export const BUILTIN_PARSE_RULES: ParseRule[] = [
     // 所以一次请求就能拿到整张线路 × 集数表，不用逐线路翻页
     episodeGroupRe: '<div class="episode-list"[^>]*>([\\s\\S]*?)</div>',
     episodeRe: '<a[^>]*href="([^"]+)"[^>]*class="[^"]*episode-item[^"]*"[^>]*>\\s*<span>([^<]*)</span>',
+  },
+  // ── 以下两条是苹果 CMS（MacCMS）站点，页面结构不同但地址都在 player_aaaa 里 ──
+  // 这类站点占了国内影视站的大多数，接新站基本就是把下面这条复制一份改四个正则。
+  {
+    id: 'ylsp',
+    name: '永乐视频 (ylsp)',
+    pattern: '/ylsp\\d*\\.[a-z]{2,4}\\//',
+    homepage: 'https://www.ylsp.lv/',
+    // encrypt=0，地址是明文，只是 JSON 里的 `\/` 要还原
+    sourceRe: 'player_aaaa\\s*=\\s*\\{[\\s\\S]*?"url"\\s*:\\s*"([^"]+)"',
+    sourceDecode: 'maccms',
+    // 当前线路渲染成 <div>、其余是 <a>，所以标签名不能写死
+    lineRe: '<(?:a|div)[^>]*class="module-tab-item tab-item([^"]*)"[^>]*>\\s*<span>([^<]*)</span>',
+    // 组不能用 `</div>` 收尾：当前集的 <a> 里嵌了 <div class="playon">，
+    // 非贪婪匹配会断在那，整条线路只剩 1 集（踩过）
+    episodeGroupRe: '<div class="module-play-list-content[^"]*">([\\s\\S]*?)</div></div></div>',
+    episodeRe: '<a class="module-play-list-link[^"]*" href="([^"]+)"[^>]*>\\s*<span>([^<]*)</span>',
+    // 实测 186 集，一次抓完要 186 个子请求
+    lazy: true,
+  },
+  {
+    id: 'netflixgc',
+    name: '奈飞工厂 (netflixgc)',
+    pattern: '/netflixgc\\d*\\.(net|com|tv|cc)/',
+    homepage: 'https://netflixgc.net/',
+    // encrypt=2：base64 套 percent，两层都由 sourceDecode 剥
+    sourceRe: 'player_aaaa\\s*=\\s*\\{[\\s\\S]*?"url"\\s*:\\s*"([^"]+)"',
+    sourceDecode: 'maccms',
+    lineRe: '<a data-form="[^"]*" class="vod-playerUrl swiper-slide([^"]*)"[^>]*>(?:<i[^>]*>[^<]*</i>)?(?:&nbsp;)?([^<]*)<',
+    // 当前线路的标记是 `on` 不是 `active`
+    activeFlagRe: '\\bon\\b',
+    episodeGroupRe: '<ul class="anthology-list-play[^"]*">([\\s\\S]*?)</ul>',
+    episodeRe: '<a[^>]*href="([^"]+)"[^>]*>\\s*<span>([^<]*)</span>',
+    // title 是一长串 SEO 文案，剧名只在书名号里
+    titleRe: '<title>[^<]*《([^》]+)》',
+    // 视频挂在与播放页无关的 CDN 上，只认这一个域名——播放页域名和主域都是 403
+    referer: 'https://cjbfq.netflixgc.tv',
+    origin: 'https://cjbfq.netflixgc.tv',
+    lazy: true,
   },
 ]
 
@@ -250,8 +328,24 @@ export interface WasmSignerTask {
   pick: JsonUrlPick
 }
 
-/** 目前只有一种；新增执行器时在这里并上，前端 useClientResolve 按 kind 分发 */
-export type ClientResolveTask = WasmSignerTask
+/**
+ * 逐集抓源站播放页、按规则的 sourceRe 抠地址——与 htmlRule 在服务端做的事完全相同，
+ * 只是把「什么时候抓」从解析阶段推迟到播放阶段（见 ParseRule.lazy）。
+ *
+ * 与 WasmSignerTask 的动机不同：那个是服务端**做不了**，这个是服务端**不该一次做完**。
+ * 长剧逐集抓页是一集一个子请求，实测 186 集的站点一次抓完要分 5 批、上百个请求，
+ * 慢且容易被源站限流，而用户通常只看几集。
+ */
+export interface HtmlSourceTask {
+  kind: 'html-source'
+  /** 每集的播放页地址，与 lines[activeLineIndex].episodes 下标严格一一对应 */
+  pageUrls: string[]
+  /** 同 WasmSignerTask.lazy；这类作业单实际上总是 lazy，字段保留是为了让分发逻辑统一 */
+  lazy?: boolean
+}
+
+/** 新增执行器时在这里并上，前端 useClientResolve 按 kind 分发 */
+export type ClientResolveTask = WasmSignerTask | HtmlSourceTask
 
 export interface ParsedLine {
   name: string           // 「GS线路」
@@ -275,6 +369,8 @@ export interface ParseResult {
   remaining: number
   lineUnsupported?: boolean  // 该线路页面不给直链（src 渲染成空串），整条线路都取不到
   referer?: string
+  /** 防盗链认的 Origin 与播放页域名不同时，由规则显式给出（见 ParseRule.origin） */
+  origin?: string
   /** 有它就表示 episodes 里全都没有 videoUrl，要前端拿这张作业单去补 */
   clientTask?: ClientResolveTask
 }

@@ -106,6 +106,15 @@ export interface QueryVideoParams {
   proxy?: boolean
   noref?: boolean
   manifestOnly?: boolean
+  /**
+   * 源站播放页地址 + 线路序号：整份播放列表由播放器自己重新解析得来。
+   *
+   * 这是解析来的列表**唯一可分享**的表达方式。此前只有 `?handoff=1`（列表在本机
+   * localStorage 里，别人打开一片空白）和 `urls=a|b|c`（几十集顶爆地址栏，且带签名的
+   * 地址过几小时就死）。带上来源则链接短、永不过期，别人打开自动解析到同一线路同一集。
+   */
+  parseUrl?: string
+  line?: number
 }
 
 /**
@@ -117,4 +126,5 @@ export interface QueryVideoParams {
  */
 export const PAGE_QUERY_KEYS = new Set([
   'url', 'urls', 'index', 'origin', 'referer', 'proxy', 'noref', 'manifestOnly', 'handoff',
+  'parseUrl', 'line',
 ])

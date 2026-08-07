@@ -137,6 +137,7 @@ export default defineEventHandler(async (event): Promise<ParseResult | PowChalle
     host,
     line: lineParam,
     offset: Number.isFinite(offsetParam) && offsetParam > 0 ? offsetParam : 0,
+    only: query.only === '1',
     cookie: cookie ?? readCookie(host),
     fetchPage,
   }, page.body)

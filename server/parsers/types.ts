@@ -23,6 +23,11 @@ export interface ParserContext {
   line?: number
   /** 分批解析的起点，不支持分批的策略忽略即可 */
   offset: number
+  /**
+   * 只取 pageUrl 这一集的地址，别解析选集、别抓任何子页面。
+   * 按需取址的站点（ParseRule.lazy）在播放器里切集时走这条路，一次只花一个请求。
+   */
+  only?: boolean
   /** 已过反爬的 cookie，抓子页面时要带上 */
   cookie?: string
   /** 带 UA / cookie / 放宽 TLS 的抓页函数 */

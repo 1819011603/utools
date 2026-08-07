@@ -81,7 +81,8 @@ export async function resolvePlaylist(opts: ResolveOptions): Promise<ResolveOutc
       // 站点限流，不许一次全取。这里只取传入的那一集：既验证链路能通、
       // 又给界面一个能复制的真实地址；其余集等播到了再由播放器现取。
       const cur = Math.max(0, episodes.findIndex(e => e.pageUrl === first.pageUrl))
-      if (episodes[cur]) {
+      // 服务端顺手带回来了就别再取一遍（htmlRule 的 lazy 分支会填当前集）
+      if (episodes[cur] && !episodes[cur].videoUrl) {
         onStage?.('正在获取当前集地址…')
         await runClientResolve(sliceClientTask(task, [cur]), [episodes[cur]])
       }

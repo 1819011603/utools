@@ -285,12 +285,13 @@ server/parsers/
   types.ts               SiteParser / ParserContext / ChallengeHandler 接口
   utils.ts               各策略共用：absolutize / decodeEntities / innerTexts / parseTitle / pool …
   index.ts               注册表 + matchParser（用户规则 > 代码型站点 > 内置规则）
-  htmlRule.ts            数据驱动策略：地址明文在页面里，靠正则抠（覆盖 ncat + 全部用户自定义规则）
+  htmlRule.ts            数据驱动策略：地址明文在页面里，靠正则抠（覆盖 ncat / ylsp / netflixgc + 全部用户自定义规则）
   challenges/cdndefend.ts 反爬握手：认出挑战页 + 抠常量（nonce 交前端算）
   sites/nbmovie.ts       4kvm，页面里没有地址，要另调签名接口
 composables/
   videoParseRules.ts     规则表 + 代码型站点登记表 + 前后端共用的数据形状
   useClientResolve.ts    「取址作业单」的前端执行器注册表，按 kind 分发
+  useHtmlSourceResolver.ts 执行器之一：按需逐集抓源站播放页取址（htmlRule 的 lazy 站点）
   useWasmUrlSigner.ts    执行器之一：跑站点自带 wasm 签接口地址，再从 JSON 里挑播放地址
   usePowSolver.ts        浏览器侧算反爬的工作量证明
   useResolvePlaylist.ts  完整流程（PoW → 分批续拉 / 作业单 → 合并），两个页面共用
@@ -301,6 +302,10 @@ composables/
 1. 地址明文写在页面里 → 在 `BUILTIN_PARSE_RULES` 加一条规则，**不用写代码**。
    规则就四条正则：`sourceRe`（当前集地址）/ `lineRe`（线路标签）/ `episodeGroupRe`（选集容器）/
    `episodeRe`（组内单集），pattern 语义见 `matchParseSite`（`/正则/` 或 host 子串）。
+   另有几个可选字段兜住各站差异：`sourceDecode`（`maccms` = 自适应剥 base64/percent）、
+   `activeFlagRe`（当前线路的 class 标记，默认 `active`）、`titleRe`（`<title>` 是 SEO 长串时用）、
+   `referer`/`origin`（防盗链认的域名与播放页不同时才写）、`lazy`（按需取址，见下）。
+   **完整 SOP、可复制的 MacCMS 模板、逐条验证正则的脚本都在 skill `video-parse-site` 里**，加站先看它。
 2. 要另调接口 / 要签名 / 要解密 → 在 `server/parsers/sites/` 加一个 `.ts` 导出 `SiteParser`，
    在 `server/parsers/index.ts` 的 `CODED_PARSERS` 注册，**并在 `videoParseRules.ts` 的
    `CODED_PARSE_SITES` 登记 pattern**——前端 `matchParseSite()` 要靠它判断「这个地址支持不支持」，
@@ -347,9 +352,17 @@ ncat 系挂了 cdndefend：首访返回 **HTTP 850** + 挑战页，要求暴力�
 
 有些站点页面里根本没有播放地址，服务端只能给一张**作业单**（`ParseResult.clientTask`），
 由浏览器补齐每集的 `videoUrl`。`useResolvePlaylist` 见到 `clientTask` 就走 `useClientResolve`
-按 `kind` 分发，走完直接返回，**不走分批**。执行器目前只有 `wasm-url-signer` 一种。
+按 `kind` 分发，走完直接返回，**不走分批**。执行器有两种：
 
-为什么这一步非得放浏览器（三条各自独立成立的理由）：
+| kind | 用在 | 动机 |
+| --- | --- | --- |
+| `wasm-url-signer` | 4kvm | 服务端**做不了**（算法只存在于 wasm，签名还带时效） |
+| `html-source` | 所有 `lazy: true` 的 htmlRule 站点 | 服务端**不该一次做完**（逐集抓页太重，见下节） |
+
+`html-source` 的抠地址那步仍在服务端（`/api/resolve?only=1`，只取这一集、不解析选集），
+浏览器只负责「什么时候抓」——正则和解码没必要在两边各写一份。
+
+为什么 wasm 那步非得放浏览器（三条各自独立成立的理由）：
 
 1. **CF Workers 禁止运行时实例化非打包的 wasm**，服务端跑不了；而 wasm 文件名带内容 hash
    （站点一更新就变），也没法预先打进产物里
@@ -363,12 +376,20 @@ ncat 系挂了 cdndefend：首访返回 **HTTP 850** + 挑战页，要求暴力�
 
 ### 按需取址（`clientTask.lazy`）
 
-**站点限流，不许一次把整季取完**——4kvm 实测一口气取 185 集，打到第 186 发就开始回
-「请求过于频繁，请稍后再试」。站点自己就是「点一集才给一集」，我们照做：
+两类站点都要它，理由不同但做法完全一样：
+
+- **4kvm：站点限流**，不许一次把整季取完——实测一口气取 185 集，打到第 186 发就开始回
+  「请求过于频繁，请稍后再试」。站点自己就是「点一集才给一集」，我们照做。
+- **htmlRule 站点（`ParseRule.lazy`）：逐集抓页太重**。这类站点的地址是一集一个子请求抠出来的，
+  实测 ylsp 186 集要分 5 批上百个请求，而用户通常只看几集。开了之后解析阶段只花 1 个请求
+  （当前集地址直接从本页拿，`useResolvePlaylist` 见 `videoUrl` 已有就不再取一遍）。
+  **新加的 htmlRule 站点默认就该开**，除非集数很少且确实要一次拿到全部地址。
+
+共同的约定：
 
 - **解析页**只取传入的那一集（验证链路能通 + 给个能复制的真实地址），其余集不动
 - **播放列表里存的是源站播放页地址占位**，不是真实地址；播放器 `playByIndex` 切到哪集，
-  `resolveLazyUrl` 才现取哪集。整条链路一部剧只发 2（wasm）+ 1/集 发请求
+  `resolveLazyUrl` 才现取哪集。整条链路一部剧只发 2（wasm）/ 1（html-source）+ 1/集 发请求
 - **占位地址不替换成取到的真实地址**：真实地址带时效签名，存下来下次进来就是死链；
   而占位地址永远有效，还天然当了进度和集名的稳定键
 - 因此**进度不能按 `videoUrl` 存**（每次现取的地址都不同，等于每次都查不到）。
@@ -404,6 +425,27 @@ ncat 系挂了 cdndefend：首访返回 **HTTP 850** + 挑战页，要求暴力�
   要连 `expires`/`signature` 一起判，不能只看 `sign`/`timestamp`
 - **一次取满整季必被限流**：186 发之后接口开始回「请求过于频繁，请稍后再试」，
   所以这个站点必须 `lazy: true`，见上一节
+
+### MacCMS 系（ylsp / netflixgc）实测结论
+
+国内影视站的绝大多数是苹果 CMS，地址都在内联的 `player_aaaa={...}` 的 `url` 字段里，
+接这类站基本只是复制一条规则改四个正则。**加站的完整 SOP 在 skill `video-parse-site`**。
+
+- **`encrypt` 决定编码但不要按它分支**：0=明文 / 1=percent / 2=base64 套 percent，
+  同一站点不同线路的值可以不同（实测 ylsp=0、netflixgc=2）。`sourceDecode: 'maccms'`
+  自适应剥到 http 开头为止，层数硬性封在 2 层——地址本身常带 percent 编码的签名参数，
+  无限循环解码会把它越解越坏。明文那档还要先还原 JSON 里的 `\/` 转义
+- **当前线路的 class 标记各站不同**（ylsp `active`、netflixgc `on`），故有 `activeFlagRe`。
+  认错不报错，只是默认落到第一条线路——用户点开的那条被悄悄换掉，从界面上看不出来
+- **选集容器不能用 `</div>` 收尾**：ylsp 当前集的 `<a>` 里嵌了 `<div class="playon">`，
+  非贪婪匹配断在那，整条线路只剩 1 集（踩过）。改用 `</div></div></div>`，
+  或挑个不嵌套的标签当边界（netflixgc 用 `<ul>…</ul>`）
+- **防盗链认的域名可以跟播放页毫无关系**：netflixgc.net 的视频只认 `cjbfq.netflixgc.tv`，
+  播放页域名和主域都是 403，四条探测通道全挂。这种才需要在规则里写死 `referer` + `origin`
+  （`ParseRule.origin` 就是为它加的，之前 `origin` 恒取播放页 origin，覆盖不了）
+- **`<title>` 可能是一长串 SEO 文案**（netflixgc 实测 90+ 字符），兜底削站名削不干净，
+  而这个值会顶掉播放器标题栏 → 用 `titleRe` 从书名号里取
+- 两站都开 `lazy: true`：ylsp 实测 7 条线路 × 186 集，不开要分 5 批上百个请求
 
 ### 刷新链接（就地重新解析）
 

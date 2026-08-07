@@ -47,6 +47,34 @@ export function parseTitle(html: string, strips: RegExp[] = []): string | undefi
   return t || undefined
 }
 
+/**
+ * 苹果 CMS（`player_aaaa`）系站点的播放地址解码。
+ *
+ * 站点按 `encrypt` 字段给三种形态：0=明文、1=percent、2=base64 套 percent。
+ * 这里**不读 encrypt**，而是「不是 http 开头就再剥一层」——同一站点不同线路的 encrypt
+ * 可以不同（实测 ylsp=0、netflixgc=2），按字段分支会在换线路时漏解。
+ *
+ * 层数硬性封在 2 层：地址本身常带 percent 编码的签名参数，无限循环解码会把它越解越坏。
+ */
+export function decodeMaccmsUrl(raw: string): string {
+  // JSON 里的 `\/` 转义先还原，否则明文地址也过不了下面的 http 判定
+  let s = (raw || '').trim().replace(/\\\//g, '/')
+  if (!s) return s
+
+  for (let i = 0; i < 2 && !/^(https?:|\/\/)/i.test(s); i++) {
+    let next = ''
+    try {
+      // 纯 base64 字母表才当 base64 解；percent 串含 `%`，天然落到另一条分支
+      next = /^[A-Za-z0-9+/]+={0,2}$/.test(s) ? atob(s) : decodeURIComponent(s)
+    } catch {
+      break   // 解不动就交回原值，让上层按「取不到地址」处理，别吐半截脏串
+    }
+    if (!next || next === s) break
+    s = next
+  }
+  return s
+}
+
 /** pattern 与 URL 是否匹配。`/xxx/` 视为正则（匹配整个 URL），否则按 host 子串。 */
 export function patternMatches(pattern: string, url: string, host: string): boolean {
   if (!pattern) return false
