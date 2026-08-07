@@ -70,14 +70,55 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   // 每条新连接分到「在途最少」的 lane，使各 origin 都不超过浏览器 6 条上限，聚合达到 lane 数 × 6。
   // fLoader（hls.js 自身分片）与预取共用同一个均衡器，避免两者各自打满同一个 origin。
   const laneInflight: number[] = []
-  const acquireLane = (url: string): { lane: number; laneUrl: string } => {
+
+  // ── lane 熔断 ──
+  // 起播前的可达性探测未必覆盖得到分片轴（清单通了但没解析出分片时它整轮跳过），
+  // 站点规则和手动开关更是完全没实测。所以真实请求本身就是最后一道探测：
+  // 某条 lane 连续失败而别的 lane 还在成功，就把它熔断，双通道自动退回单通道。
+  // 不这么做的表现是「视频能播，但一半请求 403」——白扔一半连接，控制台刷屏（实测 maowushi 源，
+  // 分片要 Referer，直连 lane 每发必 403，代理 lane 正常 200）。
+  const LANE_TRIP_FAILS = 3          // 连续失败到这个数就熔断（首片偶发失败不算数）
+  const laneFails: number[] = []     // 各 lane 的连续失败数（成功即清零）
+  const laneOks: number[] = []       // 各 lane 的累计成功数
+  const laneDead = ref<boolean[]>([])  // 已熔断的 lane（响应式，供 UI 显示「已降为单通道」）
+
+  const laneAlive = (i: number) => !laneDead.value[i]
+
+  const markLaneOk = (lane: number) => {
+    laneFails[lane] = 0
+    laneOks[lane] = (laneOks[lane] ?? 0) + 1
+  }
+  /** 记一次 lane 失败；连续失败超阈值且还有别的 lane 活着就熔断它 */
+  const markLaneFail = (lane: number, laneCount: number) => {
+    laneFails[lane] = (laneFails[lane] ?? 0) + 1
+    if (laneFails[lane] < LANE_TRIP_FAILS || laneDead.value[lane]) return
+    // 只剩一条活 lane 时绝不熔断——那不是「换一条路」，是把下载彻底掐死
+    const aliveCount = Array.from({ length: laneCount }, (_, i) => i).filter(laneAlive).length
+    if (aliveCount <= 1) return
+    const next = laneDead.value.slice()
+    next[lane] = true
+    laneDead.value = next
+    console.warn(`[lane] 第 ${lane} 条通道连续失败 ${laneFails[lane]} 次，已熔断（双通道降为单通道）`)
+  }
+  /** 换视频/换策略时清空熔断记录：新源的可达性与上一个源无关 */
+  const resetLanes = () => {
+    laneFails.length = 0
+    laneOks.length = 0
+    laneInflight.length = 0
+    laneDead.value = []
+  }
+
+  const acquireLane = (url: string): { lane: number; laneUrl: string; laneCount: number } => {
     const urls = getLaneUrls(url)
-    let lane = 0
-    for (let i = 1; i < urls.length; i++) {
+    // 熔断过的 lane 直接排除；万一全被熔断（不该发生，markLaneFail 保底留一条）就退回全体
+    let pool = urls.map((_, i) => i).filter(laneAlive)
+    if (!pool.length) pool = urls.map((_, i) => i)
+    let lane = pool[0]
+    for (const i of pool) {
       if ((laneInflight[i] ?? 0) < (laneInflight[lane] ?? 0)) lane = i
     }
     laneInflight[lane] = (laneInflight[lane] ?? 0) + 1
-    return { lane, laneUrl: urls[lane] }
+    return { lane, laneUrl: urls[lane], laneCount: urls.length }
   }
   const releaseLane = (lane: number) => {
     if ((laneInflight[lane] ?? 0) > 0) laneInflight[lane]--
@@ -97,8 +138,11 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     for (const [u, t] of segInflightStart) { const el = now - t; if (el > worst) { worst = el; worstUrl = u } }
     return { name: shortName(worstUrl), elapsedMs: worst, count: segInflightStart.size }
   }
-  // 当前流的 lane 数（用一个代表性 URL 探测），用于放宽并发上限
-  const getLaneCount = (sampleUrl?: string): number => (sampleUrl ? getLaneUrls(sampleUrl).length : 1)
+  // 当前流的**可用** lane 数（用一个代表性 URL 探测），用于放宽并发上限。
+  // 必须排除熔断掉的 lane：否则直连 lane 已经每发必 403，并发上限还按两个 origin 放到 12，
+  // 等于让 6 条连接去挤同一个 origin，浏览器排队反而更慢。
+  const getLaneCount = (sampleUrl?: string): number =>
+    sampleUrl ? Math.max(1, getLaneUrls(sampleUrl).filter((_, i) => laneAlive(i)).length) : 1
 
   // 跳过卡死的分片：把播放头挪到该分片之后，让 hls.js 从下一片重新加载（下一片多半已预取，秒恢复）。
   // 只在「确实卡在播放头附近」时跳，避免把提前缓冲的远处分片误当卡点跳掉。返回是否真的跳了。
@@ -176,7 +220,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     lastAhead = -1
     lastHealthZone = 'healthy'
     lastPlayable = 0
-    laneInflight.length = 0
+    resetLanes()
     segInflightStart.clear()
     strategy.value = { perConnKBps: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0, aggregateScales: true, healthZone: 'healthy', playableSecs: 0 }
   }
@@ -407,14 +451,19 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
           if (settled || this.stats.aborted || racers >= tp.maxRacers) return
           racers++
           const ctrl = new AbortController(); ctrls.push(ctrl)
-          const { lane, laneUrl } = acquireLane(url)
+          const { lane, laneUrl, laneCount } = acquireLane(url)
           const t = performance.now()
           if (!segInflightStart.has(url)) segInflightStart.set(url, t)   // 计时：登记在途（诊断用）
           const conc = racers   // 采样时的并发（竞速条数），供聚合可并行探针分档
           fetch(laneUrl, { signal: ctrl.signal, referrerPolicy: 'no-referrer' })
             .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); if (!this.stats.loading.first) this.stats.loading.first = performance.now(); return r.arrayBuffer() })
-            .then(buf => { releaseLane(lane); sampleSpeed(buf.byteLength, performance.now() - t, conc); win(buf) })
-            .catch(() => { releaseLane(lane); if (!settled && !this.stats.aborted) timers.push(setTimeout(race, 500)) })  // 这条失败 → 快速换一条
+            .then(buf => { releaseLane(lane); markLaneOk(lane); sampleSpeed(buf.byteLength, performance.now() - t, conc); win(buf) })
+            .catch(() => {
+              releaseLane(lane)
+              // 主动取消（竞速已有赢家 / seek）不算这条 lane 的账
+              if (!ctrl.signal.aborted) markLaneFail(lane, laneCount)
+              if (!settled && !this.stats.aborted) timers.push(setTimeout(race, 500))   // 这条失败 → 快速换一条
+            })
         }
 
         // 已有预取在途：先让它竞速（省一条连接），但别无限等——hedgeMs 后照常追加新连接抢
@@ -452,14 +501,15 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
       segPrefetchAborts.set(url, ctrl)
       const timer = setTimeout(() => ctrl.abort(), PREFETCH_TIMEOUT_MS)
       const aStart = performance.now()
-      const { lane, laneUrl } = acquireLane(url)   // 直连/代理分流：取在途最少的 lane
+      const { lane, laneUrl, laneCount } = acquireLane(url)   // 直连/代理分流：取在途最少的 lane
       segInflightStart.set(url, aStart)            // 计时：登记在途（重试则刷新起点）
       const conc = segPrefetching.size             // 采样时的在途并发数，供聚合可并行探针分档
       return fetch(laneUrl, { signal: ctrl.signal, referrerPolicy: 'no-referrer' })
         .then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error(`HTTP ${r.status}`)))
-        .then(buf => { clearTimeout(timer); releaseLane(lane); sampleSpeed(buf.byteLength, performance.now() - aStart, conc); return buf })
+        .then(buf => { clearTimeout(timer); releaseLane(lane); markLaneOk(lane); sampleSpeed(buf.byteLength, performance.now() - aStart, conc); return buf })
         .catch(e => {
           clearTimeout(timer); releaseLane(lane)
+          if (e?.name !== 'AbortError') markLaneFail(lane, laneCount)   // 超时/中止不算 lane 的账
           if (e?.name === 'AbortError' || attempt >= 1) throw e
           return new Promise<ArrayBuffer>((resolve, reject) => {
             setTimeout(() => {
@@ -626,5 +676,5 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     }
   }
 
-  return { getAheadBuffered, getCachedAhead, getAdaptivePrefetchCount, createHlsFragLoader, triggerAdaptivePrefetch, startOnePrefetch, strategy, resetStrategy, tick, primePrefetch, getStuckSegment }
+  return { getAheadBuffered, getCachedAhead, getAdaptivePrefetchCount, createHlsFragLoader, triggerAdaptivePrefetch, startOnePrefetch, strategy, resetStrategy, tick, primePrefetch, getStuckSegment, laneDead }
 }

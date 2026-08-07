@@ -1,5 +1,5 @@
 /**
- * 地址栏双向同步：`/video-player?url=xxx` 打开即播，播放中的列表/集数/手动策略又写回地址栏，
+ * 地址栏双向同步：`/video-player?url=xxx` 打开即播，播放中的列表/集数又写回地址栏，
  * 让地址栏本身就是一条可分享的直链。
  *
  * 支持的参数：
@@ -103,7 +103,7 @@ export function useVideoDeepLink(deps: VideoDeepLinkDeps) {
   }
 
   /**
-   * 反向同步：把当前播放列表/集数/手动策略写回地址栏。
+   * 反向同步：把当前播放列表/集数写回地址栏。
    *
    * 用原生 `history.replaceState` 而非 `router.replace`：本页只从 `window.location.search`
    * 读参数，不经 vue-router，避免 query 变化触发路由重解析；replace 也不污染后退栈。
@@ -122,14 +122,9 @@ export function useVideoDeepLink(deps: VideoDeepLinkDeps) {
         ? 'url=' + encodeURIComponent(urls[0])
         : 'urls=' + urls.map(u => encodeURIComponent(u)).join('|'))
       if (playlist.currentIndex.value > 0) parts.push('index=' + playlist.currentIndex.value)
-      // 只写手动策略：自动探测是引擎实时试探的，写进地址栏会把中间态固化，下次进来反而绕远
-      if (conn.manualStrategyOverride.value) {
-        if (conn.requestOrigin.value.trim()) parts.push('origin=' + encodeURIComponent(conn.requestOrigin.value.trim()))
-        if (conn.requestReferer.value.trim()) parts.push('referer=' + encodeURIComponent(conn.requestReferer.value.trim()))
-        if (conn.useProxy.value) parts.push('proxy=1')
-        if (conn.disguiseAsDownloader.value) parts.push('noref=1')
-        parts.push('manifestOnly=' + (conn.manifestOnly.value ? '1' : '0'))
-      }
+      // 连接策略一概不写进地址栏：它全部由可达性探测实时决定，固化成参数只会把中间态带走，
+      // 下次打开反而绕远（探测能自己得出结论，不需要链接告诉它怎么连）。
+      // 入向仍认 origin/referer（当候选值），只是不再由本页产出。
     }
 
     let search = parts.length ? '?' + parts.join('&') : ''

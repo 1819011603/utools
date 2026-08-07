@@ -40,8 +40,9 @@ export interface ParseRule {
   episodeRe?: string
 
   /**
-   * 播放时建议注入的 Referer。留空表示交给播放器的可达性探测自动决策——
-   * 写死策略会置 manualStrategyOverride，把探测整个关掉，通常更慢。
+   * 播放时建议的 Referer。留空则用源站播放页的 origin 兜底（见 video-parse 的 playAll）。
+   * 两者都只是**候选值**，播放器仍按 直连 → 代理·伪装 → 这对头 → 主域 逐级实测降级，
+   * 直连能通就走直连，不会因为写了它就白白多绕一层代理。
    */
   referer?: string
 }

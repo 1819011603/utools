@@ -447,6 +447,13 @@ const MAX_QUERY_LEN = 1800
 // 播放器持有的长列表交接槽（见 video-player.vue 的 HANDOFF_KEY）
 const HANDOFF_KEY = 'video-player-handoff'
 
+/** 源站播放页的 origin，带去播放器当防盗链候选值（推不出来的那类站点全靠它） */
+const originOfPage = (pageUrl: string): string => {
+  const u = (pageUrl || '').trim()
+  if (!u) return ''
+  try { return new URL(u.startsWith('//') ? 'https:' + u : u).origin } catch { return '' }
+}
+
 const playAll = (startIndex = 0) => {
   const eps = currentLine.value?.episodes || []
   // 按需取址的站点整份带走（列表里是占位地址，下标必须与作业单对齐）；
@@ -503,9 +510,17 @@ const playAll = (startIndex = 0) => {
     params.set('index', String(idx))
   }
 
-  // 只在规则显式声明时才带 referer：写死策略会置 manualStrategyOverride，
-  // 把播放器的自动可达性探测整个关掉，通常反而更慢
+  // 把「视频是从哪个站点解析出来的」当防盗链候选值带过去。
+  // 这类站点的防盗链认的是播放页域名，而视频常挂在毫不相干的 CDN 上
+  //（实测视频在 vod1.maowushi.com、防盗链认 aeete.com），播放器光看视频地址永远推不出来。
+  //
+  // 只是**候选值**，不是强制配置：播放器的可达性探测仍按 直连 → 代理·伪装 → 用这对头 → 主域
+  // 的顺序逐级降级，直连能通就走直连，带上它不会平白多绕一层代理。
+  // 规则显式声明的 referer 优先（那是站点作者写死的正确值）。
+  const srcOrigin = originOfPage(result.value?.pageUrl || inputUrl.value)
   if (result.value?.referer) params.set('referer', result.value.referer)
+  else if (srcOrigin) params.set('referer', srcOrigin + '/')
+  if (srcOrigin) params.set('origin', srcOrigin)
 
   navigateTo('/video-player?' + params.toString())
 }

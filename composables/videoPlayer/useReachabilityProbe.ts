@@ -66,6 +66,10 @@ export interface ProbeResult {
   segmentUrl?: string
   keyUrl?: string
   rootOrigin?: string               // rootRef 通道实际注入的主域 origin（空=该源没有主域可剥）
+  // headers 通道实际注入的那一对头。可能来自用户填的候选值，也可能是从视频地址推出来的，
+  // 结论要连着证据一起带走——否则 resolveConnConfig 只能猜，猜错就变成「探的是 A、用的是 B」
+  hdrOrigin?: string
+  hdrReferer?: string
 }
 
 const DEFAULT_TIMEOUT = 8000     // 单条通道超时
@@ -173,12 +177,14 @@ export async function probeReachability(
   async function runProbe(): Promise<ProbeResult> {
   const isHls = isM3u8Url(url)
 
-  // 防盗链通道的默认注入值：源站自己的 origin（与旧阶梯 step2 一致）
-  let selfOrigin = opts.origin ?? ''
+  // 防盗链通道注入什么：用户填了候选值就先试他的（有些站点的 Referer 根本推不出来，
+  // 比如视频在 vod1.maowushi.com 而防盗链认的是 aeete.com——那是两个毫不相干的域名）；
+  // 没填就退回从视频地址推出的 origin。
+  let selfOrigin = opts.origin?.trim() ?? ''
   try { if (!selfOrigin) selfOrigin = new URL(url).origin } catch {}
-  const referer = opts.referer || (selfOrigin ? selfOrigin.replace(/\/$/, '') + '/' : '')
-  // 主域兜底：只在自动推导时用（用户显式指定了 origin 就该听用户的，不该背着他换域名）
-  const rootOrigin = opts.origin ? '' : parentOrigin(url)
+  const referer = opts.referer?.trim() || (selfOrigin ? selfOrigin.replace(/\/$/, '') + '/' : '')
+  // 主域兜底照常保留：用户填的候选值也可能是错的，多一条压箱底的路没坏处
+  const rootOrigin = parentOrigin(url)
   // rootRef 与 headers 只差注入哪一对头，URL 形态完全相同
   const hdrFor = (c: Channel) => c === 'rootRef'
     ? { origin: rootOrigin, referer: rootOrigin + '/' }
@@ -189,7 +195,7 @@ export async function probeReachability(
     manifest: emptyAxis(), segment: emptyAxis(),
     manifestChannel: null, segmentChannel: null,
     dualChannel: false, degraded: false,
-    rootOrigin,
+    rootOrigin, hdrOrigin: selfOrigin, hdrReferer: referer,
   }
 
   // 探一根轴：直连 + 伪装并发，两者都没通才追加防盗链，防盗链也没通才试主域
@@ -345,12 +351,19 @@ export function resolveConnConfig(r: ProbeResult, selfOrigin: string): ConnConfi
   const man = r.manifestChannel
   if (!seg || !man) return null
 
-  // headers 注入源站自己的 origin，rootRef 注入主域——两者只差这一对头
-  const originOf = (c: Channel) => (c === 'rootRef' ? (r.rootOrigin || selfOrigin) : selfOrigin)
-  const withHeaders = (manifestOnly: boolean, origin: string): ConnConfig => ({
+  // 两条注入头的通道各用各的那一对：headers 用探测当时实际注入的（用户候选值或从地址推的），
+  // rootRef 用主域。selfOrigin 只作为老缓存（没记 hdrOrigin）的兜底。
+  const hdr = (c: Channel): { origin: string; referer: string } => {
+    const origin = c === 'rootRef' ? (r.rootOrigin || selfOrigin) : (r.hdrOrigin ?? selfOrigin)
+    const referer = c === 'rootRef'
+      ? (origin ? origin.replace(/\/$/, '') + '/' : '')
+      : (r.hdrReferer ?? (origin ? origin.replace(/\/$/, '') + '/' : ''))
+    return { origin, referer }
+  }
+  const withHeaders = (manifestOnly: boolean, c: Channel): ConnConfig => ({
     disguiseAsDownloader: false,
-    requestOrigin: origin,
-    requestReferer: origin ? origin.replace(/\/$/, '') + '/' : '',
+    requestOrigin: hdr(c).origin,
+    requestReferer: hdr(c).referer,
     manifestOnly,
     dualChannel: r.dualChannel,
   })
@@ -361,9 +374,9 @@ export function resolveConnConfig(r: ProbeResult, selfOrigin: string): ConnConfi
     // 分片要代理 → manifest 也必须过代理（分片 URL 的重写只发生在服务端 rewriteM3u8）。
     // 所以只能选一种「manifest 和分片同时可达」的代理口味；一种都凑不齐就判没结论，交回兜底。
     if (seg === 'disguise' && r.manifest.disguise === 'ok') return asDisguise(false)
-    if (seg === 'rootRef' && r.manifest.rootRef === 'ok') return withHeaders(false, originOf('rootRef'))
-    if (r.manifest.headers === 'ok' && r.segment.headers === 'ok') return withHeaders(false, selfOrigin)
-    if (r.manifest.rootRef === 'ok' && r.segment.rootRef === 'ok') return withHeaders(false, originOf('rootRef'))
+    if (seg === 'rootRef' && r.manifest.rootRef === 'ok') return withHeaders(false, 'rootRef')
+    if (r.manifest.headers === 'ok' && r.segment.headers === 'ok') return withHeaders(false, 'headers')
+    if (r.manifest.rootRef === 'ok' && r.segment.rootRef === 'ok') return withHeaders(false, 'rootRef')
     if (r.manifest.disguise === 'ok' && r.segment.disguise === 'ok') return asDisguise(false)
     return null
   }
@@ -376,7 +389,7 @@ export function resolveConnConfig(r: ProbeResult, selfOrigin: string): ConnConfi
     // 「代理·伪装 manifest + 分片直连」——旧线性阶梯根本表达不出来的组合
     return { disguiseAsDownloader: true, requestOrigin: '', requestReferer: '', manifestOnly: true, dualChannel: r.dualChannel }
   }
-  return withHeaders(true, originOf(man))
+  return withHeaders(true, man)
 }
 
 // 探测结论的一句话描述，供 UI 展示

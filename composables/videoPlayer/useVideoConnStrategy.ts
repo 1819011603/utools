@@ -33,15 +33,25 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   const { media, tier } = deps
   const { videoUrl, videoUrlInput, errorMessage } = media
 
-  // ── 代理相关 ref（getProxyUrl 直接读这些） ──
+  // ── 生效中的连接配置（getProxyUrl 直接读这些）──
+  // 这五个 ref 一律由引擎写：探测结论 / 站点规则 / 兜底阶梯。用户改不动它们，
+  // 因为「手动模式」已经取消了——所有情况都收敛进自动，见下面的 originHint。
   const useProxy = ref(false)
-  const requestOrigin = ref('')            // 注入的 Origin 请求头
-  const requestReferer = ref('')           // 注入的 Referer（空则自动为 origin + /）
-  const manifestOnly = ref(true)           // 仅代理 manifest，分片直连 CDN（更快）
+  const requestOrigin = ref('')            // 实际注入的 Origin 请求头
+  const requestReferer = ref('')           // 实际注入的 Referer（空则自动为 origin + /）
+  const manifestOnly = ref(true)           // 只代理 manifest，分片直连 CDN（更快）
   const disguiseAsDownloader = ref(false)  // 默认直连不注入；探测结论或站点规则可置真
   // 直连+代理双通道：分片在「直连 CDN」和「/api/proxy」两个 origin 间分流，把并发从 6 提到 ~12
   const dualChannel = ref(false)
-  const manualStrategyOverride = ref(false)  // 开启后用手动设置，引擎不再覆盖可达性
+
+  // ── 用户填的防盗链候选值 ──
+  // 不是配置，是**给探测的线索**：有些站点的 Referer 从视频地址根本推不出来
+  //（实测视频在 vod1.maowushi.com，防盗链认的却是 aeete.com，两个域名毫无关系）。
+  // 填了它，探测的 headers 通道就拿它去试；试不通照样降级到别的通道，不会把源卡死。
+  // 与 requestOrigin 分开存的理由：后者是「引擎最终用了什么」，会被探测结论覆写；
+  // 合并成一个 ref 的话，探测判定直连可达时会顺手把用户辛苦找到的域名抹掉。
+  const originHint = ref('')
+  const refererHint = ref('')
 
   const proxy = useVideoProxy({ requestOrigin, requestReferer, manifestOnly, disguiseAsDownloader, useProxy })
   const { isHlsUrl, effectiveReferer, refererHelp, getProxyUrl, getProxyPassthroughUrl, isDirectMode } = proxy
@@ -114,8 +124,8 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     try { localStorage.setItem(key, JSON.stringify(listRef.value)) } catch {}
   }
   const rememberHeaders = () => {
-    rememberOne(originHistory, ORIGIN_HISTORY_KEY, requestOrigin.value)
-    rememberOne(refererHistory, REFERER_HISTORY_KEY, requestReferer.value)
+    rememberOne(originHistory, ORIGIN_HISTORY_KEY, originHint.value)
+    rememberOne(refererHistory, REFERER_HISTORY_KEY, refererHint.value)
   }
 
   // 下拉建议：当前视频域名置顶 + 历史
@@ -165,9 +175,13 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     } else if (step === 2) {             // 代理+伪装全程：服务端补 CORS、不发 Origin/Referer
       disguiseAsDownloader.value = true
       requestOrigin.value = ''; requestReferer.value = ''; manifestOnly.value = false
-    } else if (step === 3) {             // 代理+注入 Origin/Referer：防盗链站点，全程代理
+    } else if (step === 3) {             // 代理+注入 Origin/Referer：防盗链站点，全程代理。
+      // 用户填了候选值就用他的——阶梯是探测没结论时才走的盲试，这时用户那点线索比从地址硬推更值钱
+      const o = originHint.value.trim() || host
       disguiseAsDownloader.value = false
-      requestOrigin.value = host; requestReferer.value = host ? host + '/' : ''; manifestOnly.value = false
+      requestOrigin.value = o
+      requestReferer.value = refererHint.value.trim() || (o ? o + '/' : '')
+      manifestOnly.value = false
     } else {                             // 同上，但注入主域：防盗链只认主域的站点（见 parentOrigin）
       const root = parentOrigin(videoUrl.value) || host
       disguiseAsDownloader.value = false
@@ -192,12 +206,15 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   const currentConnSignature = () =>
     [disguiseAsDownloader.value, requestOrigin.value, requestReferer.value, manifestOnly.value, dualChannel.value].join('|')
 
+  /** 交给探测的候选头（用户填的那对，空则由探测自己从视频地址推） */
+  const hintPair = () => ({ origin: originHint.value.trim(), referer: refererHint.value.trim() })
+
   /** 跑一次探测并套用结论。返回结果；没结论（degraded）时落回线性阶梯兜底 */
   const runProbe = async (url: string, blocking: boolean): Promise<ProbeResult | null> => {
     const seq = ++probeSeq
     if (blocking) isProbing.value = true
     try {
-      const r = await probeReachability(url)
+      const r = await probeReachability(url, hintPair())
       if (seq !== probeSeq) return null            // 已被更新的一次探测取代，丢弃
       probeResult.value = r
       saveLearnedProfile(hostOf(url), { reach: r as any })
@@ -229,7 +246,7 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     const host = hostOf(url)
     if (revalidatedHosts.has(host)) return
     revalidatedHosts.add(host)
-    probeReachability(url).then(r => {
+    probeReachability(url, hintPair()).then(r => {
       if (videoUrl.value.trim() !== url) return     // 用户已切走
       probeResult.value = r
       saveLearnedProfile(hostOf(url), { reach: r as any })
@@ -250,8 +267,8 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     const rule = matchSiteRule(url)
     activeRule.value = rule
     const learned = tier.beginHost(hostOf(url))
-    // 双通道：规则可指定；手动模式保留用户当前设置（dualChannel 与可达性无关，单独套用）
-    if (!manualStrategyOverride.value && rule?.dualChannel !== undefined) dualChannel.value = rule.dualChannel
+    // 双通道：规则可指定（dualChannel 与可达性无关，单独套用）
+    if (rule?.dualChannel !== undefined) dualChannel.value = rule.dualChannel
     if (url !== lastStrategyUrl) {
       autoStrategyStep.value = 0
       ladderMode.value = false
@@ -259,7 +276,6 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
       probeResult.value = null
       lastStrategyUrl = url
     }
-    if (manualStrategyOverride.value) return  // 手动模式：保留用户当前代理设置，不自动改
     if (ruleControlsReachability(rule)) {
       if (rule!.useProxy !== undefined) useProxy.value = rule!.useProxy
       if (rule!.manifestOnly !== undefined) manifestOnly.value = rule!.manifestOnly
@@ -292,7 +308,6 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
    * 重探还救不回来才退回线性阶梯继续盲试。返回 true 表示已接手（调用方别再报错）。
    */
   const escalateStrategyAndReload = (): boolean => {
-    if (manualStrategyOverride.value) return false
     if (ruleControlsReachability(activeRule.value)) return false
     const url = videoUrl.value.trim()
     if (url && isProbeable(url) && !ladderMode.value && reprobedFor !== url) {
@@ -314,7 +329,6 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   // ── 展示 ──
 
   const strategyLabel = computed(() => {
-    if (manualStrategyOverride.value) return '手动'
     if (ruleControlsReachability(activeRule.value)) return `规则(${activeRule.value?.name})`
     if (isProbing.value) return '探测中…'
     if (probeResult.value && !probeResult.value.degraded) return describeProbe(probeResult.value)
@@ -339,51 +353,66 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   // ── 用户操作 ──
 
   /**
-   * 用户改动任一连接设置 → 转手动（引擎不再覆盖可达性；并发/预取仍全自动）。
-   * 必须重载视频：连接策略只在加载时生效（manifest 是否带 noseg 决定分片直连/代理），
-   * 不重载则 hls.js 仍在用上次策略解析出的分片 URL（改「仅代理 Manifest」看似不生效）。
+   * 用户改了 Origin/Referer 候选值 → 拿新线索重探一遍。
+   *
+   * 必须作废该 host 的可达性缓存：缓存只按 host 存，不含候选值，
+   * 不清的话新填的域名压根没机会被试（直接命中上一次用旧候选值探出的结论）。
+   * 也必须重载视频：连接策略只在加载时生效（manifest 带不带 noseg 决定分片直连还是走代理），
+   * 不重载则 hls.js 仍在用上次那批分片 URL，看着就像「填了没反应」。
    */
-  const onManualProxyChange = () => {
-    manualStrategyOverride.value = true
-    rememberHeaders()   // 记住本次 Origin/Referer 供下拉复用
+  const onHeaderHintChange = () => {
+    rememberHeaders()   // 记住本次候选值供下拉复用
+    invalidateReachCache()
+    ladderMode.value = false
+    autoStrategyStep.value = 0
+    lastStrategyUrl = ''
+    probeResult.value = null
     deps.onDirty()
-    deps.syncUrl()      // 手动策略要能随链接带走
     if (videoUrl.value) deps.reload()
   }
 
-  // 交回引擎全自动：顺带作废该 host 的可达性缓存，强制重探一次
-  //（用户点这个按钮多半就是因为觉得当前选择不对）
-  const resetToAuto = () => {
-    manualStrategyOverride.value = false
-    autoStrategyStep.value = 0
-    ladderMode.value = false
+  const invalidateReachCache = () => {
     reprobedFor = ''
-    probeResult.value = null
-    lastStrategyUrl = ''
     if (tier.currentHost.value) {
       saveLearnedProfile(tier.currentHost.value, { reach: undefined })
       revalidatedHosts.delete(tier.currentHost.value)
     }
-    deps.onDirty()
-    deps.syncUrl()      // 策略参数从地址栏摘掉
-    if (videoUrl.value) deps.reload()
   }
 
-  // 手动重探（作废缓存，重新实测一遍并按结论重载）
+  // 重探（作废缓存，重新实测一遍并按结论重载）
   const reprobeNow = async () => {
     const url = videoUrl.value.trim()
     if (!url || !isProbeable(url) || isProbing.value) return
     ladderMode.value = false
-    reprobedFor = ''
+    invalidateReachCache()
     const before = currentConnSignature()
     await runProbe(url, true)
     if (currentConnSignature() !== before) deps.reload()
   }
 
+  /**
+   * 用户填的候选值这次到底用上没有。UI 据此标「已采用 / 未采用」——
+   * 只显示输入框而不说结果的话，用户没法判断是自己填错了还是引擎压根没试。
+   */
+  // Referer 输入框的说明：跟着候选 Origin 走（useVideoProxy 那个 refererHelp 读的是引擎生效值，
+  // 用在这里会显示成引擎当前用的域名，跟用户正在填的候选值对不上）
+  const refererHintHelp = computed(() => {
+    const o = originHint.value.trim()
+    return '留空时按 Origin 自动补 ' + (o ? o.replace(/\/$/, '') + '/' : '「Origin + /」')
+  })
+
+  const hintStatus = computed<'' | 'adopted' | 'unused'>(() => {
+    const h = originHint.value.trim()
+    if (!h) return ''
+    return requestOrigin.value.trim() === h ? 'adopted' : 'unused'
+  })
+
   return {
-    // 代理 ref
+    // 生效中的连接配置（引擎写，UI 只读）
     useProxy, requestOrigin, requestReferer, manifestOnly, disguiseAsDownloader, dualChannel,
-    manualStrategyOverride, activeRule,
+    activeRule,
+    // 用户填的候选头
+    originHint, refererHint, hintStatus, refererHintHelp, onHeaderHintChange,
     // 代理 URL 生成
     isHlsUrl, effectiveReferer, refererHelp, getProxyUrl, getProxyPassthroughUrl, isDirectMode,
     // 可用性 / 提示
@@ -395,7 +424,7 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     probeResult, isProbing, ladderMode, autoStrategyStep,
     applyStrategy, escalateStrategyAndReload, applyReachabilityStep,
     // 展示 / 操作
-    strategyLabel, probeRows, onManualProxyChange, resetToAuto, reprobeNow,
+    strategyLabel, probeRows, reprobeNow,
   }
 }
 

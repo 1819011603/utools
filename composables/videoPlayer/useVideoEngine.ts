@@ -80,8 +80,17 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   })
   const {
     getAheadBuffered, getCachedAhead, createHlsFragLoader, triggerAdaptivePrefetch,
-    startOnePrefetch, strategy, resetStrategy, tick: prefetchTick, primePrefetch, getStuckSegment,
+    startOnePrefetch, strategy, resetStrategy, tick: prefetchTick, primePrefetch, getStuckSegment, laneDead,
   } = prefetch
+
+  // 双通道实际有没有跑起来：真实请求连续失败会把某条 lane 熔断（见 useHlsPrefetch 的 markLaneFail）。
+  // 0 = 直连 lane，1 = 代理 lane（getLaneUrls 的顺序），供 UI 说明「为什么开着却只有一条在跑」。
+  const deadLaneLabel = computed(() => {
+    const dead = laneDead.value
+    if (dead[0]) return '直连'
+    if (dead[1]) return '代理'
+    return ''
+  })
 
   // 卡顿记录器：以 <video> 真实停顿为地面真值，喂给自愈调参环（selfHeal）
   const stall = useStallTracker(() => videoEl.value)
@@ -390,7 +399,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     prefetchInfo, strategy, stall,
     getAheadBuffered, getCachedAhead, primePrefetch, startOnePrefetch, prefetchTick,
     abortAllPrefetches, triggerAdaptivePrefetch,
-    aggregateKBps, aggregateMbps,
+    aggregateKBps, aggregateMbps, deadLaneLabel,
     // 起播锚点
     clearStartAnchor, isArrivingAtStart,
     // 统计

@@ -61,12 +61,17 @@ export interface SavedState {
   autoBestRate: boolean
   skipIntro: number
   skipOutro: number
+  // 引擎当前生效的连接配置。存下来只为刷新后首屏能立刻显示上次的结论，
+  // 真正的取值仍由 applyStrategy 每次加载时重新决定（探测/规则/阶梯）。
   requestOrigin: string
   requestReferer: string
   manifestOnly: boolean
   disguiseAsDownloader: boolean
   dualChannel?: boolean
-  manualStrategyOverride: boolean  // 手动连接策略（持久化，避免刷新后被自动策略覆盖）
+  // 用户填的防盗链候选值。必须持久化——这类域名（如 vod1.maowushi.com 对应 aeete.com）
+  // 从视频地址推不出来，全靠用户自己找，丢一次就得重找一次
+  originHint?: string
+  refererHint?: string
   hlsConfig: HlsTuning
   tierOverrides?: Partial<TierParams>  // 抗卡策略参数覆盖（空=跟随档位）
   // 按需取址的作业单。列表里存的是占位地址，没有它刷新后一集都播不了

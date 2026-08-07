@@ -109,7 +109,8 @@ export function useVideoPlayerController() {
         manifestOnly: conn.manifestOnly.value,
         disguiseAsDownloader: conn.disguiseAsDownloader.value,
         dualChannel: conn.dualChannel.value,
-        manualStrategyOverride: conn.manualStrategyOverride.value,
+        originHint: conn.originHint.value,
+        refererHint: conn.refererHint.value,
         hlsConfig: { ...media.hlsConfig.value },
         tierOverrides: { ...tier.tierOverrides.value },
         lazyTask: handoff.lazyTask.value,
@@ -135,9 +136,10 @@ export function useVideoPlayerController() {
     conn.manifestOnly.value = s.manifestOnly ?? true
     conn.disguiseAsDownloader.value = s.disguiseAsDownloader ?? false
     conn.dualChannel.value = s.dualChannel ?? false
-    conn.manualStrategyOverride.value = s.manualStrategyOverride ?? false
-    // 手动过则展开显示当前设置
-    if (conn.manualStrategyOverride.value) media.showAdvancedProxy.value = true
+    conn.originHint.value = s.originHint ?? ''
+    conn.refererHint.value = s.refererHint ?? ''
+    // 填过候选头就展开设置区，否则用户看不到自己填的值还在不在
+    if (conn.originHint.value || conn.refererHint.value) media.showAdvancedProxy.value = true
     if (s.hlsConfig) media.hlsConfig.value = { ...media.hlsConfig.value, ...s.hlsConfig }
     if (s.tierOverrides) tier.tierOverrides.value = { ...s.tierOverrides }
   }
@@ -171,17 +173,12 @@ export function useVideoPlayerController() {
 
     if (queryParams.urls.length) {
       media.videoUrlInput.value = queryParams.urls.join('\n')
-      // 连接策略随参数一起带过来时转手动，避免自动探测把注入的 Origin/Referer 冲掉
-      const hasStrategyParam = queryParams.origin !== undefined || queryParams.referer !== undefined
-        || queryParams.proxy !== undefined || queryParams.noref !== undefined
-        || queryParams.manifestOnly !== undefined
-      if (hasStrategyParam) {
-        if (queryParams.origin !== undefined) conn.requestOrigin.value = queryParams.origin
-        if (queryParams.referer !== undefined) conn.requestReferer.value = queryParams.referer
-        if (queryParams.proxy !== undefined) conn.useProxy.value = queryParams.proxy
-        if (queryParams.noref !== undefined) conn.disguiseAsDownloader.value = queryParams.noref
-        if (queryParams.manifestOnly !== undefined) conn.manifestOnly.value = queryParams.manifestOnly
-        conn.manualStrategyOverride.value = true
+      // 老链接里的 origin/referer 收作候选值喂给探测（不再强制生效——连接方式一律自动决定）。
+      // proxy/noref/manifestOnly 直接忽略：它们是引擎的中间态，固化下来只会让探测绕远。
+      // 注意这几个键仍留在 PAGE_QUERY_KEYS 里，否则 `&origin=` 这段会被当成视频地址的一部分回写。
+      if (queryParams.origin !== undefined || queryParams.referer !== undefined) {
+        if (queryParams.origin !== undefined) conn.originHint.value = queryParams.origin
+        if (queryParams.referer !== undefined) conn.refererHint.value = queryParams.referer
         media.showAdvancedProxy.value = true
       }
       await nextTick()

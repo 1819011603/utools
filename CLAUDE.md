@@ -125,14 +125,30 @@ UI 分块在 `components/videoPlayer/`：`SourceCard`（输入+连接策略+探�
 - Node 上动态加载 undici Agent 放宽 TLS、超时拉到 5 分钟；CF Workers 上降级原生 fetch
 - `fetchWithHeaderProbe` 会并发探测「带头/不带头」哪种能过，结果按 host 缓存 30 分钟
 
-页面侧有三层策略，优先级 **手动 > 站点规则 > 自动探测**：
+页面侧只有两层，优先级 **站点规则 > 自动探测**：
 
 1. **自动可达性探测**（`composables/videoPlayer/useReachabilityProbe.ts`）：起播前用几个小请求把
    **manifest 轴**和**分片轴**各自的可达性实测出来，再决策。取代了早先「直连→失败重载→代理→失败重载→代理+防盗链」的线性盲试。
 2. **站点规则**（`composables/videoSiteRules.ts`）：按 host 子串或 `/正则/` 匹配，内置 jisuzyv/xhscdn/huyall 三条。
    **只剩内置表**——用户自定义规则的编辑界面已移除（`matchSiteRule(url)` 不再传用户规则），加规则直接改这个文件。
    注意：规则里只要写了 `useProxy`/`manifestOnly`/`disguiseAsDownloader`/`origin`/`referer` 任一字段就算「接管可达性」，会整站跳过探测——只想调并发就别写这些字段。
-3. **手动**：用户改任一连接设置即置 `manualStrategyOverride`，引擎不再覆盖（改动必须 `loadVideo()` 重载——连接策略只在加载时生效）
+
+**没有手动模式了**（`manualStrategyOverride` 已整条删除）。原来「用户改任一连接设置就把引擎的手按住」
+带来的问题是：探测覆盖不到的情况（分片轴没测到、双通道没证据）会被一个手动开关永久固化，
+用户还看不出是自己按住的还是引擎判的。现在全部收敛进自动：
+
+- **`originHint` / `refererHint`**：用户填的防盗链**候选值**，不是配置。喂给探测的 `headers` 通道，
+  试得通就用、试不通照样降级到别的通道。与 `requestOrigin`（引擎最终生效值）**分开两个 ref**——
+  合并成一个的话，探测判定直连可达时会顺手把用户辛苦找到的域名抹掉。
+  UI 上用 `hintStatus` 标「已采用 / 未采用」，否则用户没法判断是自己填错了还是引擎压根没试。
+  改动候选值必须作废该 host 的 `reach` 缓存（缓存只按 host 存、不含候选值，不清就没机会被试到）。
+- **「代理 Manifest」「直连+代理双通道」改成只读状态显示**：它们本来就是 `resolveConnConfig` 每次算出来的，
+  做成可点的复选框只会让人以为能覆盖，下次加载又被写回去。
+- **`lane 熔断` 兜最后一道**（`useHlsPrefetch` 的 `markLaneFail`）：真实请求连续失败 3 次就停用那条 lane，
+  双通道自动退回单通道。探测不可能覆盖所有情况，真实请求本身就是最后一次探测。
+- **连接策略不再写进地址栏**：`origin/referer/proxy/noref/manifestOnly` 都不产出了（入向仍认
+  `origin`/`referer` 当候选值，且这些 key **必须留在 `PAGE_QUERY_KEYS` 里**，
+  否则老链接里的 `&origin=` 会被当成视频地址的一部分回写进 URL）。
 
 ### 为什么必须两轴分开
 
@@ -238,14 +254,17 @@ manifest 不过代理就没法把分片指向代理）；**分片可直连 → m
   凡不在 `PAGE_QUERY_KEYS` 里的片段一律原样回写进最近的那个视频地址。
 - 只做 percent 解码，**不把 `+` 当空格**（签名里常有裸 `+`，转空格直接 403）
 - 地址自带参数名与本页参数重名时才需 `encodeURIComponent` 整串编码
-- 传了任一策略参数会置 `manualStrategyOverride = true`，否则自动阶梯会把注入的 Origin/Referer 冲掉
+- `origin`/`referer` 收作**候选值**（`originHint`/`refererHint`）交给探测，不再强制生效；
+  `proxy`/`noref`/`manifestOnly` 直接忽略——它们是引擎的中间态，固化下来只会让探测绕远。
+  **但这五个 key 仍必须留在 `PAGE_QUERY_KEYS` 里**：不认它们的话，老链接里的 `&origin=…`
+  会走「未知片段一律回写进视频地址」那条路，把参数拼进 URL 里，源站直接 404。
 
-**出向** `syncUrlToQuery()`：在 `playByIndex` / `clearPlaylist` / `handleLocalFiles` /
-`onManualProxyChange` / `resetToAuto` 里调用，把当前播放列表 + 集数 + 手动策略写回地址栏。
+**出向** `syncUrlToQuery()`：在 `playByIndex` / `clearPlaylist` / `handleLocalFiles` 里调用，
+把当前播放列表 + 集数写回地址栏。
 - 用原生 `history.replaceState` 而非 `router.replace`——本页只读 `window.location.search`，
   不经 vue-router，避免 query 变化触发路由重解析，也不污染后退栈
 - 播放器已移除本地文件（拖拽上传）功能：只放网络地址，`crossorigin` 恒为 `anonymous`
-- 只写手动策略；自动阶梯是引擎实时试探的，固化中间态反而让下次进来绕远
+- **连接策略一概不写**：全部由可达性探测实时决定，写进链接只是把中间态带走，下次打开反而绕远
 - 多个地址用 `urls=a|b` 省长度；超 2000 字符退化成只带当前这一集
 - 入向的非规范写法（未编码的 `&`）会在出向被自动规范成 percent 编码
 
@@ -312,8 +331,12 @@ ncat 系挂了 cdndefend：首访返回 **HTTP 850** + 挑战页，要求暴力�
   这类线路整条都取不到 → 先探第一集，拿不到就立刻收工并回 `lineUnsupported`，
   否则要白等完剩下几十集的请求才知道结果是空的
 - **有些线路的地址带时效签名**（`?sign=…&timestamp=…`），会过期，UI 上要提示别收藏/分享
-- 跳转 `/video-player` 时**不带** `proxy`/`noref`/`origin`/`referer`：这些会置 `manualStrategyOverride`，
-  把可达性探测整个关掉。gsuus 系正是靠「manifest 先只探直连」从 12s 降到 1.5s 的
+- 跳转 `/video-player` 时**带上源站播放页的 origin**（`playAll` 里的 `originOfPage`）当防盗链候选值：
+  这类站点的防盗链认的是播放页域名，而视频常挂在毫不相干的 CDN 上
+  （实测视频在 `vod1.maowushi.com`、防盗链认 `aeete.com`），播放器光看视频地址永远推不出来。
+  只是候选值，探测仍从直连开始逐级降级，带上它不会平白多绕一层代理。
+  **`proxy`/`noref`/`manifestOnly` 仍然不带**——那是引擎中间态，固化下来只会让探测绕远
+  （gsuus 系正是靠「manifest 先只探直连」从 12s 降到 1.5s 的）
 - **线路上的集数徽标不等于实际能解析的集数**：徽标是站点自报的 `source-item-num`，
   真实集数以解析出的 `episode-item` 锚点数为准（同一部片子各线路可能不同，实测 40 / 53 / 73 都有）
 
