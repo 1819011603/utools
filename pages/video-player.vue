@@ -68,35 +68,8 @@ onMounted(() => ctx.mount())
 onUnmounted(() => ctx.unmount())
 </script>
 
-<style scoped>
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.3s ease;
-}
-
-.fade-enter-from,
-.fade-leave-to {
-  opacity: 0;
-}
-
-.slide-up-enter-active,
-.slide-up-leave-active {
-  transition: all 0.3s ease;
-}
-
-.slide-up-enter-from,
-.slide-up-leave-to {
-  opacity: 0;
-  transform: translateY(20px);
-}
-
-/* 自定义滑块样式 */
-input[type="range"]::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 12px;
-  height: 12px;
-  background: white;
-  border-radius: 50%;
-  cursor: pointer;
-}
-</style>
+<!--
+  本页没有自己的样式：过渡类名和音量滑块的皮肤都挪进了 components/videoPlayer/Stage.vue。
+  它们原本写在这里，而元素在 Stage 子组件内——父组件的 scoped 罩不到子组件内部，
+  一直没生效（过渡是硬切、滑块是浏览器默认样式）。scoped 样式必须跟元素同一个组件。
+-->

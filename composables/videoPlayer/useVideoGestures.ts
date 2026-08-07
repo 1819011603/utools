@@ -47,8 +47,8 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
   const brightness = ref(1)
   /** 中央 HUD：拖拽过程中的实时读数 */
   const gestureHud = ref<{ kind: HudKind; text: string; percent?: number; delta?: string } | null>(null)
-  /** 双击 ±5s 的左右水波纹反馈（key 自增以重放动画） */
-  const seekFlash = ref<{ side: 'left' | 'right'; key: number } | null>(null)
+  /** 双击 ±5s 的左右水波纹反馈（key 自增以重放动画；secs 连点累加，见 flashSide） */
+  const seekFlash = ref<{ side: 'left' | 'right'; key: number; secs: number } | null>(null)
 
   let lockBtnTimer: ReturnType<typeof setTimeout> | null = null
   let longPressTimer: ReturnType<typeof setTimeout> | null = null
@@ -81,10 +81,17 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
     try { navigator.vibrate?.(ms) } catch { /* iOS 没有，忽略 */ }
   }
 
+  /**
+   * 水波纹反馈。同一侧连着双击会**累加读数**（5s → 10s → 15s…）：
+   * 连点时用户想的是「一直往前」，每次都从 5s 重新数会让人不确定到底跳了几次。
+   * 累加窗口就是水波纹自己的存活时间——纹还在就算连着。
+   */
   const flashSide = (side: 'left' | 'right') => {
-    seekFlash.value = { side, key: ++flashSeq }
+    const cur = seekFlash.value
+    const secs = cur?.side === side ? cur.secs + DOUBLE_TAP_SEEK : DOUBLE_TAP_SEEK
+    seekFlash.value = { side, key: ++flashSeq, secs }
     if (seekFlashTimer) clearTimeout(seekFlashTimer)
-    seekFlashTimer = setTimeout(() => { seekFlash.value = null }, 600)
+    seekFlashTimer = setTimeout(() => { seekFlash.value = null }, 800)
   }
 
   const revealLockBtn = () => {

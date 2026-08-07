@@ -77,73 +77,121 @@
         </div>
       </div>
 
-      <Transition name="fade">
+      <!-- 播放/暂停的中央图标：外圈同时炸开一圈光晕，比单纯淡出有「按下去了」的实感 -->
+      <Transition name="pop">
         <div v-if="showPlayIcon" class="absolute inset-0 flex items-center justify-center pointer-events-none">
-          <div class="w-20 h-20 rounded-full bg-black/50 flex items-center justify-center">
-            <UIcon :name="isPlaying ? 'i-heroicons-pause' : 'i-heroicons-play'" class="w-10 h-10 text-white" />
+          <div class="relative">
+            <span class="absolute inset-0 rounded-full bg-white/25 blast" />
+            <div class="w-20 h-20 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center
+                        ring-1 ring-white/20">
+              <UIcon :name="isPlaying ? 'i-heroicons-pause' : 'i-heroicons-play'" class="w-10 h-10 text-white" />
+            </div>
           </div>
         </div>
       </Transition>
 
-      <!-- 双击 ±5s 的落点反馈：不给这一下反馈的话，跳了 5 秒和「没点到」看起来一模一样 -->
-      <Transition name="fade">
+      <!--
+        双击 ±5s 的落点反馈：不给这一下反馈的话，跳了 5 秒和「没点到」看起来一模一样。
+        半屏椭圆水波纹 + 三个依次亮起的箭头，读数在同侧连点时累加（5→10→15）。
+      -->
+      <Transition name="ripple">
         <div
           v-if="seekFlash"
-          :key="seekFlash.key"
-          class="absolute inset-y-0 w-[30%] flex items-center justify-center pointer-events-none bg-white/10"
-          :class="seekFlash.side === 'left' ? 'left-0 rounded-r-full' : 'right-0 rounded-l-full'"
+          :key="seekFlash.side"
+          class="absolute inset-y-0 w-[38%] overflow-hidden pointer-events-none"
+          :class="seekFlash.side === 'left' ? 'left-0' : 'right-0'"
         >
-          <div class="flex flex-col items-center text-white">
-            <UIcon
-              :name="seekFlash.side === 'left' ? 'i-heroicons-backward-solid' : 'i-heroicons-forward-solid'"
-              class="w-8 h-8"
-            />
-            <span class="text-sm font-medium">5 秒</span>
+          <span
+            class="absolute top-1/2 -translate-y-1/2 w-[150%] aspect-square rounded-full bg-white/15 ripple-blob"
+            :class="seekFlash.side === 'left' ? '-left-1/2' : '-right-1/2'"
+          />
+          <div class="absolute inset-0 flex flex-col items-center justify-center gap-1 text-white drop-shadow-lg">
+            <div class="flex" :class="seekFlash.side === 'left' ? 'flex-row-reverse' : ''">
+              <UIcon
+                v-for="i in 3"
+                :key="i"
+                :name="seekFlash.side === 'left' ? 'i-heroicons-chevron-left' : 'i-heroicons-chevron-right'"
+                class="w-6 h-6 -mx-1 chev"
+                :style="{ animationDelay: (i - 1) * 0.12 + 's' }"
+              />
+            </div>
+            <!-- key 带上秒数：连点时数字换掉要重放一次弹跳，否则看不出又加了 5 秒 -->
+            <span :key="seekFlash.secs" class="text-sm font-semibold tabular-nums secs-pop">
+              {{ seekFlash.secs }} 秒
+            </span>
           </div>
         </div>
       </Transition>
 
       <!-- 长按加速中的常驻提示：不显示的话松手前用户不知道自己触发了什么 -->
-      <Transition name="fade">
+      <Transition name="drop">
         <div v-if="boostActive" class="absolute top-4 left-1/2 -translate-x-1/2 pointer-events-none">
-          <div class="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black/70 text-white text-sm font-medium">
-            <UIcon name="i-heroicons-forward-solid" class="w-4 h-4 animate-pulse" />
+          <div class="flex items-center gap-2 px-4 py-2 rounded-full text-white text-sm font-semibold
+                      bg-gradient-to-r from-violet-600/90 to-fuchsia-500/90 backdrop-blur-sm
+                      ring-1 ring-white/25 shadow-lg shadow-violet-900/40 boost-glow">
+            <span class="flex">
+              <UIcon
+                v-for="i in 3"
+                :key="i"
+                name="i-heroicons-play-solid"
+                class="w-3.5 h-3.5 -mx-0.5 chev"
+                :style="{ animationDelay: (i - 1) * 0.15 + 's' }"
+              />
+            </span>
             {{ boostRate }}x 快进中
           </div>
         </div>
       </Transition>
 
       <!-- 滑动手势的中央读数（进度/音量/亮度共用一张） -->
-      <Transition name="fade">
+      <Transition name="pop">
         <div v-if="gestureHud" class="absolute inset-0 flex items-center justify-center pointer-events-none">
-          <div class="px-4 py-3 rounded-xl bg-black/70 text-white min-w-[140px] flex flex-col items-center gap-2">
+          <div class="px-5 py-3.5 rounded-2xl bg-black/60 backdrop-blur-md text-white min-w-[160px]
+                      flex flex-col items-center gap-2.5 ring-1 ring-white/15 shadow-2xl">
             <div class="flex items-center gap-2">
               <UIcon
                 :name="gestureHud.kind === 'seek' ? 'i-heroicons-arrows-right-left'
                   : gestureHud.kind === 'volume' ? volumeIcon : 'i-heroicons-sun'"
-                class="w-5 h-5"
+                class="w-5 h-5 text-violet-300"
               />
               <span class="font-mono text-sm">{{ gestureHud.text }}</span>
-              <span v-if="gestureHud.delta" class="text-violet-300 text-sm font-mono">{{ gestureHud.delta }}</span>
+              <span
+                v-if="gestureHud.delta"
+                :key="gestureHud.delta"
+                class="text-sm font-mono font-semibold secs-pop"
+                :class="gestureHud.delta.startsWith('+') ? 'text-emerald-300' : 'text-amber-300'"
+              >{{ gestureHud.delta }}</span>
             </div>
-            <div class="w-32 h-1 bg-white/25 rounded-full overflow-hidden">
-              <div class="h-full bg-violet-400" :style="{ width: (gestureHud.percent ?? 0) + '%' }" />
+            <div class="w-36 h-1.5 bg-white/20 rounded-full overflow-hidden">
+              <div
+                class="h-full rounded-full bg-gradient-to-r from-violet-400 to-fuchsia-400 shadow-[0_0_8px_rgba(167,139,250,.9)]"
+                :style="{ width: (gestureHud.percent ?? 0) + '%' }"
+              />
             </div>
           </div>
         </div>
       </Transition>
 
       <!-- 锁定按钮：锁上后它是唯一还能点的东西，所以点画面任意处都会让它露 3 秒 -->
-      <Transition name="fade">
+      <Transition name="pop">
         <button
           v-if="isLocked ? showLockBtn : (showControls || !isPlaying)"
           data-no-gesture
-          class="absolute left-3 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-black/55 text-white
-                 flex items-center justify-center hover:bg-black/75 transition-colors"
+          class="absolute left-3 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full text-white
+                 flex items-center justify-center backdrop-blur-sm ring-1 transition-all duration-300
+                 hover:scale-110 active:scale-95"
+          :class="isLocked
+            ? 'bg-amber-500/80 ring-amber-200/40 shadow-lg shadow-amber-900/40'
+            : 'bg-black/55 ring-white/15 hover:bg-black/75'"
           :title="isLocked ? '解锁' : '锁定屏幕（屏蔽手势与控制栏）'"
           @click="toggleLock"
         >
-          <UIcon :name="isLocked ? 'i-heroicons-lock-closed' : 'i-heroicons-lock-open'" class="w-5 h-5" />
+          <!-- key 换掉 → 图标重新入场，锁上/解锁那一下能看见是「翻」过去的 -->
+          <UIcon
+            :key="String(isLocked)"
+            :name="isLocked ? 'i-heroicons-lock-closed' : 'i-heroicons-lock-open'"
+            class="w-5 h-5 lock-flip"
+          />
         </button>
       </Transition>
 
@@ -165,9 +213,15 @@
             @mouseleave="hoverTime = null"
           >
             <div class="absolute h-full bg-white/40 rounded-full" :style="{ width: bufferedPercent + '%' }" />
-            <div class="absolute h-full bg-violet-500 rounded-full transition-all" :style="{ width: progressPercent + '%' }" />
             <div
-              class="absolute top-1/2 -translate-y-1/2 w-4 h-4 bg-white rounded-full shadow-lg opacity-0 group-hover/progress:opacity-100 transition-opacity"
+              class="absolute h-full rounded-full transition-all bg-gradient-to-r from-violet-500 to-fuchsia-400
+                     shadow-[0_0_10px_rgba(167,139,250,.75)]"
+              :style="{ width: progressPercent + '%' }"
+            />
+            <div
+              class="absolute top-1/2 -translate-y-1/2 w-4 h-4 bg-white rounded-full shadow-lg
+                     opacity-0 scale-50 group-hover/progress:opacity-100 group-hover/progress:scale-100
+                     transition-all duration-200 ring-2 ring-violet-400/60"
               :style="{ left: `calc(${progressPercent}% - 8px)` }"
             />
             <div
@@ -323,3 +377,97 @@ const {
 // 倍速菜单点击外部关闭
 onClickOutside(speedMenuRef, () => { showSpeedMenu.value = false })
 </script>
+
+<!--
+  这些过渡类名以前只写在 pages/video-player.vue 的 scoped 样式里，
+  而元素在本组件内——父组件的 scoped 罩不到子组件内部，等于一直没生效（淡入淡出全是硬切）。
+  一律就近放在用它的组件里。
+-->
+<style scoped>
+/* 控制栏：起落带一点缓动过冲，比线性 ease 显得「托」得住 */
+.slide-up-enter-active { transition: opacity .25s ease, transform .32s cubic-bezier(.22, 1.4, .36, 1); }
+.slide-up-leave-active { transition: opacity .2s ease, transform .2s ease-in; }
+.slide-up-enter-from,
+.slide-up-leave-to { opacity: 0; transform: translateY(24px); }
+
+/* 通用弹入：中央图标、HUD、锁定键共用 */
+.pop-enter-active { transition: opacity .16s ease, transform .28s cubic-bezier(.2, 1.5, .4, 1); }
+.pop-leave-active { transition: opacity .35s ease, transform .35s ease-out; }
+.pop-enter-from { opacity: 0; transform: scale(.7); }
+.pop-leave-to { opacity: 0; transform: scale(1.25); }
+
+/* 顶部提示条从上方掉下来 */
+.drop-enter-active { transition: opacity .18s ease, transform .3s cubic-bezier(.2, 1.5, .4, 1); }
+.drop-leave-active { transition: opacity .18s ease, transform .18s ease-in; }
+.drop-enter-from,
+.drop-leave-to { opacity: 0; transform: translateY(-14px) scale(.9); }
+
+/* 双击区整体淡入淡出（水波纹自己另有动画） */
+.ripple-enter-active { transition: opacity .12s ease; }
+.ripple-leave-active { transition: opacity .45s ease; }
+.ripple-enter-from,
+.ripple-leave-to { opacity: 0; }
+
+/* 播放/暂停图标外圈炸开的一圈光晕 */
+.blast { animation: blast .5s ease-out forwards; }
+@keyframes blast {
+  from { transform: scale(1); opacity: .55; }
+  to   { transform: scale(1.9); opacity: 0; }
+}
+
+/* 双击落点的水波纹：从屏幕外缘涌进来再退回去 */
+.ripple-blob { animation: blob .7s ease-out; }
+@keyframes blob {
+  0%   { transform: translateY(-50%) scale(.55); opacity: 0; }
+  35%  { opacity: 1; }
+  100% { transform: translateY(-50%) scale(1); opacity: 0; }
+}
+
+/* 三个箭头依次亮起（delay 由内联 style 给），长按提示的三角也复用 */
+.chev { animation: chev 1s ease-in-out infinite; }
+@keyframes chev {
+  0%, 100% { opacity: .3; }
+  45%      { opacity: 1; }
+}
+
+/* 秒数变化时弹一下：连点累加要看得出来又加了 5 秒 */
+.secs-pop { animation: secs .3s cubic-bezier(.2, 1.6, .4, 1); }
+@keyframes secs {
+  from { transform: scale(1.5); }
+  to   { transform: scale(1); }
+}
+
+/* 长按提示条的呼吸光晕 */
+.boost-glow { animation: glow 1.4s ease-in-out infinite; }
+@keyframes glow {
+  0%, 100% { box-shadow: 0 0 14px rgba(167, 139, 250, .45); }
+  50%      { box-shadow: 0 0 26px rgba(217, 70, 239, .75); }
+}
+
+/* 锁定图标翻面 */
+.lock-flip { animation: flip .35s ease-out; }
+@keyframes flip {
+  from { transform: rotateY(90deg) scale(.6); }
+  to   { transform: rotateY(0) scale(1); }
+}
+
+/* 音量滑块的白色圆钮（同样从页面挪过来的：写在父组件里对这里的 input 无效） */
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  background: #fff;
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: 0 0 6px rgba(167, 139, 250, .9);
+}
+
+/* 系统开了「减弱动效」就只留淡入淡出——这类循环动画对前庭敏感的人是实打实的不适 */
+@media (prefers-reduced-motion: reduce) {
+  .blast, .ripple-blob, .chev, .secs-pop, .boost-glow, .lock-flip { animation: none; }
+  .slide-up-enter-active, .slide-up-leave-active,
+  .pop-enter-active, .pop-leave-active,
+  .drop-enter-active, .drop-leave-active { transition: opacity .15s ease; }
+  .pop-enter-from, .pop-leave-to, .drop-enter-from, .drop-leave-to { transform: none; }
+}
+</style>
