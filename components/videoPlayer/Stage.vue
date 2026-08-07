@@ -89,6 +89,9 @@
         </div>
       </div>
 
+      <!-- 顶部信息条：标题 + 第几集 + 选集，与底部控制栏同进同出 -->
+      <VideoPlayerTopBar />
+
       <!--
         中央播放/暂停图标：切换时闪一下（外圈炸开光晕），**暂停期间则常驻**——
         暂停后画面是一张静止图，没有任何东西表明「是暂停了还是卡死了」。
@@ -151,7 +154,8 @@
 
       <!-- 长按加速中的常驻提示：不显示的话松手前用户不知道自己触发了什么 -->
       <Transition name="drop">
-        <div v-if="boostActive" class="absolute top-4 left-1/2 -translate-x-1/2 pointer-events-none">
+        <!-- 往下让开顶部信息条，两个都在时不叠 -->
+        <div v-if="boostActive" class="absolute top-20 left-1/2 -translate-x-1/2 pointer-events-none">
           <div class="flex items-center gap-2 px-4 py-2 rounded-full text-white text-sm font-semibold
                       bg-gradient-to-r from-violet-600/90 to-fuchsia-500/90 backdrop-blur-sm
                       ring-1 ring-white/25 shadow-lg shadow-violet-900/40 boost-glow">
@@ -318,17 +322,6 @@
             </div>
 
             <div class="flex items-center gap-1 shrink-0">
-              <!-- 选集：全屏时页面下方那份列表够不着，而全屏里换集才是最高频的动作 -->
-              <button
-                v-if="playlist.length > 1"
-                class="p-2 rounded-lg text-white hover:bg-white/15 hover:text-violet-300 active:scale-90 transition-all"
-                :class="{ 'text-violet-300 bg-white/10': showEpisodes }"
-                title="选集"
-                @click="showEpisodes = !showEpisodes"
-              >
-                <UIcon name="i-heroicons-queue-list" class="w-6 h-6" />
-              </button>
-
               <!-- 自动全屏 / 自动倍速 / 跳过片头片尾：全是看片当下才改的，放这儿手不用离开画面 -->
               <VideoPlayerSettingsMenu />
 
@@ -400,6 +393,7 @@ const {
   currentTime, duration, volume, playbackRate, desiredRate, autoBestRate, autoRateCap,
   progressPercent, bufferedPercent, seekPreviewTime, seekPreviewPercent, hoverTime, hoverPercent,
   hlsStats, playlist, playlistTitle, hasPrev, hasNext, strategyLabel, showAdvancedProxy,
+  // 选集按钮在顶部信息条里（VideoPlayerTopBar），这里只留抽屉本身要用的状态
   currentVideoName, volumeIcon, supportsPiP, canDownload,
   togglePlay, skip, startSeek, updateHoverTime, setVolume, toggleMute, setPlaybackRate,
   // 容器的 mousemove 走手势层的 onMouseMove（要滤掉触摸补发的兼容鼠标事件），不直接用 handleMouseMove
