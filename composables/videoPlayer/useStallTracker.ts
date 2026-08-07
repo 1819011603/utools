@@ -25,6 +25,7 @@ export function useStallTracker(getVideo: () => HTMLVideoElement | undefined) {
   let stallStart = 0             // 本次停顿开始时刻
   let smoothSince = 0            // 连续流畅起点（performance.now）；卡顿时为 0
   let smoothBefore = 0           // 进入停顿前的 smoothSince，微停顿结束后原样还回去
+  let pausedAt = 0               // 手动暂停时刻（0=没在暂停）；恢复时把这段时长平移掉而非清零
   let lastCurrentTime = 0        // 上次记录的播放位置（timeupdate 兜底判前进）
   let bound: HTMLVideoElement | null = null
 
@@ -50,6 +51,7 @@ export function useStallTracker(getVideo: () => HTMLVideoElement | undefined) {
       // 连带压住提速与档位判定。连续流畅也接着原来的起点算，当作没发生过。
       if (ms < MIN_STALL_MS) {
         smoothSince = smoothBefore || now()
+        pausedAt = 0
         return
       }
       if (ms > 0) {
@@ -58,22 +60,37 @@ export function useStallTracker(getVideo: () => HTMLVideoElement | undefined) {
         stalls.push({ at: stallStart, ms })
         if (stalls.length > 200) stalls.shift()
       }
+      smoothSince = now()   // 真卡顿过 → 重新开表
+      pausedAt = 0
+      return
     }
-    smoothSince = now()   // 恢复播放 → 重新开始累计连续流畅
+    // 不是从卡顿恢复，那就是从暂停恢复：把暂停占掉的这段平移出去，计时接着走。
+    // 暂停不是卡顿——缓冲期间还在涨，清零重来等于让用户每按一次暂停就要重新攒够 20s 才敢提速。
+    if (pausedAt) {
+      if (smoothSince) smoothSince += now() - pausedAt
+      pausedAt = 0
+    }
+    if (!smoothSince) smoothSince = now()   // 首次起播：开表
   }
 
   // seek 引起的等待不是卡顿：取消当前计时且不计数
   const cancelStall = () => {
     isStalling.value = false
     smoothSince = 0
+    pausedAt = 0
   }
 
   const onWaiting = () => beginStall()
   const onStalled = () => beginStall()
   const onPlaying = () => endStall()
   const onSeeking = () => cancelStall()
-  const onSeeked = () => { smoothSince = now(); lastCurrentTime = getVideo()?.currentTime ?? 0 }
-  const onPause = () => { smoothSince = 0 }
+  const onSeeked = () => {
+    smoothSince = now()
+    pausedAt = getVideo()?.paused ? now() : 0   // 暂停中拖进度条：开了表但立刻冻住
+    lastCurrentTime = getVideo()?.currentTime ?? 0
+  }
+  // 暂停只是把表冻住，不清零（清零的话每按一次暂停就白攒一遍连续流畅）
+  const onPause = () => { if (smoothSince && !pausedAt) pausedAt = now() }
   const onTimeUpdate = () => {
     const v = getVideo()
     if (!v) return
@@ -106,6 +123,7 @@ export function useStallTracker(getVideo: () => HTMLVideoElement | undefined) {
     bound = v
     for (const [ev, fn] of EVENTS) v.addEventListener(ev, fn)
     smoothSince = v.paused ? 0 : now()   // 还没起播就先不计时，等 playing/timeupdate 开表
+    pausedAt = 0
     lastCurrentTime = v.currentTime
   }
 
@@ -125,6 +143,7 @@ export function useStallTracker(getVideo: () => HTMLVideoElement | undefined) {
     stallStart = 0
     smoothSince = 0
     smoothBefore = 0
+    pausedAt = 0
     smoothSecs.value = 0
     lastCurrentTime = getVideo()?.currentTime ?? 0
   }
@@ -137,7 +156,10 @@ export function useStallTracker(getVideo: () => HTMLVideoElement | undefined) {
       if (!smoothBefore || now() - stallStart >= MIN_STALL_MS) return 0
       return (now() - smoothBefore) / 1000
     }
-    return smoothSince === 0 ? 0 : (now() - smoothSince) / 1000
+    if (!smoothSince) return 0
+    // 暂停期间读数冻在按下暂停的那一刻：既不清零（暂停不是卡顿），也不能继续涨
+    //（干坐着不播算不上「流畅播放」，让它涨就等于给提速门槛开后门）
+    return ((pausedAt || now()) - smoothSince) / 1000
   }
 
   /** 心跳每秒调：改绑（元素可能刚被重建）+ 刷新响应式读数 */
