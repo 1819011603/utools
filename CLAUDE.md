@@ -437,7 +437,15 @@ ncat 系挂了 cdndefend：首访返回 **HTTP 850** + 挑战页，要求暴力�
 **我们只加载并调用站点公开导出的函数，不复刻它的算法**——所以站点换签名方案时前端不用动，
 只要页面上还能读到模块地址就继续能用。
 
-### 4kvm（nbmovie）实测结论
+### 4kvm / ziziys（nbmovie 系）实测结论
+
+**同一套程序换皮开的站，一条 pattern 兜住全部**：ziziys.org 与 4kvm.org 页面结构逐字节同构
+（`<link id="wasm-cfg">` + `userlink` + `handleEpisodeClick` + `<meta id="nb-plt">`），
+parser 里所有地址都从 `ctx.pageUrl` 的 origin 现拼、没有写死的域名，所以接同族站点
+**只需往两处 pattern 各加一个域名，解析逻辑一行不用改**：
+`server/parsers/sites/nbmovie.ts` 的 `PATTERN` 和 `videoParseRules.ts` 的 `CODED_PARSE_SITES`。
+两边必须同步——只改服务端的表现是「能解析但输入框不显示规则徽标」（前端不能 import `server/`）。
+
 
 - **只有一条线路**，站点自报的线路名是内部标识（`alists`），没展示价值 → 单线路时显示「默认线路」
 - 页面结构：`<a href="/play/xxx" @click.prevent="handleEpisodeClick($el.getAttribute('href'), 'dataid', 线路, 集号)">`，

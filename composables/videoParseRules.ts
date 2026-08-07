@@ -252,9 +252,10 @@ export interface CodedParseSite {
 export const CODED_PARSE_SITES: CodedParseSite[] = [
   {
     id: 'nbmovie',
-    name: '4k影视 (4kvm)',
-    // 站点会换域名后缀，用正则兜住
-    pattern: '/4kvm\\d*\\.(org|com|net|cc|top)/',
+    name: '4k影视 (4kvm / ziziys)',
+    // 站点会换域名后缀，用正则兜住。同一套程序换皮开的站（ziziys）页面结构同构，
+    // 归在同一条里即可，**改这里要同步改 server/parsers/sites/nbmovie.ts 的 PATTERN**
+    pattern: '/(4kvm\\d*|ziziys)\\.(org|com|net|cc|top)/',
     homepage: 'https://4kvm.org/',
     note: '源站限流，按需取址：解析只取当前一集，其余播到哪集取哪集',
   },

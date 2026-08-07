@@ -1,5 +1,10 @@
 /**
- * 4k影视（nbmovie 系，当前域名 4kvm.org）。
+ * nbmovie 系（4kvm.org、ziziys.org …）。
+ *
+ * 同一套程序换皮开的站，页面结构逐字节同构（`<link id="wasm-cfg">` + `userlink` +
+ * `handleEpisodeClick` + `<meta id="nb-plt">`），所以**一条 pattern 兜住全部**，
+ * 解析逻辑一行不用改——parser 里所有地址都从 `ctx.pageUrl` 的 origin 现拼，没有写死的域名。
+ * 再遇到同族站点只需往 PATTERN 和 CODED_PARSE_SITES 里各加一个域名。
  *
  * 这个站点的页面里根本没有播放地址，只有「集 → dataid」的映射：
  * 真实地址要拿 dataid 去调 /video/play，而那个接口的整串 query
@@ -14,8 +19,10 @@ import type { ParserContext, SiteParser } from '../types'
 import { absolutize, decodeEntities, innerTexts, parseTitle } from '../utils'
 
 const SITE_ID = 'nbmovie'
-const SITE_NAME = '4k影视 (4kvm)'
-const PATTERN = '/4kvm\\d*\\.(org|com|net|cc|top)/'
+const SITE_NAME = '4k影视 (4kvm / ziziys)'
+// 站点会换域名后缀，用正则兜住。**必须与 CODED_PARSE_SITES 里那条保持一致**：
+// 前端靠那份判断「这个地址支不支持」，只改一边的表现是能解析但输入框不显示规则徽标
+const PATTERN = '/(4kvm\\d*|ziziys)\\.(org|com|net|cc|top)/'
 
 /** 选集锚点：href / dataid / 线路号 / 集号 都写在 handleEpisodeClick 的实参里 */
 const EPISODE_RE =
