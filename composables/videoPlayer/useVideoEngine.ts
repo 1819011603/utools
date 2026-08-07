@@ -148,6 +148,27 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   }
 
   /**
+   * 强制重新合成一次 `<video>`。
+   *
+   * 治的是浏览器侧的**残影/黑屏**：Chrome 把视频画在独立的硬件 overlay 平面上，
+   * 该平面偶尔会在标签页切走切回后停在旧的一帧（画面被一帧静止图挡住、或整块黑屏），
+   * 而音频和 currentTime 一切正常——**播放本身没问题，只是那一层没被重画**。
+   * 用户的自救方式「再切一次标签页」正是逼它重新合成，这里把这一步替他做了。
+   *
+   * 手法是改一个会让元素脱离/重回合成层的属性再撤销。用 `transform` 而不是
+   * `display:none`：后者会让 `<video>` 卸掉解码器再重建，代价是真的会黑一下。
+   */
+  const forceRecomposite = () => {
+    const v = videoEl.value
+    if (!v) return
+    v.style.transform = 'translateZ(0)'
+    requestAnimationFrame(() => {
+      // 这一帧之间可能已经换集重建了元素，别把新元素的样式改坏
+      if (videoEl.value === v) v.style.transform = ''
+    })
+  }
+
+  /**
    * 回到前台时的追赶。**整个预取引擎都挂在上面那个 1 秒心跳上**，而浏览器会节流后台标签页的
    * 定时器（切走久了拉长到几十秒一拍）。于是后台期间：播放照常消耗预取缓存，补片却几乎停了，
    * 前方缓存被吃空。切回来的一瞬间 hls.js 要的分片不在缓存里 → 走网络 → 就是那「卡一下」。
@@ -168,6 +189,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
       return
     }
     if (document.visibilityState !== 'visible') return
+    forceRecomposite()
     stall.resetSampler()
     stall.tick()
     prefetchTick()

@@ -276,6 +276,13 @@ manifest 不过代理就没法把分片指向代理）；**分片可直连 → m
     （要攒够量），很容易误判成源站或网络问题。
   - 判读工具：统计面板的**掉帧**（`getVideoPlaybackQuality()`）。缓冲读数照不出解码侧的问题——
     缓冲健康但掉帧涨=解码/GPU/倍速；缓冲空但掉帧不涨=网络/预取；切回来时掉帧一次性猛涨=换页/GC。
+- **「画面被一帧静止图挡住」/「播放器整块黑屏」而音频与 `currentTime` 正常 → 不是我们的问题**，
+  是浏览器把视频画在独立硬件 overlay 平面上、切标签页后那层没被重画（Chrome + 独显常见）。
+  用户的自救方式「再切一次标签页」正是逼它重新合成。`useVideoEngine.forceRecomposite()`
+  在回前台时替他做这一步：改 `transform` 再撤销。**别用 `display:none` 那一套**——
+  那会让 `<video>` 卸掉解码器再重建，真的会黑一下。
+  根治要在浏览器侧：去掉启动参数里的 `--ignore-gpu-blocklist`（它强行绕过 Chrome
+  针对特定驱动 bug 的保护），必要时 `--disable-direct-composition-video-overlays`。
   - 清理由 `useHlsPrefetch.purgePlayedSegments()` 做（缓存模块只提供 `purgeCache(谓词)`，
     它不认识 hls 和播放头，反向 import 会立刻变成循环依赖）。判据是分片表的 `end` 对播放头，
     留 30s 回看余量；**拿不到分片表时必须直接返回**——此时无从判断谁已播，
