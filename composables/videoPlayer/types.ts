@@ -55,6 +55,27 @@ export const DEFAULT_HLS_TUNING: HlsTuning = {
   lowLatencyMode: false,
 }
 
+/**
+ * 迁移 localStorage 里存下来的旧配置。
+ *
+ * 存档的优先级高于默认值，所以**光改 `DEFAULT_HLS_TUNING` 对老用户等于没改**——
+ * 他们要一直手动点「重置默认」才吃得到。而这次调小的两项治的是「浏览器偶发卡死几秒」
+ * （几百 MB~GB 级 ArrayBuffer 的 GC / 换页），恰恰是老用户最需要的修复，
+ * 不能指望他们自己去点那个按钮。
+ *
+ * **只认旧的默认值 3600，不做区间钳制**：用户手动填过别的数字（比如为某个慢源站特意调到
+ * 1800）是明确意图，悄悄改掉比不改更糟。3600 三项同时出现只可能是旧默认留下的。
+ */
+export function migrateHlsTuning(saved: Partial<HlsTuning>): Partial<HlsTuning> {
+  const out = { ...saved }
+  const OLD_DEFAULT = 3600
+  if (out.maxBufferLength === OLD_DEFAULT) out.maxBufferLength = DEFAULT_HLS_TUNING.maxBufferLength
+  if (out.maxMaxBufferLength === OLD_DEFAULT) out.maxMaxBufferLength = DEFAULT_HLS_TUNING.maxMaxBufferLength
+  if (out.backBufferLength === OLD_DEFAULT) out.backBufferLength = DEFAULT_HLS_TUNING.backBufferLength
+  if (out.maxBufferSizeMB === OLD_DEFAULT) out.maxBufferSizeMB = DEFAULT_HLS_TUNING.maxBufferSizeMB
+  return out
+}
+
 /** 「重置默认」按钮用的一套：缓冲时长回到保守值，内存上限仍给足 */
 export const FACTORY_HLS_TUNING: HlsTuning = {
   ...DEFAULT_HLS_TUNING,

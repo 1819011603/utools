@@ -144,7 +144,7 @@ export function useVideoPlayerController() {
     conn.refererHint.value = s.refererHint ?? ''
     // 填过候选头就展开设置区，否则用户看不到自己填的值还在不在
     if (conn.originHint.value || conn.refererHint.value) media.showAdvancedProxy.value = true
-    if (s.hlsConfig) media.hlsConfig.value = { ...media.hlsConfig.value, ...s.hlsConfig }
+    if (s.hlsConfig) media.hlsConfig.value = { ...media.hlsConfig.value, ...migrateHlsTuning(s.hlsConfig) }
     if (s.tierOverrides) tier.tierOverrides.value = { ...s.tierOverrides }
   }
 
