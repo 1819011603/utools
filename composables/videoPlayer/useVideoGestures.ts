@@ -269,17 +269,25 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
 
     if (isDouble) {
       if (singleTapTimer) { clearTimeout(singleTapTimer); singleTapTimer = null }
+      // 鼠标：双击**任意位置**都是全屏，这是桌面播放器几十年的规矩，不要自作聪明分区
+      if (pointerKind === 'mouse') { void controls.toggleFullscreen(); return }
       if (x < SIDE_ZONE) { controls.skip(-DOUBLE_TAP_SEEK); flashSide('left'); vibrate(10) }
       else if (x > 1 - SIDE_ZONE) { controls.skip(DOUBLE_TAP_SEEK); flashSide('right'); vibrate(10) }
-      // 中间：触摸端播放/暂停，鼠标端仍是全屏（桌面双击全屏是几十年的肌肉记忆）
-      else if (pointerKind === 'mouse') void controls.toggleFullscreen()
       else controls.togglePlay()
       return
     }
 
-    // 单击要等双击窗口过完才能确定，否则双击会先闪一下控制栏
+    // 单击要等双击窗口过完才能确定，否则双击会先闪一下控制栏/先暂停再全屏
     if (singleTapTimer) clearTimeout(singleTapTimer)
-    singleTapTimer = setTimeout(() => { singleTapTimer = null; applyTapControls() }, DOUBLE_TAP_MS)
+    singleTapTimer = setTimeout(() => {
+      singleTapTimer = null
+      // 鼠标端单击 = 播放/暂停（桌面标准）；触摸端单击 = 显隐控制栏。
+      // 两端不一样是因为触摸端的「单击暂停」误触率极高（想看一眼进度就停了），
+      // 而它有双击中间可以暂停；鼠标端反过来——控制栏本来就跟着指针移动出现，
+      // 单击不给播放/暂停等于把最常用的操作弄丢了。
+      if (pointerKind === 'mouse') controls.togglePlay()
+      else applyTapControls()
+    }, DOUBLE_TAP_MS)
   }
 
   /**
