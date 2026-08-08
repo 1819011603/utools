@@ -598,6 +598,7 @@ const startResolve = async (line?: number) => {
     addToHistory({ url, title: res.title })
     parseHistory.value = getHistory()
     syncUrlToQuery()   // 地址栏跟着当前地址+线路走，随时可复制分享
+    saveResultCache()  // 从播放器返回时直接摆回来，省掉一次几秒的重解析
   } catch (e: any) {
     // 409 = 服务端说 cookie 失效：丢掉重算一轮，只重试一次避免死循环
     const status = e?.statusCode || e?.response?.status
@@ -622,6 +623,55 @@ const startResolve = async (line?: number) => {
 // 与 video-player 同一套做法，包括那个坑：播放页地址自带 query（?id=1&t=2）时，
 // 未编码的 & 会被拆成独立参数，直接读 route.query.url 只能拿到第一段。
 // 所以从原始 search 串手工解析，凡「不是本页已知参数」的片段原样回写进地址。
+/**
+ * 上一次解析结果的缓存。
+ *
+ * 从播放器按浏览器返回键回到本页时，页面是整个重新挂载的，`?url=&line=N` 虽然还在，
+ * 但要重新跑一遍解析——慢的站点好几秒，nbmovie 系还会被限流。而用户回来通常只是想换条线路，
+ * 那份线路表上一秒还在手里。于是原样存下来，回来直接摆回去。
+ *
+ * TTL 30 分钟，与探测结果、playerOrigin 那些缓存对齐：作业单里的令牌是源站按次渲染的，
+ * 存太久回来就是一堆取不到址的集。过期或对不上就照常重新解析。
+ */
+const RESULT_CACHE_KEY = 'video-parse-last-result'
+const RESULT_CACHE_TTL = 30 * 60 * 1000
+
+interface CachedParse { url: string; line: number; result: ParseResult; at: number }
+
+const saveResultCache = () => {
+  if (!result.value) return
+  try {
+    localStorage.setItem(RESULT_CACHE_KEY, JSON.stringify({
+      url: inputUrl.value.trim(),
+      line: result.value.activeLineIndex,
+      result: result.value,
+      at: Date.now(),
+    } satisfies CachedParse))
+  } catch { /* 超配额就算了，缓存本来就是可选的 */ }
+}
+
+const readResultCache = (): CachedParse | null => {
+  try {
+    const raw = localStorage.getItem(RESULT_CACHE_KEY)
+    if (!raw) return null
+    const p = JSON.parse(raw) as CachedParse
+    if (!p?.result?.lines?.length || !p.url || !p.at) return null
+    if (Date.now() - p.at > RESULT_CACHE_TTL) return null
+    return p
+  } catch { return null }
+}
+
+/** 把缓存里的结果摆回界面（等价于解析成功后的那几步，但不发请求） */
+const restoreFromCache = (c: CachedParse) => {
+  inputUrl.value = c.url
+  result.value = c.result
+  lastParsedUrl.value = c.result.pageUrl
+  embedSrc.value = c.result.embedUrl || ''
+  embedIndex.value = c.result.embedUrl
+    ? (c.result.lines[c.result.activeLineIndex]?.episodes.findIndex(e => e.embedUrl === c.result.embedUrl) ?? -1)
+    : -1
+}
+
 const PAGE_QUERY_KEYS = new Set(['url', 'line'])
 
 interface QueryParseParams {
@@ -818,7 +868,15 @@ onMounted(() => {
   embedSandbox.value = localStorage.getItem(EMBED_SANDBOX_KEY) === '1'
   // 支持 /video-parse?url=…&line=N 直接带地址进来自动解析
   const q = parseQueryParams()
-  if (q.url) {
+  const cached = readResultCache()
+  // 命中缓存就不发请求：从播放器点返回回来时走的正是这条路（同一地址、同一线路），
+  // 用户多半只是想换条线路，没必要再等一遍解析
+  const hit = cached && (!q.url || (cached.url === q.url && (q.line === undefined || q.line === cached.line)))
+
+  if (hit) {
+    restoreFromCache(cached!)
+    if (!q.url) syncUrlToQuery()   // 直接进来的（地址栏没参数）补上，刷新还能落回同一份
+  } else if (q.url) {
     inputUrl.value = q.url
     startResolve(q.line)
   }

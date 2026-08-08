@@ -478,6 +478,14 @@ Toast 会消失，所以标题栏常驻一个「已于 HH:MM 刷新」。
 - **按集名认当前集，不按下标**（重解析后集数可能变）
 - **进度按 URL 存**，地址一换就查不到 → 先把 `currentTime` 搬到新地址的 `savedProgress` 上
 
+### 解析结果缓存（从播放器返回时用）
+
+`video-parse-last-result`（TTL 30 分钟）。从播放器按返回键回到解析页时页面整个重新挂载，
+`?url=&line=N` 还在但要重跑一遍解析——慢站好几秒，nbmovie 系还会被限流，
+而用户回来通常只是**想换条线路**，那份线路表上一秒还在手里。命中缓存就直接摆回去、一个请求都不发。
+
+TTL 与探测结果、`playerOrigin` 那些对齐：作业单里的令牌是源站按次渲染的，存太久回来就是一堆取不到址的集。
+
 ### URL 参数同步（/video-parse）
 
 参数 `url` + `line`，做法与播放器同源（含未编码 `&` 那个坑）。
@@ -566,6 +574,7 @@ FED 模板，**不走 `player_aaaa`**，地址在播放器 iframe 属性上。
 | `video-player-origin-history` / `-referer-history` | Origin/Referer 输入历史 |
 | `video-parse-rules` | 用户自定义解析规则 |
 | `video-parse-embed-sandbox` | 内嵌播放器是否挂 sandbox（默认关） |
+| `video-parse-last-result` | 上次解析结果，TTL 30 分钟（从播放器返回时免去重解析） |
 | `json-*-settings` / `content-diff-settings` / `timestamp-settings` | 各页设置 |
 | `json-extract-import` | json-format → json-extract 跨页传值 |
 | `utools-history-<page>` | 通用历史：最多 50 条，单条 1MB，总量 256MB |
