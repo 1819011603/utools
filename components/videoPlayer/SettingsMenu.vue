@@ -11,8 +11,9 @@
     <Transition name="menu">
       <div
         v-if="open"
-        class="absolute bottom-full right-0 mb-2 w-64 p-3 rounded-xl bg-black/90 backdrop-blur-md
-               ring-1 ring-white/15 shadow-2xl space-y-3 text-white text-sm"
+        class="absolute z-30 bottom-full right-0 mb-2 w-64 p-3 rounded-xl bg-black/90 backdrop-blur-md
+               ring-1 ring-white/15 shadow-2xl space-y-3 text-white text-sm
+               max-h-[min(70vh,320px)] overflow-y-auto"
       >
         <!-- 控制栏是浮在黑画面上的，这里不用 UCheckbox/UInput：那套是亮色主题的，压在黑底上一片糊 -->
         <label class="flex items-center gap-2 cursor-pointer">

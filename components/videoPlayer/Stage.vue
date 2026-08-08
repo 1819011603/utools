@@ -207,7 +207,7 @@
         <div
           v-show="controlsVisible"
           data-no-gesture
-          class="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/85 via-black/40 to-transparent px-2.5 pb-2.5 pt-12 sm:px-4 sm:pb-4"
+          class="absolute z-10 bottom-0 left-0 right-0 bg-gradient-to-t from-black/85 via-black/40 to-transparent px-2.5 pb-2.5 pt-12 sm:px-4 sm:pb-4"
           @click.stop
           @pointerdown="keepControlsAlive"
           @pointerup="keepControlsAlive"
@@ -318,7 +318,16 @@
                   {{ playbackRate }}x<span v-if="autoBestRate" class="text-white/50">/{{ autoRateCap }}</span>
                 </button>
                 <Transition name="fade">
-                  <div v-if="showSpeedMenu" class="absolute bottom-full right-0 mb-2 bg-black/90 rounded-lg overflow-hidden min-w-[80px]">
+                  <!--
+                       z-30：菜单要盖过顶部信息条（z-[5]）和控制栏自己。原来没设 z，
+                       菜单往上展开时最上面那几档（3.0x）正好落在顶部信息条底下，点不着。
+                       再加高度上限 + 自身滚动：画面只有 200 多 px 高时，八个档位一屏放不下。
+                  -->
+                  <div
+                    v-if="showSpeedMenu"
+                    class="absolute z-30 bottom-full right-0 mb-2 bg-black/90 backdrop-blur-sm rounded-lg
+                           ring-1 ring-white/15 overflow-y-auto min-w-[88px] max-h-[min(60vh,240px)]"
+                  >
                     <button
                       v-for="rate in PLAYBACK_RATES"
                       :key="rate"
