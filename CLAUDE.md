@@ -186,7 +186,10 @@ IP 与二级域名返回空串。它是压箱底的一档，只在前三条都�
   ncat 那个源靠这条从 12s 降到 1.5s
 - **两级超时**：单通道 8s + 整轮 12s 硬上限。四通道串行降级，慢源上后面的会被整轮截止跳过——这是有意的，
   **别为了「探全」调大 `OVERALL_TIMEOUT`**
-- 结果按 host 存进 `video-player-learned-profiles` 的 `reach`，TTL 30 分钟。首访阻塞探测，命中缓存则秒起播 +
+- 结果**按 host** 存进 `video-player-learned-profiles` 的 `reach`，TTL **1 小时**（`REACH_TTL`）。
+  探测是阻塞起播的，慢源上一轮要十几秒，而源站的 CORS/防盗链策略以天计地稳定；
+  结论过时也不致命（lane 熔断 + `escalateStrategyAndReload` 会重探）。
+  与服务端 `headerModeCache` 的 30 分钟**不是一回事**，不必对齐。首访阻塞探测，命中缓存则秒起播 +
   后台静默复验（每 host 每会话只复验一次，否则会「复验→重载→又命中→又复验」）
 - **双通道自动开的判据**：`分片.直连 === ok && 分片.代理·伪装 === ok && 最终分片通道 === 直连`。
   分片必须走代理时直连 lane 必 403，开了等于一半连接白扔。实测生效时预取线程 6 → 12
@@ -571,7 +574,7 @@ FED 模板，**不走 `player_aaaa`**，地址在播放器 iframe 属性上。
 | key | 用途 |
 | --- | --- |
 | `video-player-state` | 播放器全量状态（地址/列表/进度/音量/倍速/HLS 配置/档位覆盖） |
-| `video-player-learned-profiles` | 按 host 学到的档位 + 可达性探测结果（`reach`，TTL 30 分钟） |
+| `video-player-learned-profiles` | 按 host 学到的档位 + 可达性探测结果（`reach`，TTL 1 小时） |
 | `video-player-handoff` | 长播放列表交接槽，TTL 1 天 |
 | `video-player-origin-history` / `-referer-history` | Origin/Referer 输入历史 |
 | `video-parse-rules` | 用户自定义解析规则 |

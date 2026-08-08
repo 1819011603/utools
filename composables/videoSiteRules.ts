@@ -69,8 +69,14 @@ export interface LearnedProfile {
   updatedAt?: number
 }
 
-// 可达性缓存有效期：与服务端 headerModeCache 的 30 分钟对齐
-export const REACH_TTL = 30 * 60 * 1000
+// 可达性缓存有效期（按 host 存，见 LEARNED_KEY）。
+// 放到 1 小时：探测是**阻塞起播**的，首访要等一轮四通道串行降级（慢源上能到十几秒），
+// 而源站的 CORS/防盗链策略以天计地稳定，30 分钟一到就重探等于反复付这个代价。
+// 结论万一过时也不致命：真实请求失败会走 lane 熔断 + escalateStrategyAndReload 重探，
+// 而且命中缓存后本来就有一次后台静默复验（每 host 每会话一次）。
+// 注意这跟服务端 headerModeCache 的 30 分钟是两回事，不必对齐——那份是「带不带头」，
+// 存在服务端内存里、进程一换就没了。
+export const REACH_TTL = 60 * 60 * 1000
 
 export function isReachFresh(profile: LearnedProfile | null | undefined): boolean {
   const at = profile?.reach?.at
