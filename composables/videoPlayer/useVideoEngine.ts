@@ -18,9 +18,9 @@ export interface VideoEngineDeps {
   getSavedProgress: (url: string) => number
   /**
    * 就地重新取一次播放地址并重载（按需取址的站点才做得到）。
-   * true = 已换新地址，调用方别再报错。见 useVideoPlaylistCtl.refetchCurrentUrl
+   * true = 已换新地址，调用方别再报错。`silent` 见 useVideoPlaylistCtl.refetchCurrentUrl
    */
-  refetchUrl: () => Promise<boolean>
+  refetchUrl: (silent?: boolean) => Promise<boolean>
 }
 
 // 加载超时：走服务端代理时需要更长，统一 15s
@@ -120,16 +120,16 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   const startLoadTimeout = () => {
     clearLoadTimeout()
     hasReceivedData = false
-    // 第一档：10s 一个字节都没来 → 大概率是地址过期。重新取址（每集一次额度，
-    // 不是按需取址的列表直接返回 false），成功的话 loadVideo 会把这两个计时器重新起一遍
+    // 第一档：10s 一个字节都没来，可能是地址过期 → **静默**后台重新取址（每集一次额度，
+    // 不是按需取址的列表直接返回 false）；取到不一样的地址才重载，那时 loadVideo 会把这两个
+    // 计时器重新起一遍。
+    //
+    // 静默是硬要求：这一档**必然会误伤**——慢源的 manifest 本身就要十几秒，它没死。
+    // 早先在这里写了句「正在重新获取播放地址」并拉起 isResolvingUrl，于是正常的慢加载
+    // 也会盖上转圈遮罩，表现成「视频刚开始点下一集，一直显示获取中」（踩过）。
     staleUrlTimer = setTimeout(() => {
       if (hasReceivedData || !isLoading.value) return
-      const notice = '加载没有响应，正在重新获取播放地址...'
-      errorMessage.value = notice
-      // 撤回自己那句提示时要认一下：这十秒里 hls 可能已经写了「正在重试」之类，别把它抹掉
-      void deps.refetchUrl().then(ok => {
-        if (!ok && errorMessage.value === notice) errorMessage.value = ''
-      })
+      void deps.refetchUrl(true)
     }, STALE_URL_TIMEOUT)
     loadTimeoutTimer = setTimeout(() => {
       if (!hasReceivedData && isLoading.value) {

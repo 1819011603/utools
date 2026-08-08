@@ -109,52 +109,93 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
   const clearLazyUrlCache = () => lazyUrlCache.clear()
 
   /**
-   * 占位地址 → 真实播放地址。不是占位就原样返回。
-   *
-   * 为什么不把结果存进播放列表：这类地址带时效签名，存下来下次进来就是死链，
-   * 而且站点限流，与其提前批量取被封，不如播一集取一集（站点自己也是这么做的）。
-   * 预热那一份是例外，但它只活 5 分钟且取用即弃（见上）。
-   *
-   * 作业单里的令牌是源站按次渲染的、会过期。失败时若知道来源页面，就重解析一次拿新作业单再试，
-   * 只重试一次——真失效和真限流表现一样，无限重试只会把限流坐实。
-   *
-   * silent：后台预热用。此时**不能碰 isResolvingUrl / errorMessage**——那是前台取址的 UI 通道，
-   * 预热失败会在正播着的这一集上盖一层转圈遮罩和红字，用户完全不知道是谁报的。
+   * 取址的硬超时。这一步没有终点是**致命**的：转圈遮罩挂在 isResolvingUrl 上，
+   * 卡住就表现成「点了下一集，一直显示正在获取播放地址」，用户除了刷新没有任何出路。
+   * 30s 比任何正常取址都宽（慢站抓页实测 5-10s），到点就报错，让人知道是站点没给。
    */
-  const fetchLazyUrl = async (placeholder: string, silent = false): Promise<string> => {
-    const idx = handoff.lazyIndexByUrl.value[placeholder]
-    if (!handoff.lazyTask.value || idx === undefined) return placeholder
+  const RESOLVE_TIMEOUT = 30_000
 
-    if (!silent) {
-      media.isResolvingUrl.value = true
-      errorMessage.value = ''
-    }
+  /**
+   * 取址**同集去重 + 预热单向让路**。
+   *
+   * 「后台预热」和「用户点下一集」现在会同时想取址（预热窗口跟「看到片尾附近点下一集」高度重合），
+   * 而 nbmovie 系的 wasm 签名要读页面上那个 `<meta id="nb-plt">` 当时间戳、每次签名前还要刷新它，
+   * 两发并发会互相踩（其中一发拿到过期时间戳 → 401）。两条规矩：
+   *   · **同集去重**：点的正是预热在取的那一集 → 直接等那一发，不再多发一次请求
+   *   · **预热让路**：预热要等在飞的取址跑完再开始；**反过来绝对不行**——
+   *     让用户点击排在后台工作后面，最坏要干等一个 30s 超时，那比偶发 401 糟得多
+   */
+  const inflight = new Map<string, Promise<string>>()
+  /** 在飞的取址（含预热），供预热判断「要不要让路」 */
+  const pending = new Set<Promise<unknown>>()
+
+  /** 只负责取址，不碰任何 UI；失败抛错，由调用方决定是报给用户还是咽下去 */
+  const doFetchLazyUrl = async (placeholder: string): Promise<string> => {
+    const idx = handoff.lazyIndexByUrl.value[placeholder]
     // 取址时站点会带回最新的防盗链域名（它是从站点播放器配置里现取的、会变）
     const hintOpts = { onHints: deps.applyHints }
     try {
-      try {
-        return await resolveOneUrl(handoff.lazyTask.value, idx, hintOpts)
-      } catch (e) {
-        const src = handoff.playlistSource.value
-        if (!src) throw e
-        const { result } = await resolvePlaylist({ pageUrl: src.pageUrl, line: src.line })
-        if (!result.clientTask?.lazy) throw e
-        // 集数可能变了，按集名把下标对回来；对不上就退回原下标
-        const names = (result.lines[result.activeLineIndex]?.episodes ?? []).map(ep => ep.title)
-        const want = handoff.playlistNames.value[placeholder]
-        const hit = want ? names.indexOf(want) : -1
-        handoff.lazyTask.value = result.clientTask
-        return await resolveOneUrl(result.clientTask, hit >= 0 ? hit : idx, hintOpts)
-      }
+      return await resolveOneUrl(handoff.lazyTask.value!, idx!, hintOpts)
+    } catch (e) {
+      // 作业单里的令牌是源站按次渲染的、会过期。知道来源页面就重解析一次拿新作业单再试，
+      // 只重试一次——真失效和真限流表现一样，无限重试只会把限流坐实。
+      const src = handoff.playlistSource.value
+      if (!src) throw e
+      const { result } = await resolvePlaylist({ pageUrl: src.pageUrl, line: src.line })
+      if (!result.clientTask?.lazy) throw e
+      // 集数可能变了，按集名把下标对回来；对不上就退回原下标
+      const names = (result.lines[result.activeLineIndex]?.episodes ?? []).map(ep => ep.title)
+      const want = handoff.playlistNames.value[placeholder]
+      const hit = want ? names.indexOf(want) : -1
+      handoff.lazyTask.value = result.clientTask
+      return await resolveOneUrl(result.clientTask, hit >= 0 ? hit : idx!, hintOpts)
+    }
+  }
+
+  /**
+   * 占位地址 → 真实播放地址（去重 + 让路 + 超时）。不是占位地址就原样返回。
+   *
+   * 为什么不把结果存进播放列表：这类地址带时效签名，存下来下次进来就是死链，
+   * 而且站点限流，与其提前批量取被封，不如播一集取一集（站点自己也是这么做的）。
+   */
+  const fetchLazyUrl = (placeholder: string, giveWay = false): Promise<string> => {
+    const idx = handoff.lazyIndexByUrl.value[placeholder]
+    if (!handoff.lazyTask.value || idx === undefined) return Promise.resolve(placeholder)
+
+    const cur = inflight.get(placeholder)
+    if (cur) return cur
+
+    const withTimeout = () => new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`取址超时（${RESOLVE_TIMEOUT / 1000}s 没有响应），站点可能在限流`)),
+        RESOLVE_TIMEOUT,
+      )
+      doFetchLazyUrl(placeholder).then(resolve, reject).finally(() => clearTimeout(timer))
+    })
+
+    // allSettled 而不是 all：让路只是「等它们不再占着站点」，别人失败不该连坐
+    const p = giveWay && pending.size
+      ? Promise.allSettled([...pending]).then(withTimeout)
+      : withTimeout()
+
+    inflight.set(placeholder, p)
+    pending.add(p)
+    const drop = () => { inflight.delete(placeholder); pending.delete(p) }
+    p.then(drop, drop)
+    return p
+  }
+
+  /** 前台取址：转圈遮罩和错误文案都归它管（后台预热绝不能碰这两个） */
+  const resolveWithUi = async (placeholder: string): Promise<string> => {
+    media.isResolvingUrl.value = true
+    errorMessage.value = ''
+    try {
+      return await fetchLazyUrl(placeholder)
     } catch (e: any) {
-      if (silent) {
-        console.warn('预热取址失败（不影响当前播放）:', e?.message || e)
-        return ''
-      }
       errorMessage.value = '获取播放地址失败：' + (e?.message || '未知错误')
       return ''
     } finally {
-      if (!silent) media.isResolvingUrl.value = false
+      media.isResolvingUrl.value = false
     }
   }
 
@@ -169,7 +210,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
     const warm = lazyUrlCache.get(placeholder)
     lazyUrlCache.delete(placeholder)   // 一次性：留着只会在下次拿出一条过期签名
     if (warm && Date.now() - warm.at < LAZY_URL_TTL) return warm.url
-    return await fetchLazyUrl(placeholder)
+    return await resolveWithUi(placeholder)
   }
 
   /**
@@ -181,9 +222,14 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
    *
    * 每集只硬取一次（refetchedFor）：真失效和真限流表现一样，反复取只会把限流坐实，
    * 还会「取址 → 失败 → 再取址」原地打转。
+   *
+   * silent：给「加载 10s 没数据」那一档用。那一档**必然会误伤**——慢源的 manifest 本身
+   * 就可能要十几秒，它并没有死。所以那时候绝不能亮出「正在获取播放地址」的转圈遮罩：
+   * 误判时用户只是白发一发后台请求，什么都看不见；亮出来就变成「视频刚开始点下一集，
+   * 一直显示获取中」（踩过）。hls 网络错误重试用尽那条相反，确实该告诉用户在干什么。
    */
   let refetchedFor = ''
-  const refetchCurrentUrl = async (): Promise<boolean> => {
+  const refetchCurrentUrl = async (silent = false): Promise<boolean> => {
     const ph = playlist.value[currentIndex.value]
     if (!ph || refetchedFor === ph) return false
     // 不是按需取址的列表：地址就是用户/解析给的那条，无从「重取」
@@ -191,8 +237,10 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
 
     refetchedFor = ph
     lazyUrlCache.delete(ph)          // 预热那份显然不好使了
-    console.log('加载失败，重新获取播放地址:', ph)
-    const fresh = await fetchLazyUrl(ph)
+    console.log('加载不顺，后台重新获取播放地址:', ph)
+    const fresh = silent
+      ? await fetchLazyUrl(ph).catch(e => { console.warn('后台重取地址失败:', e?.message || e); return '' })
+      : await resolveWithUi(ph)
     // 取回来还是同一条 → 不是过期问题，交回上层去重探连接方式
     if (!fresh || fresh === videoUrl.value) return false
 
@@ -203,13 +251,21 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
     return true
   }
 
-  /** 后台预热：静默取址并存起来，供随后的 resolveLazyUrl 秒取。已有未过期的就不重复发请求 */
+  /**
+   * 后台预热：静默取址并存起来，供随后的 resolveLazyUrl 秒取。已有未过期的就不重复发请求。
+   * 失败只写日志——预热是锦上添花，任何提示都会让用户以为正播着的这一集出了问题。
+   */
   const peekLazyUrl = async (placeholder: string): Promise<string> => {
     const warm = lazyUrlCache.get(placeholder)
     if (warm && Date.now() - warm.at < LAZY_URL_TTL) return warm.url
-    const url = await fetchLazyUrl(placeholder, true)
-    if (url && url !== placeholder) lazyUrlCache.set(placeholder, { url, at: Date.now() })
-    return url
+    try {
+      const url = await fetchLazyUrl(placeholder, true)   // 让路：前台取址优先
+      if (url && url !== placeholder) lazyUrlCache.set(placeholder, { url, at: Date.now() })
+      return url
+    } catch (e: any) {
+      console.warn('预热取址失败（不影响当前播放）:', e?.message || e)
+      return ''
+    }
   }
 
   // ── 切集 ──

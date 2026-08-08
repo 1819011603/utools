@@ -58,7 +58,7 @@ export function useVideoPlayerController() {
     tier,
     progressKey: () => playlist.progressKey(),
     getSavedProgress: url => playlist.getSavedProgress(url),
-    refetchUrl: () => playlist.refetchCurrentUrl(),
+    refetchUrl: silent => playlist.refetchCurrentUrl(silent),
   })
 
   // 自愈调参环每秒跑一次，挂在引擎心跳上（引擎不反向依赖它）

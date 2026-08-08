@@ -302,6 +302,15 @@ hls.js 再拉一次 manifest。三段全发生在用户点了「下一集」之�
 
 - 两个入口：加载 **10s**（`STALE_URL_TIMEOUT`，比 `LOAD_TIMEOUT` 15s 早一档）一个字节都没来；
   以及 hls fatal `NETWORK_ERROR` 重试用尽（`recoverFromNetworkFailure`）。MP4 走 `onVideoError`，顺序相同
+- **10s 那一档必须静默**（`refetchCurrentUrl(silent)`）：它**必然误伤**——慢源的 manifest 本身就要
+  十几秒，它没死。早先在那儿写了句「正在重新获取播放地址」并拉起 `isResolvingUrl`，
+  于是正常的慢加载也盖上转圈遮罩，表现成「视频刚开始点下一集，一直显示获取中」（踩过）。
+  网络错误那一档相反，确实该告诉用户在干什么
+- **取址必须有硬超时**（`RESOLVE_TIMEOUT` 30s）：转圈遮罩挂在 `isResolvingUrl` 上，
+  取址没有终点 = 用户除了刷新没有出路
+- **取址要「同集去重 + 预热让路」**：预热和用户点击会同时想取址，而 nbmovie 系的 wasm 签名共用页面上
+  那个 `<meta id="nb-plt">` 时间戳，并发两发会互相踩（其中一发拿到过期时间戳 → 401）。
+  同集去重让点击直接复用预热那一发；**只能预热等前台，反过来会让点击干等一个 30s 超时**
 - 引擎不认识播放列表 → 走 `deps.refetchUrl` 回调（`useVideoPlaylistCtl.refetchCurrentUrl`）
 - **每集只硬取一次**（`refetchedFor`，`doPlayByIndex` 里复位）：真失效和真限流表现一样，
   反复取会「取址 → 失败 → 再取址」原地打转
