@@ -1,11 +1,12 @@
 <template>
   <div>
     <div class="text-center mb-10">
-      <h1 class="text-4xl font-bold text-gray-900 dark:text-white mb-3">
-        开发工具箱
+      <h1 class="text-4xl font-bold mb-3 bg-gradient-to-r from-rose-500 via-pink-500 to-violet-500
+                 bg-clip-text text-transparent">
+        晚风
       </h1>
-      <p class="text-lg text-gray-600 dark:text-gray-300">
-        常用开发工具集合，提升日常开发效率
+      <p class="text-base text-gray-500 dark:text-gray-400">
+        放映厅、图片与文档、JSON —— 都在你自己的浏览器里跑，不上传
       </p>
     </div>
 
@@ -148,7 +149,7 @@ const categories: Category[] = [
         iconColor: 'text-violet-600 dark:text-violet-400'
       },
       {
-        name: '视频播放器',
+        name: '放映厅',
         path: '/video-player',
         icon: 'i-heroicons-play-circle',
         description: '支持 M3U8/MP4 播放、代理、防盗链处理与下载',

@@ -1,11 +1,25 @@
 <template>
-  <div class="min-h-screen bg-gray-50 dark:bg-gray-900">
-    <header class="bg-white dark:bg-gray-800 shadow-sm border-b border-gray-200 dark:border-gray-700">
+  <!--
+    氛围靠**底色和留白**，不靠把颜色调重：整页一层极淡的玫瑰→薰衣草渐变（透明度都在 10% 以下），
+    暗色下换成带紫调的深夜色。控件本身仍是中性灰，否则一屏粉红就俗了。
+  -->
+  <div class="min-h-screen bg-gradient-to-b from-rose-50/70 via-white to-violet-50/60
+              dark:from-[#1a1520] dark:via-[#141119] dark:to-[#16121d]">
+    <header class="sticky top-0 z-40 bg-white/70 dark:bg-[#171320]/70 backdrop-blur-xl
+                   border-b border-rose-100/70 dark:border-white/5">
       <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div class="flex justify-between items-center h-16">
           <NuxtLink to="/" class="flex items-center space-x-2">
-            <UIcon name="i-heroicons-wrench-screwdriver" class="w-8 h-8 text-primary-500" />
-            <span class="text-xl font-bold text-gray-900 dark:text-white">开发工具箱</span>
+            <span class="w-9 h-9 rounded-2xl bg-gradient-to-br from-rose-400 via-pink-400 to-violet-400
+                         flex items-center justify-center shadow-sm shadow-rose-200/60 dark:shadow-none">
+              <UIcon name="i-heroicons-heart-solid" class="w-5 h-5 text-white" />
+            </span>
+            <span class="flex flex-col leading-none">
+              <!-- 「晚风」：夏夜晚风那种氛围，不直说「爱情/浪漫」——直说的都俗 -->
+              <span class="text-xl font-bold tracking-wide bg-gradient-to-r from-rose-500 via-pink-500 to-violet-500
+                           bg-clip-text text-transparent">晚风</span>
+              <span class="text-[10px] tracking-[0.3em] text-gray-400 dark:text-gray-500 mt-0.5">EVENING BREEZE</span>
+            </span>
           </NuxtLink>
           
           <nav class="hidden md:flex items-center space-x-1">
@@ -85,10 +99,10 @@
       <slot />
     </main>
 
-    <footer class="bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 mt-auto">
-      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-        <p class="text-center text-gray-500 dark:text-gray-400 text-sm">
-          开发工具箱 - 提升开发效率
+    <footer class="border-t border-rose-100/70 dark:border-white/5 mt-auto">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-5">
+        <p class="text-center text-gray-400 dark:text-gray-500 text-xs tracking-widest">
+          晚风 · 一切都在你自己的浏览器里发生
         </p>
       </div>
     </footer>
@@ -119,7 +133,7 @@ const toolCategories: Category[] = [
       { label: '图片压缩', path: '/image-compress', icon: 'i-heroicons-arrow-down-tray' },
       { label: '图片格式转换', path: '/image-convert', icon: 'i-heroicons-arrows-right-left' },
       { label: '视频转GIF', path: '/video-to-gif', icon: 'i-heroicons-film' },
-      { label: '视频播放器', path: '/video-player', icon: 'i-heroicons-play-circle' },
+      { label: '放映厅', path: '/video-player', icon: 'i-heroicons-play-circle' },
       { label: '视频解析', path: '/video-parse', icon: 'i-heroicons-link' },
       { label: '音频格式转换', path: '/audio-convert', icon: 'i-heroicons-musical-note' }
     ]

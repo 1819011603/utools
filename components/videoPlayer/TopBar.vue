@@ -19,7 +19,7 @@
       </button>
 
       <div class="min-w-0 flex-1">
-        <div class="font-semibold truncate drop-shadow">{{ playlistTitle || '播放器' }}</div>
+        <div class="font-semibold truncate drop-shadow">{{ playlistTitle || '放映厅' }}</div>
         <div class="text-xs text-white/70 truncate">
           <span v-if="playlist.length > 1">{{ currentVideoName }} · 第 {{ currentIndex + 1 }}/{{ playlist.length }} 集</span>
           <span v-else>{{ currentVideoName }}</span>

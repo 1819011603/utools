@@ -1,6 +1,9 @@
-# utools — 开发工具箱
+# utools — 晚风（在线工具集）
 
 纯前端（`ssr: false`）的在线工具集合，Nuxt 3 + Nuxt UI，部署在 Cloudflare Pages。
+站名「晚风」，`/video-player` 对外叫「放映厅」（仓库名和路由仍是 utools / video-player，不必改）。
+主色 `rose`、灰阶 `zinc`（`app.config.ts`），整页一层 10% 以下的玫瑰→薰衣草渐变——
+**氛围靠底色和留白，不靠把颜色调重**，控件本身保持中性灰。
 除「视频代理 / 解析」两个服务端接口外，所有处理都在浏览器里做，不上传用户文件。
 
 ## 启动（本地开发）

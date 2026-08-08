@@ -372,7 +372,7 @@
 
     <!-- 画面下方的信息行：剧名 + 当前集 + 格式 + 连接策略（原来这些挤在卡片头里） -->
     <div class="px-4 sm:px-0 pt-3 flex items-center gap-2 flex-wrap text-sm">
-      <span class="font-semibold truncate max-w-full">{{ playlistTitle || '播放器' }}</span>
+      <span class="font-semibold truncate max-w-full">{{ playlistTitle || '放映厅' }}</span>
       <UBadge v-if="playlistTitle && playlist.length > 1" color="violet" variant="soft" size="xs">
         {{ currentVideoName }}
       </UBadge>

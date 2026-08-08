@@ -3,8 +3,8 @@
     <!-- 起播后把大标题收掉：手机上它白占一屏，而画面就在下面 -->
     <div v-if="!isVideoLoaded" class="flex items-center justify-between flex-wrap gap-4">
       <div>
-        <h1 class="text-2xl font-bold text-gray-900 dark:text-white">视频播放器</h1>
-        <p class="text-gray-600 dark:text-gray-400 mt-1">支持 M3U8/MP4 播放，并发加载分片，倍速/音量调整</p>
+        <h1 class="text-2xl font-bold text-gray-900 dark:text-white">放映厅</h1>
+        <p class="text-gray-500 dark:text-gray-400 mt-1 text-sm">M3U8 / MP4，多线并发预取，自动挑连接方式</p>
       </div>
     </div>
 
@@ -14,7 +14,19 @@
     -->
     <VideoPlayerStage v-if="isVideoLoaded" />
 
-    <VideoPlayerSourceCard />
+    <!--
+      起播后视频源默认收起：地址栏一贴就不用再看它，而它占着播放器正下方最好的位置。
+      还没起播时（v-model 初值）默认展开——那时它是页面上唯一有用的东西。
+    -->
+    <VideoPlayerCollapseCard
+      v-model="openSource"
+      title="视频源"
+      icon="i-heroicons-link"
+      icon-class="text-rose-400"
+      :hint="playlist.length > 1 ? `播放列表 ${currentIndex + 1}/${playlist.length}` : ''"
+    >
+      <VideoPlayerSourceCard />
+    </VideoPlayerCollapseCard>
 
     <!--
       走 ?parseUrl= 分享链接进来时，整份播放列表要现场解析，慢的站点好几秒。
@@ -130,6 +142,10 @@ const {
 
 // 折叠区的开合。连接那块用控制器里的 showAdvancedProxy（播放器标题栏的策略徽标也要能掀开它），
 // 其余三块只有本页用得到，就近放着
+// 视频源：还没起播时展开（那时它是唯一有用的东西），起播后收起
+const openSource = ref(!ctx.isVideoLoaded.value)
+watch(isVideoLoaded, v => { if (v) openSource.value = false })
+
 const openPlaylist = ref(false)
 const openHls = ref(false)
 const openPreload = ref(false)
