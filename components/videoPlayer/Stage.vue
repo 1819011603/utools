@@ -1,9 +1,11 @@
 <template>
   <!--
-    手机上通栏（负边距抵掉页面容器的 px-4）：16:9 的画面本来就不高，
+    手机上通栏：用 100vw + 居中位移，而不是 `-mx-4` 去抵容器 padding——
+    后者要跟 layouts/default.vue 的 px-4 严格对齐，那边一改就又露出白边。
+    16:9 的画面本来就不高，
     两侧再留白只会把它压得更小。参照腾讯视频移动端：播放器贴边、标题信息在画面下方。
   -->
-  <div class="-mx-4 sm:mx-0">
+  <div class="relative left-1/2 -translate-x-1/2 w-screen sm:left-auto sm:translate-x-0 sm:w-auto">
     <!--
       手势全部走 Pointer Events（鼠标/触摸同一套，见 useVideoGestures）：
       单击唤出控制栏、双击左右 ±5s、长按右侧临时 2x、横滑进度、全屏内竖滑音量/亮度。
@@ -23,6 +25,8 @@
       @pointermove="onPointerMove"
       @pointerup="onPointerUp"
       @pointercancel="onPointerCancel"
+      @click="onClick"
+      @dblclick="onDblClick"
       @contextmenu.prevent
     >
       <!-- 播放器已移除本地文件，只放网络地址，crossorigin 恒为 anonymous -->
@@ -387,7 +391,8 @@ const {
   toggleFullscreen, togglePiP, hideControlsDelayed, keepControlsAlive,
   // 手势层（useVideoGestures）
   isLocked, showLockBtn, toggleLock, brightness, gestureHud, seekFlash, touchAction, controlsVisible,
-  onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onMouseMove, boostActive, boostRate,
+  onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onMouseMove, onClick, onDblClick,
+  boostActive, boostRate,
   playPrev, playNext,
   onTimeUpdate, onLoadedMetadata, onLoadedData, onVideoEnded, onWaiting, onCanPlay,
   onCanPlayThrough, onSeeking, onSeeked, onPlaying, onVolumeChange, onVideoError,

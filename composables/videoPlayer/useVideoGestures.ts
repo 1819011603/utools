@@ -72,6 +72,7 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
   let pointerKind = 'mouse'
   let lastTouchAt = 0    // 最近一次触摸的时刻，用来滤掉浏览器补发的兼容鼠标事件
   let tapWasShown = false  // 按下那一刻控制栏是不是开着（单击的目标态由它定，见 onTap）
+  let lastDragEndAt = 0    // 拖动结束时刻：拖完浏览器还会补一个 click，那一下不能当播放/暂停
 
   const clearTimers = () => {
     if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null }
@@ -242,12 +243,17 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
     }
     if (dragMode) {
       if (dragMode === 'seek' && videoEl.value && duration.value) videoEl.value.currentTime = seekTarget
+      lastDragEndAt = performance.now()
       dragMode = null
       gestureHud.value = null
       return
     }
     // 按了很久又没动也没触发加速（比如在左半屏），不当点击处理
     if (performance.now() - startAt > 700) return
+    // 鼠标交给原生 click/dblclick：自己用 pointerdown/up 拼「单击」在桌面上不可靠
+    //（指针捕获、拖动阈值、双击窗口三者叠一起，实测点了不暂停），
+    // 而浏览器自带的 click/dblclick 语义正好就是桌面播放器要的那套
+    if (e.pointerType === 'mouse') return
 
     onTap(e, rectOf(e))
   }
@@ -260,6 +266,7 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
     gestureHud.value = null
   }
 
+  /** 触摸专用的点击判定（鼠标走原生 click/dblclick，见下） */
   const onTap = (e: PointerEvent, rect: DOMRect) => {
     const now = performance.now()
     const x = (e.clientX - rect.left) / rect.width
@@ -269,8 +276,6 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
 
     if (isDouble) {
       if (singleTapTimer) { clearTimeout(singleTapTimer); singleTapTimer = null }
-      // 鼠标：双击**任意位置**都是全屏，这是桌面播放器几十年的规矩，不要自作聪明分区
-      if (pointerKind === 'mouse') { void controls.toggleFullscreen(); return }
       if (x < SIDE_ZONE) { controls.skip(-DOUBLE_TAP_SEEK); flashSide('left'); vibrate(10) }
       else if (x > 1 - SIDE_ZONE) { controls.skip(DOUBLE_TAP_SEEK); flashSide('right'); vibrate(10) }
       else controls.togglePlay()
@@ -279,15 +284,31 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
 
     // 单击要等双击窗口过完才能确定，否则双击会先闪一下控制栏/先暂停再全屏
     if (singleTapTimer) clearTimeout(singleTapTimer)
-    singleTapTimer = setTimeout(() => {
-      singleTapTimer = null
-      // 鼠标端单击 = 播放/暂停（桌面标准）；触摸端单击 = 显隐控制栏。
-      // 两端不一样是因为触摸端的「单击暂停」误触率极高（想看一眼进度就停了），
-      // 而它有双击中间可以暂停；鼠标端反过来——控制栏本来就跟着指针移动出现，
-      // 单击不给播放/暂停等于把最常用的操作弄丢了。
-      if (pointerKind === 'mouse') controls.togglePlay()
-      else applyTapControls()
-    }, DOUBLE_TAP_MS)
+    singleTapTimer = setTimeout(() => { singleTapTimer = null; applyTapControls() }, DOUBLE_TAP_MS)
+  }
+
+  // ── 鼠标：原生 click / dblclick ──
+  // 桌面播放器的规矩就两条：单击播放/暂停、双击全屏（不分区）。
+  // 单击要延后一个双击窗口再执行，否则双击会「先暂停一下再全屏」。
+  let clickTimer: ReturnType<typeof setTimeout> | null = null
+
+  /** 这一发鼠标事件该不该管：控制栏内、触摸补发的合成事件、刚拖过进度 —— 都不管 */
+  const mouseIgnored = (e: MouseEvent) =>
+    !!(e.target as HTMLElement | null)?.closest?.('[data-no-gesture]')
+    || performance.now() - lastTouchAt < 900
+    || isLocked.value
+    || performance.now() - lastDragEndAt < 300
+
+  const onClick = (e: MouseEvent) => {
+    if (mouseIgnored(e) || e.detail > 1) return   // detail>1 是双击的第二下
+    if (clickTimer) clearTimeout(clickTimer)
+    clickTimer = setTimeout(() => { clickTimer = null; controls.togglePlay() }, DOUBLE_TAP_MS)
+  }
+
+  const onDblClick = (e: MouseEvent) => {
+    if (mouseIgnored(e)) return
+    if (clickTimer) { clearTimeout(clickTimer); clickTimer = null }   // 撤销这一对里的单击
+    void controls.toggleFullscreen()
   }
 
   /**
@@ -306,6 +327,7 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
 
   const disposeGestures = () => {
     clearTimers()
+    if (clickTimer) clearTimeout(clickTimer)
     if (singleTapTimer) clearTimeout(singleTapTimer)
     if (seekFlashTimer) clearTimeout(seekFlashTimer)
     if (lockBtnTimer) clearTimeout(lockBtnTimer)
@@ -316,7 +338,7 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
   return {
     showLockBtn, toggleLock, revealLockBtn,
     brightness, gestureHud, seekFlash, touchAction, controlsVisible,
-    onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onMouseMove,
+    onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onMouseMove, onClick, onDblClick,
     disposeGestures,
   }
 }
