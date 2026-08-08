@@ -180,11 +180,15 @@ export function useVideoEngine(deps: VideoEngineDeps) {
    *
    * 手法是改一个会让元素脱离/重回合成层的属性再撤销。用 `transform` 而不是
    * `display:none`：后者会让 `<video>` 卸掉解码器再重建，代价是真的会黑一下。
+   *
+   * 中间那次 `offsetHeight` 是**强制同步布局**，不能省：只设样式再在下一帧撤销，
+   * 浏览器完全可以把两次改动合并成「没变过」，那这个函数就是空操作。
    */
   const forceRecomposite = () => {
     const v = videoEl.value
     if (!v) return
     v.style.transform = 'translateZ(0)'
+    void v.offsetHeight
     requestAnimationFrame(() => {
       // 这一帧之间可能已经换集重建了元素，别把新元素的样式改坏
       if (videoEl.value === v) v.style.transform = ''
@@ -497,6 +501,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     aggregateKBps, aggregateMbps, deadLaneLabel,
     // 起播锚点
     clearStartAnchor, isArrivingAtStart,
+    forceRecomposite,
     // 统计
     updateHlsStats,
   }

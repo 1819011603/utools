@@ -281,6 +281,21 @@ export function useVideoEvents(deps: VideoEventsDeps) {
     if (isHls.value) engine.primePrefetch()
   }
 
+  /**
+   * 暂停时补一次强制重新合成。
+   *
+   * 治的是**暂停那一刻画面撕裂/留残影**：浏览器把视频画在独立的硬件 overlay 平面上，
+   * 停下来之后那层不再更新，最后一次合成没画完就永远留在屏幕上（实测拔蓝牙耳机
+   * 触发的系统级暂停最容易撞上：画面错开成两块，音频和 currentTime 都正常）。
+   * 手动点暂停通常没事，因为那一下的点击本身就带来了别的重绘。
+   *
+   * 只在**没有别的东西会重画**时才做：`isBuffering` 期间有转圈遮罩在动，不用管。
+   */
+  const onPause = () => {
+    isPlaying.value = false
+    if (!isBuffering.value) engine.forceRecomposite()
+  }
+
   const onPlaying = () => {
     isBuffering.value = false
     isPlaying.value = true
@@ -303,7 +318,7 @@ export function useVideoEvents(deps: VideoEventsDeps) {
   return {
     onTimeUpdate, onLoadedMetadata, onVolumeChange, onVideoError,
     onCanPlay, onLoadedData, onWaiting, onCanPlayThrough,
-    onSeeking, onSeeked, onPlaying, onVideoEnded,
+    onSeeking, onSeeked, onPlaying, onPause, onVideoEnded,
     scheduleAutoPlay, disposeEvents,
   }
 }

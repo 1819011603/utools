@@ -42,7 +42,7 @@
         @loadedmetadata="onLoadedMetadata"
         @loadeddata="onLoadedData"
         @play="isPlaying = true"
-        @pause="isPlaying = false"
+        @pause="onPause"
         @ended="onVideoEnded"
         @waiting="onWaiting"
         @canplay="onCanPlay"
@@ -431,7 +431,7 @@ const {
   boostActive, boostRate,
   playPrev, playNext,
   onTimeUpdate, onLoadedMetadata, onLoadedData, onVideoEnded, onWaiting, onCanPlay,
-  onCanPlayThrough, onSeeking, onSeeked, onPlaying, onVolumeChange, onVideoError,
+  onCanPlayThrough, onSeeking, onSeeked, onPlaying, onPause, onVolumeChange, onVideoError,
 } = useVideoPlayerCtx()
 
 // 倍速菜单点击外部关闭
