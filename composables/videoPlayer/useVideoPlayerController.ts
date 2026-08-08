@@ -58,11 +58,16 @@ export function useVideoPlayerController() {
     tier,
     progressKey: () => playlist.progressKey(),
     getSavedProgress: url => playlist.getSavedProgress(url),
+    refetchUrl: () => playlist.refetchCurrentUrl(),
   })
 
   // 自愈调参环每秒跑一次，挂在引擎心跳上（引擎不反向依赖它）
   const autoTune = useVideoAutoTune({ media, tier, conn, engine })
   engine.registerTickHook(autoTune.selfHeal)
+
+  // 下一集预热同样挂心跳：快播完这一集时后台把下一集的取址/探测/manifest 先做掉
+  const prewarm = useVideoPrewarm({ media, conn, playlist })
+  engine.registerTickHook(prewarm.prewarmTick)
 
   const events = useVideoEvents({ media, engine, conn, playlist })
   const controls = useVideoUiControls({ media, autoTune })
@@ -250,6 +255,7 @@ export function useVideoPlayerController() {
     ...playlist,
     ...engine,
     ...autoTune,
+    ...prewarm,
     ...controls,
     ...gestures,
     ...events,

@@ -97,20 +97,38 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
   // ── 按需取址 ──
 
   /**
+   * 预热取到的地址（占位地址 → 真实地址）。只为「后台备好下一集」而存，见 useVideoPrewarm。
+   *
+   * TTL 很短且**用一次就删**：这类地址带时效签名，留久了下次拿出来就是死链，
+   * 那比慢几秒糟得多——切过去之后没有补救路径（`reload()` 直接用 `videoUrl`，不会重新取址），
+   * 表现是「自动跳到下一集，然后 403 卡死、也不自动播」。过期宁可现取。
+   * 90s 是配合 useVideoPrewarm 那个 60s 提前量定的，正常路径上用到时地址不超过一分钟。
+   */
+  const LAZY_URL_TTL = 90_000
+  const lazyUrlCache = new Map<string, { url: string; at: number }>()
+  const clearLazyUrlCache = () => lazyUrlCache.clear()
+
+  /**
    * 占位地址 → 真实播放地址。不是占位就原样返回。
    *
-   * 为什么每次播都重取而不缓存下来：这类地址带时效签名，缓存到列表里下次进来就是死链，
+   * 为什么不把结果存进播放列表：这类地址带时效签名，存下来下次进来就是死链，
    * 而且站点限流，与其提前批量取被封，不如播一集取一集（站点自己也是这么做的）。
+   * 预热那一份是例外，但它只活 5 分钟且取用即弃（见上）。
    *
    * 作业单里的令牌是源站按次渲染的、会过期。失败时若知道来源页面，就重解析一次拿新作业单再试，
    * 只重试一次——真失效和真限流表现一样，无限重试只会把限流坐实。
+   *
+   * silent：后台预热用。此时**不能碰 isResolvingUrl / errorMessage**——那是前台取址的 UI 通道，
+   * 预热失败会在正播着的这一集上盖一层转圈遮罩和红字，用户完全不知道是谁报的。
    */
-  const resolveLazyUrl = async (placeholder: string): Promise<string> => {
+  const fetchLazyUrl = async (placeholder: string, silent = false): Promise<string> => {
     const idx = handoff.lazyIndexByUrl.value[placeholder]
     if (!handoff.lazyTask.value || idx === undefined) return placeholder
 
-    media.isResolvingUrl.value = true
-    errorMessage.value = ''
+    if (!silent) {
+      media.isResolvingUrl.value = true
+      errorMessage.value = ''
+    }
     // 取址时站点会带回最新的防盗链域名（它是从站点播放器配置里现取的、会变）
     const hintOpts = { onHints: deps.applyHints }
     try {
@@ -129,11 +147,69 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
         return await resolveOneUrl(result.clientTask, hit >= 0 ? hit : idx, hintOpts)
       }
     } catch (e: any) {
+      if (silent) {
+        console.warn('预热取址失败（不影响当前播放）:', e?.message || e)
+        return ''
+      }
       errorMessage.value = '获取播放地址失败：' + (e?.message || '未知错误')
       return ''
     } finally {
-      media.isResolvingUrl.value = false
+      if (!silent) media.isResolvingUrl.value = false
     }
+  }
+
+  /** 预热的地址还在不在（只为日志，别拿它做分支——判过之后可能就过期了） */
+  const hasWarmLazyUrl = (placeholder: string): boolean => {
+    const warm = lazyUrlCache.get(placeholder)
+    return !!warm && Date.now() - warm.at < LAZY_URL_TTL
+  }
+
+  /** 真正要播这一集时调。预热过就直接用那份（切集的大头就是这一发请求） */
+  const resolveLazyUrl = async (placeholder: string): Promise<string> => {
+    const warm = lazyUrlCache.get(placeholder)
+    lazyUrlCache.delete(placeholder)   // 一次性：留着只会在下次拿出一条过期签名
+    if (warm && Date.now() - warm.at < LAZY_URL_TTL) return warm.url
+    return await fetchLazyUrl(placeholder)
+  }
+
+  /**
+   * 播不动了 → 就地重新取一次地址。返回 true 表示已换上新地址并重载（调用方别再报错）。
+   *
+   * 治的是「预热/交接槽里的签名地址已经过期」这一类：加载 10s 没数据、或 hls 网络错误重试用尽时，
+   * 无论换哪条通道都是 403，而重探一轮要好几秒、还可能连着走完线性阶梯 5 级，全是白等。
+   * 地址过期比通道判断错常见得多，所以这一步要排在重探**前面**。
+   *
+   * 每集只硬取一次（refetchedFor）：真失效和真限流表现一样，反复取只会把限流坐实，
+   * 还会「取址 → 失败 → 再取址」原地打转。
+   */
+  let refetchedFor = ''
+  const refetchCurrentUrl = async (): Promise<boolean> => {
+    const ph = playlist.value[currentIndex.value]
+    if (!ph || refetchedFor === ph) return false
+    // 不是按需取址的列表：地址就是用户/解析给的那条，无从「重取」
+    if (!handoff.lazyTask.value || handoff.lazyIndexByUrl.value[ph] === undefined) return false
+
+    refetchedFor = ph
+    lazyUrlCache.delete(ph)          // 预热那份显然不好使了
+    console.log('加载失败，重新获取播放地址:', ph)
+    const fresh = await fetchLazyUrl(ph)
+    // 取回来还是同一条 → 不是过期问题，交回上层去重探连接方式
+    if (!fresh || fresh === videoUrl.value) return false
+
+    videoUrl.value = fresh
+    errorMessage.value = ''
+    media.isRestoringFromSaved.value = true
+    await deps.loadVideo()
+    return true
+  }
+
+  /** 后台预热：静默取址并存起来，供随后的 resolveLazyUrl 秒取。已有未过期的就不重复发请求 */
+  const peekLazyUrl = async (placeholder: string): Promise<string> => {
+    const warm = lazyUrlCache.get(placeholder)
+    if (warm && Date.now() - warm.at < LAZY_URL_TTL) return warm.url
+    const url = await fetchLazyUrl(placeholder, true)
+    if (url && url !== placeholder) lazyUrlCache.set(placeholder, { url, at: Date.now() })
+    return url
   }
 
   // ── 切集 ──
@@ -167,7 +243,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
       handoff.lazyIndexByUrl.value[u] !== undefined ||
       handoff.playlistNames.value[u] !== undefined ||
       playlist.value.includes(u)
-    if (!urls.every(known)) handoff.clearHandoffMeta()
+    if (!urls.every(known)) { handoff.clearHandoffMeta(); clearLazyUrlCache() }
 
     playlist.value = urls
     const from = typeof startIndex === 'number' && startIndex >= 0 && startIndex < urls.length ? startIndex : 0
@@ -202,11 +278,16 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
   const doPlayByIndex = async (index: number) => {
     saveCurrentProgress()
     currentIndex.value = index
+    refetchedFor = ''   // 换了一集，「重新取址」的额度重新给一次
 
     // 按需取址的站点：列表里是占位地址，真实地址现取（拿不到就别往下走，
     // 否则 hls.js 会去加载源站的 HTML 页面，报一个完全看不懂的解析错）
+    const t0 = performance.now()
+    const warmHit = hasWarmLazyUrl(playlist.value[index])
     const realUrl = await resolveLazyUrl(playlist.value[index])
     if (!realUrl) return
+    // 切集慢在哪一段，光看转圈看不出来 → 把取址耗时和「预热有没有命中」打出来
+    console.log(`切集取址 ${Math.round(performance.now() - t0)}ms（预热${warmHit ? '命中' : '未命中'}）`)
 
     videoUrl.value = realUrl
     media.hasSkippedIntro.value = false
@@ -257,8 +338,9 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
       const { urls, names } = toPlaylist(result)
       if (!urls.length) throw new Error('没有解析出可播放的地址')
 
-      // 上一份列表的集名/作业单/来源一律作废——这是一份全新的列表
+      // 上一份列表的集名/作业单/来源一律作废——这是一份全新的列表（预热的地址跟着旧作业单，一并扔）
       handoff.clearHandoffMeta()
+      clearLazyUrlCache()
       playlist.value = urls
       handoff.setPlaylistNames(urls, names)
       handoff.setLazyTask(result.clientTask?.lazy ? result.clientTask : null, urls)
@@ -300,6 +382,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
   const clearPlaylist = () => {
     playlist.value = []
     handoff.clearHandoffMeta()
+    clearLazyUrlCache()
     currentIndex.value = 0
     videoUrlInput.value = ''
     deps.syncUrl()
@@ -365,6 +448,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
       handoff.setPlaylistNames(urls, names)
       // 作业单里的令牌是源站按次渲染的，会过期 → 刷新时一并换成新的
       handoff.setLazyTask(result.clientTask?.lazy ? result.clientTask : null, urls)
+      clearLazyUrlCache()   // 预热的地址是用旧令牌取的，跟着一起作废
       if (result.title) handoff.playlistTitle.value = result.title
       // 线路名跟着刷新一起更新：源站改了线路名的话，地址栏里那份得跟上，
       // 否则下次按名字认线路会落空、白白多解析一轮
@@ -421,7 +505,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
     playlist, currentIndex, hasPrev, hasNext, isRefreshingLinks, lastRefreshAt,
     progressKey, currentVideoName, saveCurrentProgress, getSavedProgress, clearAllProgress,
     parseAndLoad, playByIndex, playPrev, playNext, clearPlaylist, loadExample, dropSavedProgress,
-    resolveLazyUrl, refreshPlaylistLinks, loadFromParseSource,
+    resolveLazyUrl, peekLazyUrl, refetchCurrentUrl, refreshPlaylistLinks, loadFromParseSource,
   }
 }
 

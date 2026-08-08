@@ -71,9 +71,11 @@
         暂停后画面是一张静止图，没有任何东西表明「是暂停了还是卡死了」。
         常驻的这枚可以直接点（自动播放被浏览器拦下时它就是唯一的入口）。
       -->
+      <!-- 锁定态下不出：它带 data-no-gesture + @click，锁了还能暂停等于开关是坏的，
+           而且它正好压在锁定态唯一的出口（左侧解锁键）上方 -->
       <Transition name="pop">
         <div
-          v-if="showPlayIcon || pausedIdle"
+          v-if="!isLocked && (showPlayIcon || pausedIdle)"
           class="absolute inset-0 flex items-center justify-center"
           :class="pausedIdle ? 'cursor-pointer' : 'pointer-events-none'"
           data-no-gesture
@@ -178,14 +180,17 @@
 
       <!--
         锁定按钮：锁上后它是唯一还能点的东西，所以点画面任意处都会让它露 3 秒。
-        **小窗里不出**：画面才 200 多 px 高，左侧垂直居中正好压在播放键上（实测截图）；
+        **未锁定时小窗里不出**：画面才 200 多 px 高，左侧垂直居中正好压在播放键上（实测截图）；
         而防误触本来就是全屏握持时才需要的事。
+        **已锁定时任何尺寸都必须出**：锁定态下手势层全部 return、控制栏恒隐、快捷键也停，
+        它是画面上唯一的出口。少了它，「全屏锁定 → 来电/系统手势退出全屏 → 变窄屏小窗」
+        之后整个播放器点什么都没反应，只能刷新页面（实测踩过）。
         锁定态用半透明的紫→粉→蓝渐变，跟进度条/长按提示同一套色；
         原来那块实心琥珀在黑画面上跳得像个警告标（本意只是「状态不同」，不是「出事了」）。
       -->
       <Transition name="pop">
         <button
-          v-if="(isFullscreen || !isNarrow) && (isLocked ? showLockBtn : (showControls || pausedIdle))"
+          v-if="isLocked ? showLockBtn : ((isFullscreen || !isNarrow) && (showControls || pausedIdle))"
           data-no-gesture
           class="absolute left-3 top-1/2 -translate-y-1/2 w-14 h-14 rounded-full text-white
                  flex items-center justify-center backdrop-blur-sm ring-1 transition-all duration-300

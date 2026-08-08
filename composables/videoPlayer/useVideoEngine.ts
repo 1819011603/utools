@@ -16,11 +16,20 @@ export interface VideoEngineDeps {
   /** 进度存取的稳定键（按需取址的站点真实地址每次都变，不能用 videoUrl） */
   progressKey: () => string
   getSavedProgress: (url: string) => number
+  /**
+   * 就地重新取一次播放地址并重载（按需取址的站点才做得到）。
+   * true = 已换新地址，调用方别再报错。见 useVideoPlaylistCtl.refetchCurrentUrl
+   */
+  refetchUrl: () => Promise<boolean>
 }
 
 // 加载超时：走服务端代理时需要更长，统一 15s
 //（代理要先请求远端再返回，3s 往往不够，会误触 destroyHls 取消所有请求）
 const LOAD_TIMEOUT = 15000
+// 到这个点还没收到任何数据，先怀疑「地址本身死了」而不是通道选错了：
+// 预热/交接槽里的签名地址会过期，过期后换哪条通道都是 403。比 LOAD_TIMEOUT 早，
+// 这样重新取址那一次还能落在用户耐心之内（重取成功会把两个计时器一起重置）。
+const STALE_URL_TIMEOUT = 10000
 const MAX_HLS_RETRY = 3
 
 // 动态导入 hls.js（避免 SSR 问题），模块级缓存一次
@@ -38,6 +47,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   const hlsRetryCount = ref(0)
 
   let loadTimeoutTimer: ReturnType<typeof setTimeout> | null = null
+  let staleUrlTimer: ReturnType<typeof setTimeout> | null = null
   let hasReceivedData = false
 
   /**
@@ -105,10 +115,22 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   // ── 加载超时 ──
   const clearLoadTimeout = () => {
     if (loadTimeoutTimer) { clearTimeout(loadTimeoutTimer); loadTimeoutTimer = null }
+    if (staleUrlTimer) { clearTimeout(staleUrlTimer); staleUrlTimer = null }
   }
   const startLoadTimeout = () => {
     clearLoadTimeout()
     hasReceivedData = false
+    // 第一档：10s 一个字节都没来 → 大概率是地址过期。重新取址（每集一次额度，
+    // 不是按需取址的列表直接返回 false），成功的话 loadVideo 会把这两个计时器重新起一遍
+    staleUrlTimer = setTimeout(() => {
+      if (hasReceivedData || !isLoading.value) return
+      const notice = '加载没有响应，正在重新获取播放地址...'
+      errorMessage.value = notice
+      // 撤回自己那句提示时要认一下：这十秒里 hls 可能已经写了「正在重试」之类，别把它抹掉
+      void deps.refetchUrl().then(ok => {
+        if (!ok && errorMessage.value === notice) errorMessage.value = ''
+      })
+    }, STALE_URL_TIMEOUT)
     loadTimeoutTimer = setTimeout(() => {
       if (!hasReceivedData && isLoading.value) {
         errorMessage.value = '加载超时，视频链接可能已过期或无法访问（403/404）'
@@ -125,9 +147,10 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   }
 
   // ── 实时心跳的外挂钩子 ──
-  // 自愈调参环（useVideoAutoTune.selfHeal）由装配层登记进来，引擎不反向依赖它
-  let tickHook: (() => void) | null = null
-  const registerTickHook = (fn: () => void) => { tickHook = fn }
+  // 自愈调参环（useVideoAutoTune.selfHeal）、下一集预热（useVideoPrewarm.tick）都挂在这儿，
+  // 引擎不反向依赖它们。多播而不是单槽：单槽时后登记的会把前一个静默顶掉
+  const tickHooks: Array<() => void> = []
+  const registerTickHook = (fn: () => void) => { tickHooks.push(fn) }
 
   // ── 实时心跳：每秒刷新缓冲读数 + 跑闭环预取控制（不依赖 FRAG_BUFFERED，卡顿时也持续工作） ──
   let hlsTickTimer: ReturnType<typeof setInterval> | null = null
@@ -139,7 +162,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
       prefetchTick()
       refreshCacheStats()   // 面板上的「预取缓存 N 片 / X MB」
       updateHlsStats()
-      tickHook?.()
+      tickHooks.forEach(fn => fn())
     }, 1000)
   }
   const stopHlsTick = () => {
@@ -279,6 +302,26 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     }
   }
 
+  /**
+   * 网络错误重试用尽后的恢复顺序：**重新取址 → 重探连接方式 → 才报错**。
+   *
+   * 顺序不能反。按需取址的站点给的是带时效签名的地址，过期之后无论走哪条通道都是 403，
+   * 而重探一轮好几秒、探不出结论还会连着走完线性阶梯 5 级，全程是白等——
+   * 用户看到的是「自动跳到下一集然后卡死在转圈上」。地址过期比通道判断错常见得多。
+   */
+  const recoverFromNetworkFailure = async (details: string) => {
+    errorMessage.value = '链接可能已过期，正在重新获取播放地址...'
+    if (await deps.refetchUrl()) return
+    if (conn.escalateStrategyAndReload()) return
+    errorMessage.value = details === 'manifestLoadError'
+      ? '视频链接无效或已过期，请检查链接是否正确'
+      : `网络错误: ${details}，链接可能已过期`
+    isLoading.value = false
+    isBuffering.value = false
+    isVideoLoaded.value = false
+    destroyHls()
+  }
+
   const loadHlsVideo = async (url: string) => {
     if (!Hls) Hls = (await import('hls.js')).default
     const HlsLib = Hls   // 取成局部常量，闭包里就不用到处写 Hls!
@@ -371,15 +414,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
             errorMessage.value = `网络错误，正在重试 (${hlsRetryCount.value}/${MAX_HLS_RETRY})...`
             setTimeout(() => { hls?.startLoad() }, 1000)
           } else {
-            // 超过重试次数：先自动升级可达性策略（重探 → 线性阶梯）再重载
-            if (conn.escalateStrategyAndReload()) break
-            errorMessage.value = data.details === 'manifestLoadError'
-              ? '视频链接无效或已过期，请检查链接是否正确'
-              : `网络错误: ${data.details}，链接可能已过期`
-            isLoading.value = false
-            isBuffering.value = false
-            isVideoLoaded.value = false
-            destroyHls()
+            void recoverFromNetworkFailure(data.details)
           }
           break
         case HlsLib.ErrorTypes.MEDIA_ERROR:

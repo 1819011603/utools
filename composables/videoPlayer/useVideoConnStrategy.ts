@@ -200,6 +200,45 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   /** 交给探测的候选头（用户填的那对，空则由探测自己从视频地址推） */
   const hintPair = () => ({ origin: originHint.value.trim(), referer: refererHint.value.trim() })
 
+  /** 结论 → 生效（或退回阶梯）。runProbe 与「用预热结果」两处共用 */
+  const applyProbeResult = (r: ProbeResult, url: string) => {
+    probeResult.value = r
+    const cfg = resolveConnConfig(r, selfOriginOf(url))
+    if (cfg) {
+      ladderMode.value = false
+      applyConnConfig(cfg)
+      console.log('可达性探测:', describeProbe(r), r)
+    } else {
+      ladderMode.value = true                    // 三条路都没测通 → 交回阶梯继续盲试
+      applyReachabilityStep(autoStrategyStep.value)
+      console.warn('可达性探测无结论，退回线性阶梯', r)
+    }
+  }
+
+  // ── 预热探测（后台给下一集用，见 useVideoPrewarm）──
+  //
+  // **按完整 URL 存，绝不按 host**：按 host 缓存正是「切一集就播不了」那个坑——
+  // 按需取址的站点每集都是现签的地址，签名/路径一换，上一集的结论对这一集就是 403。
+  // 同一个具体地址几分钟内的结论才是稳定的，那不是猜测，是同一次实测。
+  const WARM_PROBE_TTL = 90_000
+  let warmProbe: { url: string; result: ProbeResult } | null = null
+
+  /**
+   * 后台探一个还没开始播的地址。**不写任何生效 ref、不碰 probeSeq/isProbing/probeResult**——
+   * 那些是当前这一集正在用的，播放中改它们只会让 UI 和 hls.js 手上的分片 URL 对不上。
+   */
+  const prewarmProbe = async (url: string): Promise<ProbeResult | null> => {
+    if (!isProbeable(url)) return null
+    try {
+      const r = await probeReachability(url, hintPair())
+      warmProbe = { url, result: r }
+      return r
+    } catch (e) {
+      console.warn('预热探测失败（不影响当前播放）:', e)
+      return null
+    }
+  }
+
   /** 跑一次探测并套用结论。返回结果；没结论（degraded）时落回线性阶梯兜底 */
   const runProbe = async (url: string, blocking: boolean): Promise<ProbeResult | null> => {
     const seq = ++probeSeq
@@ -207,17 +246,7 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     try {
       const r = await probeReachability(url, hintPair())
       if (seq !== probeSeq) return null            // 已被更新的一次探测取代，丢弃
-      probeResult.value = r
-      const cfg = resolveConnConfig(r, selfOriginOf(url))
-      if (cfg) {
-        ladderMode.value = false
-        applyConnConfig(cfg)
-        console.log('可达性探测:', describeProbe(r), r)
-      } else {
-        ladderMode.value = true                    // 三条路都没测通 → 交回阶梯继续盲试
-        applyReachabilityStep(autoStrategyStep.value)
-        console.warn('可达性探测无结论，退回线性阶梯', r)
-      }
+      applyProbeResult(r, url)
       return r
     } catch (e) {
       console.error('可达性探测异常:', e)
@@ -252,6 +281,16 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     // 表现是「切一集就播不了、等半天自己好」（实测被反复问到）。
     // 代价是每次切集多等一轮探测——但探测本身有两级超时（单通道 8s、整轮 12s 硬顶），
     // 慢源上也就一两秒，比播不了强。
+    //
+    // 唯一的例外是预热：后台刚给**这个同一个地址**测过一轮，直接拿来用。
+    // 这不违背上面那条——变的是地址，不是同一地址的结论；用完即弃，不留第二次。
+    const warm = warmProbe
+    warmProbe = null
+    if (warm && warm.url === url && Date.now() - warm.result.at < WARM_PROBE_TTL) {
+      console.log('用预热探测结果，跳过本轮探测:', url)
+      applyProbeResult(warm.result, url)
+      return
+    }
     await runProbe(url, true)
   }
 
@@ -366,7 +405,7 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     originSuggestions, refererSuggestions,
     // 探测
     probeResult, isProbing, ladderMode, autoStrategyStep,
-    applyStrategy, escalateStrategyAndReload, applyReachabilityStep,
+    applyStrategy, escalateStrategyAndReload, applyReachabilityStep, prewarmProbe,
     // 展示 / 操作
     strategyLabel, probeRows, reprobeNow,
   }

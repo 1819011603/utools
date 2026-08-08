@@ -35,6 +35,44 @@ export function useVideoEvents(deps: VideoEventsDeps) {
   let delayedPlayTimer: ReturnType<typeof setTimeout> | null = null
   let seekBufferingTimer: ReturnType<typeof setTimeout> | null = null
 
+  /**
+   * 起播这一发 play()。失败分两类，处理完全不同——早先一律按「被浏览器拦了」处理，
+   * 于是自动跳集时表现成「跳过去了但停在暂停，还得自己点一下」：
+   *
+   * · `NotAllowedError` = 真的被自动播放策略拦了（安卓上「点选集 → 几秒后才 play()」，
+   *   用户手势的有效期早过了）。改静音重播一次——宁可先出画面，声音等用户下次触碰时恢复
+   *  （`useVideoUiControls.restoreSound`，任何点按都解除）。
+   * · 其余（**主要是 `AbortError`**）= 这一发被新的 load 请求打断了。切集时 `videoKey++` 重建
+   *   `<video>`、hls.js 紧接着 attach + startLoad，play() 撞上去就是这个。它跟权限毫无关系，
+   *   静音重播照样会被打断，然后旧代码就彻底放弃了。这种只需要过一会儿再试。
+   */
+  const attemptPlay = async (tries: number): Promise<void> => {
+    const video = videoEl.value
+    if (!video) return
+    try {
+      await video.play()
+    } catch (e: any) {
+      if (e?.name === 'NotAllowedError') {
+        if (media.autoMuted.value) {                  // 静音也不行 = 真没辙，把静音还回去
+          console.log('自动播放被阻止（静音也不行）:', e.message)
+          video.muted = isMuted.value = media.autoMuted.value = false
+          return
+        }
+        video.muted = true
+        media.autoMuted.value = true
+        isMuted.value = true
+        return await attemptPlay(tries)
+      }
+      if (tries >= 3) {
+        console.log('自动播放放弃（重试 3 次仍被打断）:', e?.name, e?.message)
+        return
+      }
+      console.log(`自动播放被打断（${e?.name}），400ms 后重试`)
+      await new Promise(r => setTimeout(r, 400))
+      return await attemptPlay(tries + 1)
+    }
+  }
+
   // ── 起播预缓冲 ──
   const scheduleAutoPlay = () => {
     if (delayedPlayTimer) { clearTimeout(delayedPlayTimer); delayedPlayTimer = null }
@@ -56,20 +94,7 @@ export function useVideoEvents(deps: VideoEventsDeps) {
       delayedPlayTimer = null
       console.log(`开始自动播放（预缓冲 ${ahead.toFixed(1)}s，等待 ${(waited / 1000).toFixed(1)}s）`)
       isBuffering.value = false
-      // 自动播放被拦是常态而不是异常：安卓上「点了选集 → 几秒后才真的 play()」，
-      // 那时用户手势的有效期早过了，浏览器只认「静音播放」。
-      // 于是拦下就改静音重播一次——宁可先出画面，声音等用户下一次触碰时恢复
-      //（见 useVideoUiControls.restoreSound，任何一次点按都会解除）。
-      // 直接放弃的话表现就是「点了选集不播」，用户还得再点一次中央播放键。
-      video.play().catch(() => {
-        video.muted = true
-        media.autoMuted.value = true
-        isMuted.value = true
-        video.play().catch(e => {
-          console.log('自动播放被阻止（静音也不行）:', e.message)
-          video.muted = isMuted.value = media.autoMuted.value = false
-        })
-      })
+      void attemptPlay(0)
     }
 
     delayedPlayTimer = setTimeout(tryPlay, 500)
@@ -156,13 +181,15 @@ export function useVideoEvents(deps: VideoEventsDeps) {
     isMuted.value = videoEl.value.muted
   }
 
-  const onVideoError = (e: Event) => {
+  const onVideoError = async (e: Event) => {
     engine.clearLoadTimeout()
     const error = (e.target as HTMLVideoElement)?.error
     let msg = '视频加载失败'
 
-    // 网络/源被拒：先自动升级可达性策略（重探 → 线性阶梯）再重载
+    // 网络/源被拒：先重新取址（签名地址过期时换通道全是白等），再升级可达性策略（重探 → 线性阶梯）。
+    // 顺序与 HLS 那条路一致，见 useVideoEngine.recoverFromNetworkFailure
     if (error && (error.code === MediaError.MEDIA_ERR_NETWORK || error.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED)) {
+      if (await playlist.refetchCurrentUrl()) return
       if (conn.escalateStrategyAndReload()) return
     }
 
