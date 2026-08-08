@@ -4,9 +4,9 @@
       v-if="showEpisodes && playlist.length > 1"
       data-no-gesture
       class="absolute inset-0 z-20 flex flex-col bg-black/55 backdrop-blur-[2px]"
-      @click.self="showEpisodes = false"
+      @click="onBlankClick"
     >
-      <!-- 顶部一行：剧名 + 进度 + 关闭。点空白处也能关（腾讯就是这样） -->
+      <!-- 顶部一行：剧名 + 进度 + 关闭。空白处点哪都能关（见 onBlankClick） -->
       <div class="flex items-center gap-3 px-4 pt-3 pb-2 shrink-0 text-white">
         <span class="font-semibold truncate">{{ playlistTitle || '选集' }}</span>
         <span class="text-xs text-white/60 shrink-0">共 {{ playlist.length }} 集</span>
@@ -67,6 +67,16 @@ const {
 } = useVideoPlayerCtx()
 
 const curEl = ref<HTMLElement>()
+
+/**
+ * 点空白即关。判据是「这一下有没有落在按钮上」，而不是 `@click.self`——
+ * 后者只认根元素本身，标题栏、滚动容器、格子之间的缝隙、列表下方的空白全都不算，
+ * 结果就是只有边缘那一圈能关，用户只能去够右上角那个 X。
+ */
+const onBlankClick = (e: MouseEvent) => {
+  if ((e.target as HTMLElement | null)?.closest?.('button')) return
+  showEpisodes.value = false
+}
 
 const pick = (index: number) => {
   showEpisodes.value = false
