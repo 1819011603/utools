@@ -1,9 +1,11 @@
 <template>
   <!--
-    手机上通栏：用 100vw + 居中位移，而不是 `-mx-4` 去抵容器 padding——
-    后者要跟 layouts/default.vue 的 px-4 严格对齐，那边一改就又露出白边。
-    16:9 的画面本来就不高，
-    两侧再留白只会把它压得更小。参照腾讯视频移动端：播放器贴边、标题信息在画面下方。
+    **只有窄屏（手机）通栏铺满**：手机上 16:9 本来就不高，两侧再留白只会把它压得更小；
+    而桌面窗口宽，铺满一整个 24 寸屏反而只剩一条黑带、下面的选集全被顶走，
+    所以 sm 以上老老实实待在容器里（照旧带圆角）。
+    通栏用 100vw + 居中位移，而不是 `-mx-4` 去抵容器 padding——后者要跟
+    layouts/default.vue 的 px-4 严格对齐，那边一改就又露出白边。
+    （100vw 比可用宽度多出的滚动条宽度由 layouts/default.vue 根上的 overflow-x-clip 兜住。）
   -->
   <div class="relative left-1/2 -translate-x-1/2 w-screen sm:left-auto sm:translate-x-0 sm:w-auto">
     <!--
@@ -29,12 +31,17 @@
       @dblclick="onDblClick"
       @contextmenu.prevent
     >
-      <!-- 播放器已移除本地文件，只放网络地址，crossorigin 恒为 anonymous -->
+      <!--
+        播放器已移除本地文件，只放网络地址，crossorigin 恒为 anonymous。
+        非全屏也要**限高 78vh**：手机横屏时通栏宽度算出来的 16:9 高度（56.25vw）会超过视口短边，
+        画面顶出屏幕、下面的信息行完全看不到。超过就由 max-h 接管，画面按 contain 居中
+        （跟全屏一样左右留黑边），高度始终在一屏之内。
+      -->
       <video
         ref="videoEl"
         :key="videoKey"
         class="max-w-full max-h-full"
-        :class="isFullscreen ? 'w-auto h-full' : 'w-full aspect-video'"
+        :class="isFullscreen ? 'w-auto h-full' : 'w-full aspect-video max-h-[78vh] object-contain'"
         :style="{
           filter: brightness === 1 ? undefined : `brightness(${brightness})`,
           // 恒非空：让 <video> 常驻合成层，forceRecomposite 才能只重画不闪（见 useVideoEngine）
@@ -343,14 +350,19 @@
                   -->
                   <div
                     v-if="showSpeedMenu"
-                    class="absolute z-30 bottom-full right-0 mb-2 bg-black/90 backdrop-blur-sm rounded-lg
-                           ring-1 ring-white/15 overflow-y-auto min-w-[88px] max-h-[min(60vh,240px)]"
+                    ref="speedMenuList"
+                    class="no-sb absolute z-30 bottom-full right-0 mb-2 rounded-xl overflow-y-auto
+                           min-w-[88px] max-h-[min(60vh,240px)]
+                           bg-gradient-to-br from-white/10 via-rose-200/10 to-violet-300/15
+                           backdrop-blur-md ring-1 ring-white/20 shadow-xl shadow-violet-950/20"
                   >
                     <button
                       v-for="rate in PLAYBACK_RATES"
                       :key="rate"
-                      class="block w-full px-5 py-2.5 text-sm text-white hover:bg-violet-500/50 transition-colors text-center"
-                      :class="{ 'bg-violet-500': desiredRate === rate }"
+                      :data-rate="rate"
+                      class="block w-full px-5 py-2.5 text-sm text-white text-center transition-colors
+                             hover:bg-white/15 drop-shadow-[0_1px_2px_rgba(0,0,0,.8)]"
+                      :class="{ 'bg-gradient-to-r from-rose-400/45 to-violet-400/45 font-semibold': desiredRate === rate }"
                       @click="setPlaybackRate(rate)"
                     >
                       {{ rate }}x
@@ -380,7 +392,11 @@
       <VideoPlayerEpisodeOverlay />
     </div>
 
-    <!-- 画面下方的信息行：剧名 + 当前集 + 格式 + 连接策略（原来这些挤在卡片头里） -->
+    <!--
+      画面下方的信息行：剧名 + 当前集 + 格式 + 连接策略（原来这些挤在卡片头里）。
+      窄屏时画面通栏，这一行要自己补回 padding（否则贴到屏幕最左）；
+      sm 以上画面已经在容器内，容器的 padding 就够了。
+    -->
     <div class="px-4 sm:px-0 pt-3 flex items-center gap-2 flex-wrap text-sm">
       <span class="font-semibold truncate max-w-full">{{ playlistTitle || '放映厅' }}</span>
       <UBadge v-if="playlistTitle && playlist.length > 1" color="violet" variant="soft" size="xs">
@@ -442,6 +458,25 @@ const {
 
 // 倍速菜单点击外部关闭
 onClickOutside(speedMenuRef, () => { showSpeedMenu.value = false })
+
+/**
+ * 打开倍速菜单时把当前档位滚到视野中间。
+ *
+ * 八个档位一屏放不下（画面只有 200 多 px 高时更挤），而常用的高倍速正好在列表尾部——
+ * 不定位的话每次打开都停在 0.5x，用户得先滑一段才看得见自己选的是哪个。
+ *
+ * 用 scrollTop 手算而不是 `scrollIntoView({ block: 'center' })`：后者会顺带滚动**外层**的
+ * 滚动容器（页面/全屏层），表现是菜单一开画面自己往上跳一下。
+ */
+const speedMenuList = ref<HTMLElement | null>(null)
+watch(showSpeedMenu, async (open) => {
+  if (!open) return
+  await nextTick()
+  const box = speedMenuList.value
+  const item = box?.querySelector<HTMLElement>(`[data-rate="${desiredRate.value}"]`)
+  if (!box || !item) return
+  box.scrollTop = item.offsetTop - (box.clientHeight - item.offsetHeight) / 2
+})
 
 // 「停在那儿了」：暂停且不是在加载/取址中。加载中另有转圈遮罩，两个叠一起只会打架。
 // 自动播放被浏览器拦下时也是这个状态——那正是最需要一枚大播放键的时候。
@@ -523,6 +558,14 @@ const pausedIdle = computed(() =>
   0%, 100% { box-shadow: 0 0 14px rgba(167, 139, 250, .45); }
   50%      { box-shadow: 0 0 26px rgba(217, 70, 239, .75); }
 }
+
+/*
+  菜单里不显示滚动条：那条灰槽是画面上最扎眼的一块，而且它比菜单本身还实
+  （原生滚动条不吃 backdrop-blur，也不受透明度影响）。打开即定位到当前档位（见 speedMenuList），
+  真要翻仍然能滑，只是看不见轨道。
+*/
+.no-sb { scrollbar-width: none; -ms-overflow-style: none; }
+.no-sb::-webkit-scrollbar { display: none; }
 
 /* 锁定图标翻面 */
 .lock-flip { animation: flip .35s ease-out; }

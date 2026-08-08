@@ -3,7 +3,14 @@
     氛围靠**底色和留白**，不靠把颜色调重：整页一层极淡的玫瑰→薰衣草渐变（透明度都在 10% 以下），
     暗色下换成带紫调的深夜色。控件本身仍是中性灰，否则一屏粉红就俗了。
   -->
-  <div class="min-h-screen bg-gradient-to-b from-rose-50/70 via-white to-violet-50/60
+  <!--
+    overflow-x-clip 挂在**根**上，不能挂在 <main>：放映厅的播放器要横向铺满视口
+    （`w-screen` + 居中位移突破 main 的 max-w 和 padding），挂在 main 上等于把想溢出的那块
+    又裁回容器宽度，铺满当场失效。挂在根上只裁掉「100vw 比可用宽度多出来的滚动条宽度」，
+    否则桌面上会顶出一条横向滚动条。
+    用 clip 而不是 hidden：后者会给自己建滚动容器，把 header 的 sticky 废掉。
+  -->
+  <div class="min-h-screen overflow-x-clip bg-gradient-to-b from-rose-50/70 via-white to-violet-50/60
               dark:from-[#1a1520] dark:via-[#141119] dark:to-[#16121d]">
     <header class="sticky top-0 z-40 bg-white/70 dark:bg-[#171320]/70 backdrop-blur-xl
                    border-b border-rose-100/70 dark:border-white/5">
