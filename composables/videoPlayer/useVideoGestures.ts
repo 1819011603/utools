@@ -26,6 +26,8 @@ const DOUBLE_TAP_SEEK = 5
 const SEEK_SPAN_MAX = 600
 /** 左右边缘各占多少判为「快退/快进区」，中间留给播放暂停 */
 const SIDE_ZONE = 0.3
+/** 小窗里「单击即播放/暂停」的中间区域：左右各三分之一留给唤出控制栏 */
+const CENTER_ZONE = 1 / 3
 
 export interface VideoGesturesDeps {
   media: VideoMediaState
@@ -72,7 +74,7 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
   let pointerKind = 'mouse'
   let lastTouchAt = 0    // 最近一次触摸的时刻，用来滤掉浏览器补发的兼容鼠标事件
   let tapWasShown = false  // 按下那一刻控制栏是不是开着（单击的目标态由它定，见 onTap）
-  let tapX = 0.5           // 这一下点在横向哪个位置（0~1），延迟执行时要用
+  let tapX = 0.5           // 这一下点在横向哪个位置（0~1）；单击要等双击窗口过完才执行，得先存下来
   let lastDragEndAt = 0    // 拖动结束时刻：拖完浏览器还会补一个 click，那一下不能当播放/暂停
 
   const clearTimers = () => {
@@ -288,11 +290,15 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
     if (singleTapTimer) clearTimeout(singleTapTimer)
     singleTapTimer = setTimeout(() => {
       singleTapTimer = null
-      // 小窗（非全屏）里单击中间 = 播放/暂停，跟桌面一致。
-      // 「单击只显控制栏」那条规矩是给全屏看片准备的——那时误触暂停最烦人，而且有双击中间可用；
-      // 小窗只有 200 多 px 高、控制栏本来就占掉大半，还要人双击才能停实在别扭（实测被问了两次）。
-      if (!isFullscreen.value && tapX > SIDE_ZONE && tapX < 1 - SIDE_ZONE) controls.togglePlay()
-      else applyTapControls()
+      // 小窗（非全屏）：中间三分之一单击 = 播放/暂停，并顺手唤出控制栏
+      //（一个动作两件事，不用先点一下出控制栏再去够播放键）；左右三分之一只唤控制栏。
+      // 「单击只显控制栏」那条规矩是给全屏看片准备的——那时误触暂停最烦人，而且有双击中间可用。
+      if (!isFullscreen.value && tapX > CENTER_ZONE && tapX < 1 - CENTER_ZONE) {
+        controls.togglePlay()
+        controls.keepControlsAlive()
+      } else {
+        applyTapControls()
+      }
     }, DOUBLE_TAP_MS)
   }
 
