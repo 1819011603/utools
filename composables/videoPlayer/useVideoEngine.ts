@@ -171,28 +171,35 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   }
 
   /**
+   * `<video>` 的 transform。**初值为空**——不打扰绝大多数设备：空 transform 时浏览器才可能
+   * 把视频交给硬件 overlay 平面（省电、解码路径最短）。只有真需要重新合成时（见 forceRecomposite）
+   * 才置上并从此常驻，代价是那一路视频改走纹理合成。
+   * 走响应式绑定而不是直改 DOM：换集时 `videoKey++` 会重建元素，直改的样式会跟着丢。
+   */
+  const videoTransform = ref('')
+
+  /**
    * 强制重新合成一次 `<video>`。
    *
-   * 治的是浏览器侧的**残影/黑屏**：Chrome 把视频画在独立的硬件 overlay 平面上，
-   * 该平面偶尔会在标签页切走切回后停在旧的一帧（画面被一帧静止图挡住、或整块黑屏），
-   * 而音频和 currentTime 一切正常——**播放本身没问题，只是那一层没被重画**。
+   * 治的是浏览器侧的**残影**：Chrome 把视频画在独立的硬件 overlay 平面上，该平面在
+   * 「标签页切走切回」「播放停下」之后可能停在没画完的一帧（画面被静止图挡住、错开成两块、
+   * 或整块黑屏），而音频和 currentTime 一切正常——**播放本身没问题，只是那一层没被重画**。
    * 用户的自救方式「再切一次标签页」正是逼它重新合成，这里把这一步替他做了。
    *
-   * 手法是改一个会让元素脱离/重回合成层的属性再撤销。用 `transform` 而不是
-   * `display:none`：后者会让 `<video>` 卸掉解码器再重建，代价是真的会黑一下。
+   * 手法是**在两个视觉等价的 transform 之间切换**（Z 轴 0.01px，看不出位移）。
+   * 早先是「设 translateZ(0) → 下一帧撤销」，那样元素会在 overlay 平面和普通合成层之间
+   * 来回搬两次，**每次搬家在屏幕上都看得见**，表现是每次暂停都「闪一下，最后画面才对」（踩过）。
    *
-   * 中间那次 `offsetHeight` 是**强制同步布局**，不能省：只设样式再在下一帧撤销，
-   * 浏览器完全可以把两次改动合并成「没变过」，那这个函数就是空操作。
+   * 所以第一次调用之后 transform 就不再撤销，元素常驻合成层，此后切换值只重画不搬家。
+   * 只有这**第一下**还会闪一次——按需而不是一上来就常驻，是为了不打扰没这毛病的设备：
+   * 空 transform 时视频才可能走硬件 overlay（省电、解码路径最短）。
+   *
+   * 用 `transform` 而不是 `display:none`：后者会让 `<video>` 卸掉解码器再重建，真的会黑一下。
    */
   const forceRecomposite = () => {
-    const v = videoEl.value
-    if (!v) return
-    v.style.transform = 'translateZ(0)'
-    void v.offsetHeight
-    requestAnimationFrame(() => {
-      // 这一帧之间可能已经换集重建了元素，别把新元素的样式改坏
-      if (videoEl.value === v) v.style.transform = ''
-    })
+    videoTransform.value = videoTransform.value === 'translateZ(0px)'
+      ? 'translateZ(0.01px)'
+      : 'translateZ(0px)'
   }
 
   /**
@@ -501,7 +508,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     aggregateKBps, aggregateMbps, deadLaneLabel,
     // 起播锚点
     clearStartAnchor, isArrivingAtStart,
-    forceRecomposite,
+    forceRecomposite, videoTransform,
     // 统计
     updateHlsStats,
   }

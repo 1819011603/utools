@@ -293,6 +293,10 @@ export function useVideoEvents(deps: VideoEventsDeps) {
    */
   const onPause = () => {
     isPlaying.value = false
+    // 暂停就解锁：锁定防的是「看着的时候误触」，画面都停了就没什么可防的了。
+    // 而锁定态下画面上只有一枚解锁键，来电/拔耳机这类系统级暂停之后，
+    // 用户回来面对的是一个点什么都没反应的播放器
+    media.isLocked.value = false
     if (!isBuffering.value) engine.forceRecomposite()
   }
 

@@ -35,7 +35,11 @@
         :key="videoKey"
         class="max-w-full max-h-full"
         :class="isFullscreen ? 'w-auto h-full' : 'w-full aspect-video'"
-        :style="{ filter: brightness === 1 ? undefined : `brightness(${brightness})` }"
+        :style="{
+          filter: brightness === 1 ? undefined : `brightness(${brightness})`,
+          // 恒非空：让 <video> 常驻合成层，forceRecomposite 才能只重画不闪（见 useVideoEngine）
+          transform: videoTransform,
+        }"
         crossorigin="anonymous"
         playsinline
         @timeupdate="onTimeUpdate"
@@ -427,6 +431,7 @@ const {
   toggleFullscreen, togglePiP, hideControlsDelayed, keepControlsAlive,
   // 手势层（useVideoGestures）
   isLocked, showLockBtn, toggleLock, brightness, gestureHud, seekFlash, touchAction, controlsVisible,
+  videoTransform,
   onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onMouseMove, onClick, onDblClick,
   boostActive, boostRate,
   playPrev, playNext,

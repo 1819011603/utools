@@ -209,11 +209,29 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   // 用户按 Esc / 系统手势退出全屏时不会走 toggleFullscreen，横屏锁要在这里解
   const handleFullscreenChange = () => {
     isFullscreen.value = !!document.fullscreenElement
-    if (!isFullscreen.value) {
-      // 用户自己退出来了就别再惦记自动全屏，否则下次一点画面又被拽进去
-      pendingAutoFullscreen.value = false
-      try { screen.orientation?.unlock?.() } catch { /* 桌面没有这能力 */ }
-    }
+    if (isFullscreen.value) return
+    // 退出全屏就解锁：锁定是「全屏握持防误触」，回到小窗它只剩坏处——
+    // 手势层全 return、控制栏恒隐、快捷键也停，画面上只剩一枚解锁键（踩过：来电退出全屏后点什么都没反应）
+    media.isLocked.value = false
+    try { screen.orientation?.unlock?.() } catch { /* 桌面没有这能力 */ }
+    // 页面在后台时退出的全屏不是用户的意思（安卓切应用/来电会替他退），
+    // 那种要留着意图，回前台时替他要回来（见 handleVisibility）
+    if (!document.hidden) pendingAutoFullscreen.value = false
+  }
+
+  /**
+   * 安卓上切到别的应用再回来，系统常常已经把全屏退掉了。用户的本意显然是「继续全屏看」，
+   * 所以记住切走那一刻的全屏状态，回来时替他要回去。
+   *
+   * `requestFullscreen` 要用户激活，「页面重新可见」不算，所以多半当场被拒——
+   * 拒了就把意图挂着（pendingAutoFullscreen），用户下一次碰画面时补上，
+   * 这套挂起-补兑现的机制自动全屏那边已经在用了。
+   */
+  let wasFullscreenBeforeHide = false
+  const handleVisibility = () => {
+    if (document.hidden) { wasFullscreenBeforeHide = isFullscreen.value; return }
+    if (wasFullscreenBeforeHide && !document.fullscreenElement) pendingAutoFullscreen.value = true
+    wasFullscreenBeforeHide = false
   }
 
   // ── 控制栏显隐 ──
@@ -300,10 +318,12 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   const bindGlobalKeys = () => {
     document.addEventListener('keydown', handleKeydown)
     document.addEventListener('fullscreenchange', handleFullscreenChange)
+    document.addEventListener('visibilitychange', handleVisibility)
   }
   const unbindGlobalKeys = () => {
     document.removeEventListener('keydown', handleKeydown)
     document.removeEventListener('fullscreenchange', handleFullscreenChange)
+    document.removeEventListener('visibilitychange', handleVisibility)
     if (controlsTimer) clearTimeout(controlsTimer)
     if (playIconTimer) clearTimeout(playIconTimer)
   }
