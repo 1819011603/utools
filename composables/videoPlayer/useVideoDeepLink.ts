@@ -189,7 +189,23 @@ export function useVideoDeepLink(deps: VideoDeepLinkDeps) {
     }
   }
 
-  return { parseQueryVideoParams, syncUrlToQuery, copyDeepLink, deepLinkCopied }
+  /**
+   * 回解析页并带上本次的来源（源站播放页 + 线路序号），落地即可换线路/换集。
+   *
+   * 播放器里换不了线路——它手上只有一条线路解析出来的列表。而「这条线路卡/没这一集」
+   * 是最常见的下一步动作，只能回解析页。带参数过去解析页会命中它自己的结果缓存（1 小时），
+   * 多数时候一个请求都不发就把线路表摆出来。
+   */
+  const backToParseSource = () => {
+    const src = handoff.playlistSource.value
+    if (!src?.pageUrl) return
+    const q = new URLSearchParams({ url: src.pageUrl })
+    if (src.line) q.set('line', String(src.line))
+    return navigateTo(`/video-parse?${q.toString()}`)
+  }
+
+  return {
+    backToParseSource, parseQueryVideoParams, syncUrlToQuery, copyDeepLink, deepLinkCopied }
 }
 
 export type VideoDeepLink = ReturnType<typeof useVideoDeepLink>

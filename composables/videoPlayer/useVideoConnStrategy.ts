@@ -208,7 +208,6 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
       const r = await probeReachability(url, hintPair())
       if (seq !== probeSeq) return null            // 已被更新的一次探测取代，丢弃
       probeResult.value = r
-      saveLearnedProfile(hostOf(url), { reach: r as any })
       const cfg = resolveConnConfig(r, selfOriginOf(url))
       if (cfg) {
         ladderMode.value = false
@@ -230,32 +229,12 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     }
   }
 
-  // 命中缓存时的后台静默复验：结论一致就什么都不做，变了才提示 + 重载一次。
-  // 每个 host 一轮会话只复验一次——否则「复验 → 重载 → 又命中刚写的缓存 → 又复验」会白跑一圈。
-  const revalidatedHosts = new Set<string>()
-  const revalidateInBackground = (url: string) => {
-    const host = hostOf(url)
-    if (revalidatedHosts.has(host)) return
-    revalidatedHosts.add(host)
-    probeReachability(url, hintPair()).then(r => {
-      if (videoUrl.value.trim() !== url) return     // 用户已切走
-      probeResult.value = r
-      saveLearnedProfile(hostOf(url), { reach: r as any })
-      const cfg = resolveConnConfig(r, selfOriginOf(url))
-      if (!cfg || connSignature(cfg) === currentConnSignature()) return
-      console.log('连接方式已变化，重新套用:', describeProbe(r))
-      applyConnConfig(cfg)
-      useToast().add({ title: '连接方式已更新', description: describeProbe(r), color: 'blue', timeout: 2500 })
-      deps.reload()
-    }).catch(() => {})
-  }
-
   /**
    * 决定本次加载策略。档位记忆总是取；可达性部分可能 await 探测。
    * 由 loadVideo 在 startLoadTimeout **之前** await，否则探测耗时会被算进加载超时。
    */
   const applyStrategy = async (url: string) => {
-    const learned = tier.beginHost(hostOf(url))
+    tier.beginHost(hostOf(url))   // 档位记忆仍按 host 学（可达性不再缓存，见下）
     if (url !== lastStrategyUrl) {
       autoStrategyStep.value = 0
       ladderMode.value = false
@@ -267,18 +246,12 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
       applyReachabilityStep(autoStrategyStep.value)
       return
     }
-    // 缓存新鲜（同 host 30 分钟内探过）→ 直接套用秒起播，后台静默复验；
-    // 否则阻塞探一次，一步到位，不做「先播再重载」的抖动。
-    const cached = isReachFresh(learned) ? (learned!.reach as unknown as ProbeResult) : null
-    if (cached) {
-      probeResult.value = cached
-      const cfg = resolveConnConfig(cached, selfOriginOf(url))
-      if (cfg) {
-        applyConnConfig(cfg)
-        revalidateInBackground(url)
-        return
-      }
-    }
+    // **每次加载都实测，不吃缓存**。
+    // 缓存曾经按 host 存 30~60 分钟，问题是同一个 host 的结论并不稳定：
+    // 按需取址的站点每集都是现签的地址，签名/路径一换，上一集测出来的「直连可达」对这一集就是 403，
+    // 表现是「切一集就播不了、等半天自己好」（实测被反复问到）。
+    // 代价是每次切集多等一轮探测——但探测本身有两级超时（单通道 8s、整轮 12s 硬顶），
+    // 慢源上也就一两秒，比播不了强。
     await runProbe(url, true)
   }
 
@@ -348,13 +321,8 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     if (videoUrl.value) deps.reload()
   }
 
-  const invalidateReachCache = () => {
-    reprobedFor = ''
-    if (tier.currentHost.value) {
-      saveLearnedProfile(tier.currentHost.value, { reach: undefined })
-      revalidatedHosts.delete(tier.currentHost.value)
-    }
-  }
+  // 没有可达性缓存了（见 applyStrategy），这里只把「本次加载已重探过」的标记清掉
+  const invalidateReachCache = () => { reprobedFor = '' }
 
   // 重探（作废缓存，重新实测一遍并按结论重载）
   const reprobeNow = async () => {

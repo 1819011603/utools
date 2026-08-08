@@ -378,6 +378,19 @@
       </UBadge>
       <UBadge :color="isHls ? 'violet' : 'blue'" variant="soft" size="xs">{{ isHls ? 'HLS/M3U8' : 'MP4' }}</UBadge>
       <UBadge v-if="hlsStats" color="green" variant="soft" size="xs">缓冲 {{ hlsStats.buffered.toFixed(1) }}s</UBadge>
+      <!-- 回解析页换线路：播放器手上只有一条线路的列表，换线路只能回去 -->
+      <UButton
+        v-if="playlistSource"
+        size="xs"
+        variant="soft"
+        color="violet"
+        icon="i-heroicons-arrow-uturn-left"
+        title="回解析页，可换线路/换集（带着本片地址和当前线路过去）"
+        @click="backToParseSource"
+      >
+        换线路
+      </UButton>
+
       <!-- 连接策略点一下展开页面下方那节设置（showAdvancedProxy 一个 ref 两处用） -->
       <UBadge
         :color="isProbing ? 'gray' : 'sky'" variant="soft" size="xs"
@@ -401,6 +414,7 @@ const {
   currentTime, duration, volume, playbackRate, desiredRate, autoBestRate, autoRateCap,
   progressPercent, bufferedPercent, seekPreviewTime, seekPreviewPercent, hoverTime, hoverPercent,
   hlsStats, playlist, playlistTitle, hasPrev, hasNext, strategyLabel, showAdvancedProxy,
+  playlistSource, backToParseSource,
   // 选集按钮在顶部信息条里（VideoPlayerTopBar），这里只留抽屉本身要用的状态
   currentVideoName, volumeIcon, supportsPiP,
   togglePlay, skip, startSeek, updateHoverTime, setVolume, toggleMute, setPlaybackRate,

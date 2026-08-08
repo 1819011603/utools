@@ -186,10 +186,11 @@ IP 与二级域名返回空串。它是压箱底的一档，只在前三条都�
   ncat 那个源靠这条从 12s 降到 1.5s
 - **两级超时**：单通道 8s + 整轮 12s 硬上限。四通道串行降级，慢源上后面的会被整轮截止跳过——这是有意的，
   **别为了「探全」调大 `OVERALL_TIMEOUT`**
-- 结果**按 host** 存进 `video-player-learned-profiles` 的 `reach`，TTL **1 小时**（`REACH_TTL`）。
-  探测是阻塞起播的，慢源上一轮要十几秒，而源站的 CORS/防盗链策略以天计地稳定；
-  结论过时也不致命（lane 熔断 + `escalateStrategyAndReload` 会重探）。
-  与服务端 `headerModeCache` 的 30 分钟**不是一回事**，不必对齐。首访阻塞探测，命中缓存则秒起播 +
+- **探测结果不缓存，每次加载都实测**。曾经按 host 缓存过（30 分钟 → 1 小时），
+  但同一 host 的结论并不稳定：按需取址的站点每集都是现签的地址，签名/路径一换，
+  上一集测出的「直连可达」对这一集就是 403，**表现是「切一集就播不了」**（实测反复踩）。
+  代价是每次切集多一轮探测，但探测自带两级超时（单通道 8s、整轮 12s 硬顶），慢源上也就一两秒。
+  随之删掉的还有「命中缓存后台静默复验」那一套（它只为缓存服务）。首访阻塞探测，命中缓存则秒起播 +
   后台静默复验（每 host 每会话只复验一次，否则会「复验→重载→又命中→又复验」）
 - **双通道自动开的判据**：`分片.直连 === ok && 分片.代理·伪装 === ok && 最终分片通道 === 直连`。
   分片必须走代理时直连 lane 必 403，开了等于一半连接白扔。实测生效时预取线程 6 → 12
@@ -353,6 +354,9 @@ IP 与二级域名返回空串。它是压箱底的一档，只在前三条都�
 
 参数：`url`（可重复）、`urls`（`|` 分隔）、`index`、`origin`、`referer`、`proxy=1`、`noref=1`、`manifestOnly`、
 `parseUrl` + `line`/`lineName` + `ep`、`handoff=1`。
+
+播放器信息行上有「换线路」按钮（`backToParseSource`）：播放器手上只有一条线路解析出来的列表，
+换线路只能回解析页。带着 `url`+`line` 过去，解析页多半直接命中它自己的结果缓存（1 小时），一个请求都不发。
 
 **解析来的列表一律用 `?parseUrl=…&line=N&lineName=…&index=M&ep=…`**，链接里不带视频地址。
 早先两种表达都不能分享：`?handoff=1`（列表在本机 localStorage）、`urls=a|b|c`（顶爆地址栏且带时效签名会死链）。
@@ -575,7 +579,7 @@ FED 模板，**不走 `player_aaaa`**，地址在播放器 iframe 属性上。
 | key | 用途 |
 | --- | --- |
 | `video-player-state` | 播放器全量状态（地址/列表/进度/音量/倍速/HLS 配置/档位覆盖） |
-| `video-player-learned-profiles` | 按 host 学到的档位 + 可达性探测结果（`reach`，TTL 1 小时） |
+| `video-player-learned-profiles` | 按 host 学到的服务器档位（可达性**不再缓存**） |
 | `video-player-handoff` | 长播放列表交接槽，TTL 1 天 |
 | `video-player-origin-history` / `-referer-history` | Origin/Referer 输入历史 |
 | `video-parse-rules` | 用户自定义解析规则 |
