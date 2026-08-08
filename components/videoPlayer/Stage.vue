@@ -178,12 +178,14 @@
 
       <!--
         锁定按钮：锁上后它是唯一还能点的东西，所以点画面任意处都会让它露 3 秒。
+        **小窗里不出**：画面才 200 多 px 高，左侧垂直居中正好压在播放键上（实测截图）；
+        而防误触本来就是全屏握持时才需要的事。
         锁定态用半透明的紫→粉→蓝渐变，跟进度条/长按提示同一套色；
         原来那块实心琥珀在黑画面上跳得像个警告标（本意只是「状态不同」，不是「出事了」）。
       -->
       <Transition name="pop">
         <button
-          v-if="isLocked ? showLockBtn : (showControls || pausedIdle)"
+          v-if="(isFullscreen || !isNarrow) && (isLocked ? showLockBtn : (showControls || pausedIdle))"
           data-no-gesture
           class="absolute left-3 top-1/2 -translate-y-1/2 w-14 h-14 rounded-full text-white
                  flex items-center justify-center backdrop-blur-sm ring-1 transition-all duration-300
@@ -207,7 +209,8 @@
         <div
           v-show="controlsVisible"
           data-no-gesture
-          class="absolute z-10 bottom-0 left-0 right-0 bg-gradient-to-t from-black/85 via-black/40 to-transparent px-2.5 pb-2.5 pt-12 sm:px-4 sm:pb-4"
+          class="absolute z-10 bottom-0 left-0 right-0 pointer-events-none
+                 bg-gradient-to-t from-black/85 via-black/40 to-transparent px-2.5 pb-2.5 pt-8 sm:px-4 sm:pb-4 sm:pt-12"
           @click.stop
           @pointerdown="keepControlsAlive"
           @pointerup="keepControlsAlive"
@@ -218,12 +221,17 @@
             窄屏上十来个控件挤成一坨还互相压字（实测截图里时间和齿轮叠在一起）。
             一行流式布局 + order 换位，两种屏幕共用同一个 progressBar ref。
           -->
-          <div class="flex items-center gap-1.5 flex-wrap">
+          <!--
+            `pointer-events-auto` 只给这一行：外层那圈渐变+上留白在小窗里有几十 px 高，
+            让它吃事件的话，画面中间的双击（播放/暂停）全被它接走了——表现就是「小窗点不动」。
+            `flex-nowrap`：窄屏一换行就摞成两排糊在画面中间（实测截图），宁可各项收小。
+          -->
+          <div class="pointer-events-auto flex items-center gap-1 flex-nowrap sm:gap-1.5 sm:flex-wrap">
             <button
-              class="order-1 p-1.5 rounded-lg text-white hover:bg-white/15 active:scale-90 transition-all shrink-0"
+              class="order-1 p-1 sm:p-1.5 rounded-lg text-white hover:bg-white/15 active:scale-90 transition-all shrink-0"
               @click="togglePlay"
             >
-              <UIcon :name="isPlaying ? 'i-heroicons-pause-solid' : 'i-heroicons-play-solid'" class="w-7 h-7" />
+              <UIcon :name="isPlaying ? 'i-heroicons-pause-solid' : 'i-heroicons-play-solid'" class="w-6 h-6 sm:w-7 sm:h-7" />
             </button>
 
             <!-- 上一集在窄屏藏起来：竖屏一行放不下，而「下一集」的使用频率高一个量级 -->
@@ -245,7 +253,7 @@
               title="下一集"
               @click="playNext"
             >
-              <UIcon name="i-heroicons-forward-solid" class="w-6 h-6" />
+              <UIcon name="i-heroicons-forward-solid" class="w-5 h-5 sm:w-6 sm:h-6" />
             </button>
 
             <!-- 手机上没有 hover，滑条永远展不开；音量有硬件键和竖滑手势，整组藏起来腾地方 -->
@@ -263,7 +271,7 @@
               </div>
             </div>
 
-            <span class="order-2 text-white text-xs sm:text-sm font-mono tabular-nums whitespace-nowrap shrink-0">
+            <span class="order-2 text-white text-[11px] sm:text-sm font-mono tabular-nums whitespace-nowrap shrink-0">
               {{ formatTime(currentTime) }}<span class="text-white/50"> / {{ formatTime(duration) }}</span>
             </span>
 
@@ -308,7 +316,7 @@
             <div class="order-4 flex items-center gap-0.5 shrink-0 sm:ml-auto">
               <div ref="speedMenuRef" class="relative">
                 <button
-                  class="px-2 py-1.5 rounded-lg text-white hover:bg-white/15 transition-all text-sm font-semibold whitespace-nowrap"
+                  class="px-1.5 sm:px-2 py-1.5 rounded-lg text-white hover:bg-white/15 transition-all text-xs sm:text-sm font-semibold whitespace-nowrap"
                   :title="autoBestRate
                     ? `自动最佳倍速：上限 ${autoRateCap}x，当前带宽下实际 ${playbackRate}x` : `倍速 ${playbackRate}x`"
                   @click="showSpeedMenu = !showSpeedMenu"
@@ -351,7 +359,7 @@
               <button class="p-1.5 rounded-lg text-white hover:bg-white/15 active:scale-90 transition-all" title="全屏" @click="toggleFullscreen">
                 <UIcon
                   :name="isFullscreen ? 'i-heroicons-arrows-pointing-in' : 'i-heroicons-arrows-pointing-out'"
-                  class="w-7 h-7"
+                  class="w-6 h-6 sm:w-7 sm:h-7"
                 />
               </button>
             </div>

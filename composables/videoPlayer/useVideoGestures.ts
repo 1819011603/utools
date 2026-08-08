@@ -72,6 +72,7 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
   let pointerKind = 'mouse'
   let lastTouchAt = 0    // 最近一次触摸的时刻，用来滤掉浏览器补发的兼容鼠标事件
   let tapWasShown = false  // 按下那一刻控制栏是不是开着（单击的目标态由它定，见 onTap）
+  let tapX = 0.5           // 这一下点在横向哪个位置（0~1），延迟执行时要用
   let lastDragEndAt = 0    // 拖动结束时刻：拖完浏览器还会补一个 click，那一下不能当播放/暂停
 
   const clearTimers = () => {
@@ -270,6 +271,7 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
   const onTap = (e: PointerEvent, rect: DOMRect) => {
     const now = performance.now()
     const x = (e.clientX - rect.left) / rect.width
+    tapX = x
     const isDouble = now - lastTapAt < DOUBLE_TAP_MS && Math.abs(e.clientX - lastTapX) < 60
     lastTapAt = isDouble ? 0 : now      // 三连击不该被当成「第二次双击」
     lastTapX = e.clientX
@@ -284,7 +286,14 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
 
     // 单击要等双击窗口过完才能确定，否则双击会先闪一下控制栏/先暂停再全屏
     if (singleTapTimer) clearTimeout(singleTapTimer)
-    singleTapTimer = setTimeout(() => { singleTapTimer = null; applyTapControls() }, DOUBLE_TAP_MS)
+    singleTapTimer = setTimeout(() => {
+      singleTapTimer = null
+      // 小窗（非全屏）里单击中间 = 播放/暂停，跟桌面一致。
+      // 「单击只显控制栏」那条规矩是给全屏看片准备的——那时误触暂停最烦人，而且有双击中间可用；
+      // 小窗只有 200 多 px 高、控制栏本来就占掉大半，还要人双击才能停实在别扭（实测被问了两次）。
+      if (!isFullscreen.value && tapX > SIDE_ZONE && tapX < 1 - SIDE_ZONE) controls.togglePlay()
+      else applyTapControls()
+    }, DOUBLE_TAP_MS)
   }
 
   // ── 鼠标：原生 click / dblclick ──
