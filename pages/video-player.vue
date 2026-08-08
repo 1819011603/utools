@@ -1,11 +1,18 @@
 <template>
   <div class="space-y-6">
-    <div class="flex items-center justify-between flex-wrap gap-4">
+    <!-- 起播后把大标题收掉：手机上它白占一屏，而画面就在下面 -->
+    <div v-if="!isVideoLoaded" class="flex items-center justify-between flex-wrap gap-4">
       <div>
         <h1 class="text-2xl font-bold text-gray-900 dark:text-white">视频播放器</h1>
         <p class="text-gray-600 dark:text-gray-400 mt-1">支持 M3U8/MP4 播放，并发加载分片，倍速/音量调整</p>
       </div>
     </div>
+
+    <!--
+      播放器排在最前面（腾讯视频移动端就是这样）：进来第一眼要看到的是画面，
+      而不是那个只在换片时才用一次的地址输入框。
+    -->
+    <VideoPlayerStage v-if="isVideoLoaded" />
 
     <VideoPlayerSourceCard />
 
@@ -23,8 +30,6 @@
         </div>
       </div>
     </UCard>
-
-    <VideoPlayerStage v-if="isVideoLoaded" />
 
     <!--
       下半部分一律默认折叠：这几块都是「出问题才看」或「设一次就不动」的东西，

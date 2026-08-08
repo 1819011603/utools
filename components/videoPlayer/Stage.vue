@@ -1,39 +1,9 @@
 <template>
-  <UCard class="overflow-hidden">
-    <template #header>
-      <div class="flex items-center justify-between">
-        <div class="flex items-center gap-2">
-          <UIcon name="i-heroicons-play-circle" class="w-5 h-5 text-emerald-500" />
-          <!-- 解析页会把剧名一起带过来（交接槽的 title），有就顶掉「播放器」这个泛标题 -->
-          <span class="font-semibold truncate">{{ playlistTitle || '播放器' }}</span>
-          <UBadge v-if="playlistTitle && playlist.length > 1" color="violet" variant="soft" size="xs">
-            {{ currentVideoName }}
-          </UBadge>
-          <UBadge :color="isHls ? 'violet' : 'blue'" variant="soft" size="xs">
-            {{ isHls ? 'HLS/M3U8' : 'MP4' }}
-          </UBadge>
-          <!--
-            连接策略只在这里露一个徽标：整块设置已挪到页面下方的折叠区（平时是噪音，出问题才看）。
-            点它就把那块展开——`showAdvancedProxy` 同时也是折叠区的开合状态，一个 ref 两处用。
-          -->
-          <UBadge
-            :color="isProbing ? 'gray' : 'sky'" variant="soft" size="xs"
-            class="cursor-pointer hover:ring-1 hover:ring-sky-400 transition-shadow"
-            title="点击展开连接与防盗链设置（含可达性探测矩阵）"
-            @click="showAdvancedProxy = !showAdvancedProxy"
-          >
-            {{ isProbing ? '探测中…' : strategyLabel }}
-          </UBadge>
-        </div>
-        <div class="flex items-center gap-2 text-sm text-gray-500">
-          <template v-if="hlsStats">
-            <UBadge color="green" variant="soft" size="xs">缓冲: {{ hlsStats.buffered.toFixed(1) }}s</UBadge>
-            <UBadge color="cyan" variant="soft" size="xs">{{ hlsStats.level }}</UBadge>
-          </template>
-        </div>
-      </div>
-    </template>
-
+  <!--
+    手机上通栏（负边距抵掉页面容器的 px-4）：16:9 的画面本来就不高，
+    两侧再留白只会把它压得更小。参照腾讯视频移动端：播放器贴边、标题信息在画面下方。
+  -->
+  <div class="-mx-4 sm:mx-0">
     <!--
       手势全部走 Pointer Events（鼠标/触摸同一套，见 useVideoGestures）：
       单击唤出控制栏、双击左右 ±5s、长按右侧临时 2x、横滑进度、全屏内竖滑音量/亮度。
@@ -41,7 +11,7 @@
     -->
     <div
       ref="playerContainer"
-      class="relative bg-black rounded-lg overflow-hidden group flex items-center justify-center select-none"
+      class="relative bg-black overflow-hidden group flex items-center justify-center select-none sm:rounded-xl"
       :class="[
         { 'cursor-none': isPlaying && !showControls },
         isFullscreen ? 'fixed inset-0 z-50 rounded-none' : '',
@@ -233,107 +203,108 @@
         <div
           v-show="controlsVisible"
           data-no-gesture
-          class="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-4 pt-12"
+          class="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/85 via-black/40 to-transparent px-2.5 pb-2.5 pt-12 sm:px-4 sm:pb-4"
           @click.stop
           @pointerdown="keepControlsAlive"
           @pointerup="keepControlsAlive"
         >
-          <!-- 进度条 -->
-          <div
-            ref="progressBar"
-            class="relative h-2 bg-white/30 rounded-full cursor-pointer group/progress mb-3 touch-none"
-            @pointerdown="startSeek"
-            @mousemove="updateHoverTime"
-            @mouseleave="hoverTime = null"
-          >
-            <div class="absolute h-full bg-white/40 rounded-full" :style="{ width: bufferedPercent + '%' }" />
-            <div
-              class="absolute h-full rounded-full transition-all bg-gradient-to-r from-violet-500 to-fuchsia-400
-                     shadow-[0_0_10px_rgba(167,139,250,.75)]"
-              :style="{ width: progressPercent + '%' }"
-            />
-            <div
-              class="absolute top-1/2 -translate-y-1/2 w-5 h-5 bg-white rounded-full shadow-lg
-                     opacity-0 scale-50 group-hover/progress:opacity-100 group-hover/progress:scale-100
-                     transition-all duration-200 ring-2 ring-violet-400/60"
-              :style="{ left: `calc(${progressPercent}% - 10px)` }"
-            />
-            <div
-              v-if="hoverTime !== null"
-              class="absolute -top-8 px-2 py-1 bg-black/80 text-white text-xs rounded transform -translate-x-1/2 pointer-events-none"
-              :style="{ left: hoverPercent + '%' }"
+          <!--
+            腾讯视频移动端那套排布：竖屏时进度条**内联在按钮行里**（播放 | 时间 | 进度 | 倍速 | 全屏），
+            宽屏才让它独占上面一行。原来固定「进度条一行 + 按钮一行」，
+            窄屏上十来个控件挤成一坨还互相压字（实测截图里时间和齿轮叠在一起）。
+            一行流式布局 + order 换位，两种屏幕共用同一个 progressBar ref。
+          -->
+          <div class="flex items-center gap-1.5 flex-wrap">
+            <button
+              class="order-1 p-1.5 rounded-lg text-white hover:bg-white/15 active:scale-90 transition-all shrink-0"
+              @click="togglePlay"
             >
-              {{ formatTime(hoverTime) }}
-            </div>
-            <div
-              v-else-if="seekPreviewTime !== null"
-              class="absolute -top-8 px-2 py-1 bg-black/80 text-white text-xs rounded transform -translate-x-1/2"
-              :style="{ left: seekPreviewPercent + '%' }"
+              <UIcon :name="isPlaying ? 'i-heroicons-pause-solid' : 'i-heroicons-play-solid'" class="w-7 h-7" />
+            </button>
+
+            <!-- 上一集在窄屏藏起来：竖屏一行放不下，而「下一集」的使用频率高一个量级 -->
+            <button
+              v-if="playlist.length > 1"
+              class="order-1 hidden sm:block p-1.5 rounded-lg text-white transition-all shrink-0"
+              :class="hasPrev ? 'hover:bg-white/15 active:scale-90' : 'opacity-40 cursor-not-allowed'"
+              :disabled="!hasPrev"
+              title="上一集"
+              @click="playPrev"
             >
-              {{ formatTime(seekPreviewTime) }}
-            </div>
-          </div>
+              <UIcon name="i-heroicons-backward-solid" class="w-6 h-6" />
+            </button>
+            <button
+              v-if="playlist.length > 1"
+              class="order-1 p-1.5 rounded-lg text-white transition-all shrink-0"
+              :class="hasNext ? 'hover:bg-white/15 active:scale-90' : 'opacity-40 cursor-not-allowed'"
+              :disabled="!hasNext"
+              title="下一集"
+              @click="playNext"
+            >
+              <UIcon name="i-heroicons-forward-solid" class="w-6 h-6" />
+            </button>
 
-          <!-- 窄屏上不换行：一换行控制栏就摞成两排，把进度条顶到画面中间（实测手机上一团糟） -->
-          <div class="flex items-center justify-between gap-1 min-w-0">
-            <!--
-              前进/后退 10 秒的两枚按钮已删：双击画面左右两侧就是 ±5s，手机上比瞄准小图标快得多，
-              键盘还有 ←/→。留着只是把上下一集这两枚真正常用的挤小了。
-            -->
-            <div class="flex items-center gap-1 min-w-0 flex-1">
-              <button
-                v-if="playlist.length > 1"
-                class="p-2 rounded-lg text-white transition-all"
-                :class="hasPrev ? 'hover:bg-white/15 hover:text-violet-300 active:scale-90' : 'opacity-40 cursor-not-allowed'"
-                :disabled="!hasPrev"
-                title="上一集"
-                @click="playPrev"
-              >
-                <UIcon name="i-heroicons-backward-solid" class="w-6 h-6 sm:w-7 sm:h-7" />
+            <!-- 手机上没有 hover，滑条永远展不开；音量有硬件键和竖滑手势，整组藏起来腾地方 -->
+            <div class="order-1 hidden sm:flex items-center gap-2 group/volume ml-1 shrink-0">
+              <button class="p-1.5 rounded-lg text-white hover:bg-white/15 transition-all" @click="toggleMute">
+                <UIcon :name="volumeIcon" class="w-6 h-6" />
               </button>
-
-              <button class="p-2 rounded-lg text-white hover:bg-white/15 hover:text-violet-300 active:scale-90 transition-all" @click="togglePlay">
-                <UIcon :name="isPlaying ? 'i-heroicons-pause' : 'i-heroicons-play'" class="w-7 h-7 sm:w-8 sm:h-8" />
-              </button>
-
-              <button
-                v-if="playlist.length > 1"
-                class="p-2 rounded-lg text-white transition-all"
-                :class="hasNext ? 'hover:bg-white/15 hover:text-violet-300 active:scale-90' : 'opacity-40 cursor-not-allowed'"
-                :disabled="!hasNext"
-                title="下一集"
-                @click="playNext"
-              >
-                <UIcon name="i-heroicons-forward-solid" class="w-6 h-6 sm:w-7 sm:h-7" />
-              </button>
-
-              <!-- 手机上没有 hover，滑条永远展不开；音量有硬件键和竖滑手势，整组藏起来腾地方 -->
-              <div class="hidden sm:flex items-center gap-2 group/volume ml-1">
-                <button class="p-2 rounded-lg text-white hover:bg-white/15 hover:text-violet-300 transition-all" @click="toggleMute">
-                  <UIcon :name="volumeIcon" class="w-6 h-6" />
-                </button>
-                <div class="w-0 group-hover/volume:w-20 overflow-hidden transition-all duration-200">
-                  <input
-                    type="range" min="0" max="1" step="0.05"
-                    :value="volume"
-                    class="w-full h-1 bg-white/30 rounded-full appearance-none cursor-pointer accent-violet-500"
-                    @input="setVolume"
-                  />
-                </div>
+              <div class="w-0 group-hover/volume:w-20 overflow-hidden transition-all duration-200">
+                <input
+                  type="range" min="0" max="1" step="0.05"
+                  :value="volume"
+                  class="w-full h-1 bg-white/30 rounded-full appearance-none cursor-pointer accent-violet-500"
+                  @input="setVolume"
+                />
               </div>
-
-              <span class="text-white text-xs sm:text-sm font-mono shrink-0 tabular-nums">
-                {{ formatTime(currentTime) }} / {{ formatTime(duration) }}
-              </span>
             </div>
 
-            <div class="flex items-center gap-1 shrink-0">
-              <!-- 自动全屏 / 自动倍速 / 跳过片头片尾：全是看片当下才改的，放这儿手不用离开画面 -->
-              <VideoPlayerSettingsMenu />
+            <span class="order-2 text-white text-xs sm:text-sm font-mono tabular-nums whitespace-nowrap shrink-0">
+              {{ formatTime(currentTime) }}<span class="text-white/50"> / {{ formatTime(duration) }}</span>
+            </span>
 
+            <!-- 进度条：窄屏内联占据中间空档，宽屏 order-first + w-full 自己占一行 -->
+            <div
+              ref="progressBar"
+              class="order-3 flex-1 min-w-[64px] sm:order-first sm:w-full sm:flex-none sm:mb-1.5
+                     relative h-1 sm:h-1.5 bg-white/25 rounded-full cursor-pointer group/progress touch-none"
+              @pointerdown="startSeek"
+              @mousemove="updateHoverTime"
+              @mouseleave="hoverTime = null"
+            >
+              <div class="absolute h-full bg-white/35 rounded-full" :style="{ width: bufferedPercent + '%' }" />
+              <div
+                class="absolute h-full rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-400
+                       shadow-[0_0_8px_rgba(167,139,250,.7)]"
+                :style="{ width: progressPercent + '%' }"
+              />
+              <!-- 圆钮常显（腾讯也是常显）：触摸端没有 hover，藏起来就等于没有抓手 -->
+              <div
+                class="absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 sm:w-4 sm:h-4 bg-white rounded-full shadow-lg
+                       ring-2 ring-violet-400/50 transition-transform group-hover/progress:scale-125"
+                :style="{ left: `calc(${progressPercent}% - 7px)` }"
+              />
+              <div
+                v-if="hoverTime !== null"
+                class="absolute -top-8 px-2 py-1 bg-black/80 text-white text-xs rounded transform -translate-x-1/2 pointer-events-none"
+                :style="{ left: hoverPercent + '%' }"
+              >
+                {{ formatTime(hoverTime) }}
+              </div>
+              <div
+                v-else-if="seekPreviewTime !== null"
+                class="absolute -top-8 px-2 py-1 bg-black/80 text-white text-xs rounded transform -translate-x-1/2"
+                :style="{ left: seekPreviewPercent + '%' }"
+              >
+                {{ formatTime(seekPreviewTime) }}
+              </div>
+            </div>
+
+            <!-- 右侧一组：宽屏时靠 ml-auto 推到最右（进度条独占上一行后这行需要自己撑开） -->
+            <div class="order-4 flex items-center gap-0.5 shrink-0 sm:ml-auto">
               <div ref="speedMenuRef" class="relative">
                 <button
-                  class="px-2.5 py-2 rounded-lg text-white hover:bg-white/15 hover:text-violet-300 transition-all text-base font-semibold"
+                  class="px-2 py-1.5 rounded-lg text-white hover:bg-white/15 transition-all text-sm font-semibold whitespace-nowrap"
                   :title="autoBestRate
                     ? `自动最佳倍速：上限 ${autoRateCap}x，当前带宽下实际 ${playbackRate}x` : `倍速 ${playbackRate}x`"
                   @click="showSpeedMenu = !showSpeedMenu"
@@ -357,11 +328,14 @@
                 </Transition>
               </div>
 
-              <button v-if="supportsPiP && !isNarrow" class="p-2 rounded-lg text-white hover:bg-white/15 hover:text-violet-300 transition-all" title="画中画" @click="togglePiP">
+              <!-- 自动全屏 / 自动倍速 / 跳过片头片尾：全是看片当下才改的，放这儿手不用离开画面 -->
+              <VideoPlayerSettingsMenu />
+
+              <button v-if="supportsPiP && !isNarrow" class="p-1.5 rounded-lg text-white hover:bg-white/15 transition-all" title="画中画" @click="togglePiP">
                 <UIcon name="i-heroicons-rectangle-stack" class="w-6 h-6" />
               </button>
 
-              <button class="p-2 rounded-lg text-white hover:bg-white/15 hover:text-violet-300 active:scale-90 transition-all" title="全屏" @click="toggleFullscreen">
+              <button class="p-1.5 rounded-lg text-white hover:bg-white/15 active:scale-90 transition-all" title="全屏" @click="toggleFullscreen">
                 <UIcon
                   :name="isFullscreen ? 'i-heroicons-arrows-pointing-in' : 'i-heroicons-arrows-pointing-out'"
                   class="w-7 h-7"
@@ -374,7 +348,26 @@
 
       <VideoPlayerEpisodeOverlay />
     </div>
-  </UCard>
+
+    <!-- 画面下方的信息行：剧名 + 当前集 + 格式 + 连接策略（原来这些挤在卡片头里） -->
+    <div class="px-4 sm:px-0 pt-3 flex items-center gap-2 flex-wrap text-sm">
+      <span class="font-semibold truncate max-w-full">{{ playlistTitle || '播放器' }}</span>
+      <UBadge v-if="playlistTitle && playlist.length > 1" color="violet" variant="soft" size="xs">
+        {{ currentVideoName }}
+      </UBadge>
+      <UBadge :color="isHls ? 'violet' : 'blue'" variant="soft" size="xs">{{ isHls ? 'HLS/M3U8' : 'MP4' }}</UBadge>
+      <UBadge v-if="hlsStats" color="green" variant="soft" size="xs">缓冲 {{ hlsStats.buffered.toFixed(1) }}s</UBadge>
+      <!-- 连接策略点一下展开页面下方那节设置（showAdvancedProxy 一个 ref 两处用） -->
+      <UBadge
+        :color="isProbing ? 'gray' : 'sky'" variant="soft" size="xs"
+        class="cursor-pointer"
+        title="点击展开连接与防盗链设置（含可达性探测矩阵）"
+        @click="showAdvancedProxy = !showAdvancedProxy"
+      >
+        {{ isProbing ? '探测中…' : strategyLabel }}
+      </UBadge>
+    </div>
+  </div>
 </template>
 
 <script setup lang="ts">

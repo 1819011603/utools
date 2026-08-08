@@ -100,6 +100,15 @@ server/api/resolve.ts 播放页解析接口（薄壳，站点策略在 server/pa
 UI 分块：`SourceCard` / `PlaylistPanel` / `Stage` / `SettingsMenu` / `ConnSettings` / `HlsSettings` /
 `StatsPanel` / `PreloadSettings` / `Shortcuts` / `CollapseCard`。
 
+**版式参照腾讯视频移动端**：播放器排在页面**最前面**（进来第一眼要看到画面，不是只用一次的输入框），
+手机上**通栏贴边**（`-mx-4 sm:mx-0` 抵掉容器 padding；16:9 本来就不高，两侧再留白只会压得更小），
+剧名/集数/格式/连接策略这些信息挪到画面**下方**一行。起播后页面大标题收掉。
+
+控制栏也照腾讯竖屏那套：**进度条内联在按钮行里**（播放 | 下一集 | 时间 | 进度 | 倍速 | 设置 | 全屏），
+宽屏才 `order-first + w-full` 让它独占上面一行——同一个 `progressBar` ref，靠 `order` 换位。
+原来固定「进度条一行 + 按钮一行」，窄屏上控件挤成一坨还互相压字（截图里时间和齿轮叠在一起）。
+进度条圆钮**常显**：触摸端没有 hover，藏起来等于没有抓手。
+
 **页面只有三样东西是常显的：输入框、播放器、选集**。其余全在下方 `CollapseCard` 里**默认折叠**
 （摊开会把播放器和选集挤出屏幕，手机上要滑三屏才看得到第 2 集）：
 
