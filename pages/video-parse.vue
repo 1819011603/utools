@@ -630,11 +630,12 @@ const startResolve = async (line?: number) => {
  * 但要重新跑一遍解析——慢的站点好几秒，nbmovie 系还会被限流。而用户回来通常只是想换条线路，
  * 那份线路表上一秒还在手里。于是原样存下来，回来直接摆回去。
  *
- * TTL 30 分钟，与探测结果、playerOrigin 那些缓存对齐：作业单里的令牌是源站按次渲染的，
- * 存太久回来就是一堆取不到址的集。过期或对不上就照常重新解析。
+ * TTL 1 小时。比探测结果那些（30 分钟）长一倍：这里存的只是线路×集数表，
+ * 就算里面的作业单令牌过期了，播放器也会拿 playlistSource 重解析一次拿新的，
+ * 代价只是一次请求；而缓存失效的代价是每次返回都白等一轮解析。过期或对不上就照常重新解析。
  */
 const RESULT_CACHE_KEY = 'video-parse-last-result'
-const RESULT_CACHE_TTL = 30 * 60 * 1000
+const RESULT_CACHE_TTL = 60 * 60 * 1000
 
 interface CachedParse { url: string; line: number; result: ParseResult; at: number }
 
