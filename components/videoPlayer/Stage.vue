@@ -62,7 +62,8 @@
         <div class="flex flex-col items-center gap-2">
           <UIcon name="i-heroicons-arrow-path" class="w-12 h-12 text-white animate-spin" />
           <span class="text-white text-sm">
-            {{ isResolvingUrl ? '正在获取播放地址...' : isProbing ? '正在探测连接方式...' : '加载中...' }}
+            <!-- resolveStage 带秒数（见 resolveWithUi）：不动的文案分不清「在跑」还是「卡死了」 -->
+            {{ isResolvingUrl ? (resolveStage || '正在获取播放地址...') : isProbing ? '正在探测连接方式...' : '加载中...' }}
           </span>
         </div>
       </div>
@@ -418,7 +419,7 @@ import { onClickOutside } from '@vueuse/core'
 
 const {
   videoEl, playerContainer, progressBar, speedMenuRef, videoKey, videoUrl,
-  isHls, isPlaying, isBuffering, isResolvingUrl, isProbing, isFullscreen, isVideoLoaded,
+  isHls, isPlaying, isBuffering, isResolvingUrl, resolveStage, isProbing, isFullscreen, isVideoLoaded,
   showControls, showPlayIcon, showSpeedMenu,
   currentTime, duration, volume, playbackRate, desiredRate, autoBestRate, autoRateCap,
   progressPercent, bufferedPercent, seekPreviewTime, seekPreviewPercent, hoverTime, hoverPercent,

@@ -114,6 +114,14 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
    * 30s 比任何正常取址都宽（慢站抓页实测 5-10s），到点就报错，让人知道是站点没给。
    */
   const RESOLVE_TIMEOUT = 30_000
+  /**
+   * 用户点了之后最多让他等这么久。**必须独立于底层那条 promise**：
+   * 前台可能命中去重、复用一条正在排队让路的预热请求，那条的剩余寿命跟点击这一刻毫无关系。
+   * 15s 是「还愿意等」的上限，到点就明确报错，比无声转圈强。
+   */
+  const FOREGROUND_TIMEOUT = 15_000
+  /** 预热给前台让路的上限。让路本身不能变成新的等待源 */
+  const GIVE_WAY_MAX = 3_000
 
   /**
    * 取址**同集去重 + 预热单向让路**。
@@ -173,9 +181,14 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
       doFetchLazyUrl(placeholder).then(resolve, reject).finally(() => clearTimeout(timer))
     })
 
-    // allSettled 而不是 all：让路只是「等它们不再占着站点」，别人失败不该连坐
+    // 让路要有上限：allSettled 而不是 all（让路只是「等它们不再占着站点」，别人失败不该连坐），
+    // 再跟一个 3s 的闹钟赛跑。不封顶的话「让路 30s + 自己 30s」能叠成一分钟，
+    // 而前台点击一旦命中去重、复用的正是这条在排队的 promise，就成了「点下一集一直转」（踩过）
     const p = giveWay && pending.size
-      ? Promise.allSettled([...pending]).then(withTimeout)
+      ? Promise.race([
+        Promise.allSettled([...pending]),
+        new Promise(r => setTimeout(r, GIVE_WAY_MAX)),
+      ]).then(withTimeout)
       : withTimeout()
 
     inflight.set(placeholder, p)
@@ -185,16 +198,36 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
     return p
   }
 
-  /** 前台取址：转圈遮罩和错误文案都归它管（后台预热绝不能碰这两个） */
+  /**
+   * 前台取址：转圈遮罩、计秒文案、错误文案都归它管（后台预热绝不能碰这三样）。
+   *
+   * 遮罩上**要报秒数**：慢站取址本来就要好几秒，一个不动的「正在获取播放地址…」既看不出
+   * 是在跑还是卡死了，也没法归因（用户只会说「一直在获取」）。
+   */
   const resolveWithUi = async (placeholder: string): Promise<string> => {
     media.isResolvingUrl.value = true
     errorMessage.value = ''
+    const t0 = performance.now()
+    const tick = () => {
+      media.resolveStage.value = `正在获取播放地址…${Math.round((performance.now() - t0) / 1000)}s`
+    }
+    tick()
+    const timer = setInterval(tick, 1000)
     try {
-      return await fetchLazyUrl(placeholder)
+      // 死线跟着这次点击走，不跟着底层那条 promise（它可能是别人的、已经排了很久的）
+      return await Promise.race([
+        fetchLazyUrl(placeholder),
+        new Promise<never>((_, reject) => setTimeout(
+          () => reject(new Error(`等了 ${FOREGROUND_TIMEOUT / 1000}s 还没拿到地址，站点可能在限流`)),
+          FOREGROUND_TIMEOUT,
+        )),
+      ])
     } catch (e: any) {
       errorMessage.value = '获取播放地址失败：' + (e?.message || '未知错误')
       return ''
     } finally {
+      clearInterval(timer)
+      media.resolveStage.value = ''
       media.isResolvingUrl.value = false
     }
   }
