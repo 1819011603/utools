@@ -8,6 +8,45 @@ export interface HistoryItem<T> {
   size: number
 }
 
+/**
+ * 存储是否已被浏览器「持久化」。**origin 级的状态**，所以放模块级共享，
+ * 不随某个页面的 useHistory 实例走。null = 还没查 / 浏览器不支持这套 API。
+ */
+const storagePersisted = ref<boolean | null>(null)
+
+/**
+ * 「尽可能久地保存」在浏览器里只有一个正经答案：`navigator.storage.persist()`。
+ *
+ * localStorage 自己没有过期时间，但**没拿到持久化授权时它随时可能被整体清掉**：
+ *   · Chrome / Edge：磁盘吃紧时按 LRU **整个 origin 一起驱逐**（best-effort 配额）
+ *   · Safari（WebKit ITP）：**7 天不访问就删**脚本可写存储，而且它压根不支持 `persist()`——
+ *     那边唯一的豁免是「添加到主屏幕」。这条我们兜不住，只能如实告诉用户
+ *   · Firefox：`persist()` 会弹一个权限请求
+ * 拿到授权后 Chrome/Firefox 就不再自动驱逐（用户自己「清除浏览数据」当然照样清得掉，
+ * 那是用户的明确意图，不该也不能拦）。
+ *
+ * **只在真的要写一条历史时才请求**，不在页面加载时请求：Firefox 那个权限弹窗如果凭空冒出来，
+ * 用户既不知道是谁要的、也想不出为什么要给。刚解析成功、正要记一条历史，才是能解释得通的时机。
+ */
+let persistRequested = false
+
+export async function requestPersistentStorage(): Promise<void> {
+  if (persistRequested || typeof navigator === 'undefined' || !navigator.storage?.persist) return
+  persistRequested = true
+  try {
+    // 先查再求：已经授权还去调 persist() 在 Firefox 上会白弹一次窗
+    storagePersisted.value = await navigator.storage.persisted() || await navigator.storage.persist()
+  } catch {
+    storagePersisted.value = null
+  }
+}
+
+/** 只读当前状态，不触发任何权限请求（`persisted()` 是纯查询） */
+export async function refreshPersistedState(): Promise<void> {
+  if (typeof navigator === 'undefined' || !navigator.storage?.persisted) return
+  try { storagePersisted.value = await navigator.storage.persisted() } catch { /* 不支持就当未知 */ }
+}
+
 function getStorageKey(page: string): string {
   return `utools-history-${page}`
 }
@@ -20,7 +59,14 @@ function getByteSizeFromString(str: string): number {
   }
 }
 
-export function useHistory<T>(page: string) {
+export interface HistoryOptions {
+  /** 条数上限。默认 50；要「基本不丢」的历史（如解析记录）自己传大值 */
+  maxItems?: number
+}
+
+export function useHistory<T>(page: string, options: HistoryOptions = {}) {
+  const maxItems = options.maxItems ?? MAX_ITEMS
+
   const loadHistory = (): HistoryItem<T>[] => {
     if (typeof window === 'undefined') return []
     try {
@@ -65,13 +111,15 @@ export function useHistory<T>(page: string) {
     let totalSize = items.reduce((sum, i) => sum + i.size, 0) + size
     let newItems = [newItem, ...items]
 
-    while (newItems.length > MAX_ITEMS || totalSize > MAX_TOTAL_SIZE) {
+    while (newItems.length > maxItems || totalSize > MAX_TOTAL_SIZE) {
       const removed = newItems.pop()
       if (removed) totalSize -= removed.size
       else break
     }
 
     saveHistory(newItems)
+    // 真的写下了东西，才去申请「别清我」——见 requestPersistentStorage 的注释
+    void requestPersistentStorage()
     return true
   }
 
@@ -81,5 +129,5 @@ export function useHistory<T>(page: string) {
 
   const applyItem = (item: HistoryItem<T>): T => item.data
 
-  return { addToHistory, getHistory, clearHistory, applyItem }
+  return { addToHistory, getHistory, clearHistory, applyItem, storagePersisted, refreshPersistedState }
 }

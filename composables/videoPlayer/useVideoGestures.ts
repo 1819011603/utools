@@ -174,7 +174,10 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
     dragMode = null
     boosting = false
 
-    ;(e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId)
+    // 包 try：这一对在指针已经没了的时候会抛 NotFoundError（合成事件、指针被系统收走、
+    // 多点触控里那根手指先离开…）。抛出去会把整个 pointerdown 处理中断，后面的手势判定全不执行——
+    // 表现是「画面点了没反应」，而捕获本身只是锦上添花（丢了顶多是滑出元素后不再跟手）
+    try { (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId) } catch {}
 
     // 长按右半屏 → 临时加速。左半屏留空：那里是「按住不动想看清画面」的常见位置，
     // 两边都加速会让人分不清自己触发了什么
@@ -244,7 +247,7 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
     activePointer = null
     clearTimers()
     if (e.pointerType !== 'mouse') lastTouchAt = performance.now()
-    ;(e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId)
+    try { (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId) } catch {}
 
     if (boosting) {                       // 长按结束：只收加速，不算点击
       boosting = false

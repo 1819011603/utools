@@ -87,7 +87,18 @@ export interface ProbeResult {
    * 而且它会自己再下钻一次，喂错层级只会打乱它的画质选择。
    */
   manifestText?: string
+  /** 我们**请求**的那个地址。用来跟 hls.js 要的 `context.url` 严格比对，决定这份原文能不能用 */
   manifestRequestUrl?: string
+  /**
+   * **重定向之后**的最终地址。必须跟着一起带走：hls.js 拿 `response.url` 当基准来还原
+   * 清单里的相对分片 URI，而真实的 XHR 给它的恒是最终地址。
+   *
+   * 实测 ncat22 的源：清单地址是 `142.248.96.195:21306/...`，一请求就 302 到
+   * `142.248.96.194:11306/...`（换了 IP 也换了端口）。只把请求地址交给 hls.js 的话，
+   * 相对分片会被还原到 `.195:21306` 上——那台机器给的不是这条流的分片，
+   * 于是「分片全 200、解码持续失败」，报出来是「取回的数据不是可播的视频」（踩过）。
+   */
+  manifestFinalUrl?: string
 }
 
 /** 代理对「已被官方下线的源」回这个码（451 Unavailable For Legal Reasons） */
@@ -259,11 +270,11 @@ export async function probeReachability(
     const onDeadline = () => ctrl.abort()
     deadline.addEventListener('abort', onDeadline)
     try {
-      let { manifest, baseUrl, text, requestUrl } = await fetchM3u8Manifest(target, ctrl.signal)
+      let { manifest, baseUrl, text, requestUrl, finalUrl } = await fetchM3u8Manifest(target, ctrl.signal)
       // master 列表：下钻一层拿真正的媒体列表（变体 URI 含 .m3u8，代理会把它重写成代理 URL，可直接再喂回去）
       const best = pickBestVariant(manifest)
       if (best?.uri) {
-        ({ manifest, baseUrl, text, requestUrl } = await fetchM3u8Manifest(resolveUrl(baseUrl, best.uri), ctrl.signal))
+        ({ manifest, baseUrl, text, requestUrl, finalUrl } = await fetchM3u8Manifest(resolveUrl(baseUrl, best.uri), ctrl.signal))
       }
       const seg = manifest?.segments?.[0]
       // 拿到了响应但里面一个分片都没有 → 判 fail，不能算这条通道「可达」。
@@ -278,6 +289,7 @@ export async function probeReachability(
         // master 本身，喂媒体列表给它等于替它做了画质选择，会打乱 ABR
         manifestText: best?.uri ? undefined : text,
         manifestRequestUrl: best?.uri ? undefined : requestUrl,
+        manifestFinalUrl: best?.uri ? undefined : finalUrl,
       }
     } catch {
       return {
@@ -319,6 +331,7 @@ export async function probeReachability(
   // 所以下面重算 manifestChannel 时要一并作废。
   result.manifestText = winner?.manifestText
   result.manifestRequestUrl = winner?.manifestRequestUrl
+  result.manifestFinalUrl = winner?.manifestFinalUrl
 
   if (!result.manifestChannel) {
     result.degraded = true              // manifest 三条路全不通 → 没结论，交回兜底
@@ -361,6 +374,7 @@ export async function probeReachability(
     const finalRun = result.manifestChannel ? runs[result.manifestChannel] : undefined
     result.manifestText = finalRun?.manifestText
     result.manifestRequestUrl = finalRun?.manifestRequestUrl
+    result.manifestFinalUrl = finalRun?.manifestFinalUrl
   }
 
   // 双通道判据：分片「直连」和「代理·伪装」双向都实测通，且最终就走直连。

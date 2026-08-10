@@ -4,6 +4,7 @@ import { SERVER_TIERS, DEFAULT_TIER, type ServerTier, type TierParams } from '..
 import { useLaneControl } from './prefetch/lanes'
 import { useBandwidthModel } from './prefetch/bandwidth'
 import { createFragLoaderFactory } from './prefetch/fragLoader'
+import { useBufferMeter } from './prefetch/bufferMeter'
 
 export type HealthZone = 'panic' | 'low' | 'healthy'
 
@@ -196,47 +197,13 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     }
   }
 
-  // 计算当前播放位置前方的缓冲秒数（仅 MSE，真实可立即播放的量）。
-  // 抗卡顿闭环/自适应并发必须用这个，不能掺预取缓存（否则误判缓冲充足而停下载）。
-  const getAheadBuffered = (video: HTMLVideoElement): number => {
-    const ct = video.currentTime
-    for (let i = 0; i < video.buffered.length; i++) {
-      if (video.buffered.start(i) <= ct + 0.1 && ct <= video.buffered.end(i)) {
-        return video.buffered.end(i) - ct
-      }
-    }
-    return 0
-  }
-
-  // 有效已缓冲时长（秒）：从当前播放位置往后，能「无需再下载」连续播出去的秒数。
-  // 一片算「可播」的条件：已在 MSE 里（播放器已有）或在 JS 预取缓存里（一拖就命中）——
-  // 两者都不需要再下载。逐片累加，直到遇到第一个「还需要下载」的分片（既不在 MSE 也没预取）为止。
-  const getCachedAhead = (video: HTMLVideoElement): number => {
-    const ct = anchorTime(video)   // 起播定位期间从 pendingStartPos 量起，反映恢复位置的真实缓冲
-    const hls = opts.getHls()
-    const level = hls && hls.currentLevel >= 0 ? hls.currentLevel : 0
-    const frags: any[] = (hls as any)?.levels?.[level]?.details?.fragments ?? []
-    if (!frags.length) return getAheadBuffered(video)
-
-    // 某时间点是否已落在 MSE 已缓冲区间内（已下载进播放器，无需再取）
-    const inMSE = (t: number): boolean => {
-      for (let i = 0; i < video.buffered.length; i++) {
-        if (video.buffered.start(i) <= t + 0.1 && t < video.buffered.end(i) + 0.1) return true
-      }
-      return false
-    }
-
-    let reach = ct
-    for (const frag of frags) {
-      if (frag.end <= ct + 0.1) continue                     // 播放头之前的分片，跳过
-      if (frag.start > reach + 0.5) break                     // 与已达区间不连续（真空洞）→ 停
-      const mid = (frag.start + frag.end) / 2
-      const available = getPrefetchedBuf(frag.url) !== null || inMSE(mid)
-      if (!available) break                                   // 该分片还需下载 → 停
-      reach = frag.end                                        // 可播 → 延伸
-    }
-    return Math.max(0, reach - ct)
-  }
+  // 缓冲量测（实现见 ./prefetch/bufferMeter.ts）：
+  //   getAheadBuffered = 仅 MSE（跳片用）；getCachedAhead = MSE + 预取缓存（分档/并发/倍速用）
+  const { getAheadBuffered, getCachedAhead } = useBufferMeter({
+    getHls: opts.getHls,
+    getPrefetchedBuf,
+    anchorTime,
+  })
 
   // 闭环控制步进（两个指标都按「有效已缓冲」cachedAhead = MSE + 预取缓存 来判，但用途不同）：
   //   · 健康区(healthZone)：濒卡/吃紧/健康，驱动降速守卫与双通道自动开。

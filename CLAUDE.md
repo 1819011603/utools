@@ -153,7 +153,13 @@ UI 分块：`SourceCard` / `PlaylistPanel` / `Stage` / `SettingsMenu` / `ConnSet
   **回调必须延到下一个宏任务**：同步回等于在 `loadSource()` 一行之内把 MANIFEST_PARSED 派发完，
   那时 `attachMedia` 建的 MediaSource 还没等到异步的 `sourceopen`，
   表现是「分片一个接一个 200、缓冲恒 0、一直转圈」（踩过，A/B 确认）。
-  配套：**事件一律在 `loadSource` 之前登记**，且 `attachMedia` 在 `loadSource` 之前
+  配套：**事件一律在 `loadSource` 之前登记**，且 `attachMedia` 在 `loadSource` 之前。
+  **交给 hls.js 的 `response.url` 必须是重定向后的最终地址**（`manifestFinalUrl`），不是我们请求的那个
+  ——hls.js 拿它当基准还原清单里的相对分片 URI，真实 XHR 给它的恒是最终地址。
+  实测 ncat22：清单 `142.248.96.195:21306/…` 一请求就 302 到 `142.248.96.194:11306/…`（换 IP 换端口），
+  给错基准就把分片指到另一台机器上——**分片全 200 却解码持续失败**，报出来是
+  「取回的数据不是可播的视频，换一条线路试试」，看着像源站挂了，其实是自己找错了地方（踩过）。
+  所以两个地址都要带：请求地址用来跟 `context.url` 比对（决定能不能用这份原文），最终地址用来当基准
 - **切集门闩改 latest-wins**：切集中再点只记最新目标，本轮结束后接着切（连点两下就跳两集）。
   但要**封顶 3 次**——`playNext` 也被「播完自动下一集」调，坏源一 attach 就 `ended` 会把整份列表飞快走完
 - **上/下一集按钮切集期间只换转圈图标，绝不 `:disabled`**：Chrome 不给 disabled 控件派发鼠标事件，
@@ -810,7 +816,28 @@ FED 模板，**不走 `player_aaaa`**，地址在播放器 iframe 属性上。
 | `video-parse-last-result` | 上次解析结果，TTL 1 小时（从播放器返回时免去重解析） |
 | `json-*-settings` / `content-diff-settings` / `timestamp-settings` | 各页设置 |
 | `json-extract-import` | json-format → json-extract 跨页传值 |
-| `utools-history-<page>` | 通用历史：最多 50 条，单条 1MB，总量 256MB |
+| `utools-history-<page>` | 通用历史：默认 50 条（可按页覆盖，`video-parse` 给了 2000），单条 1MB，总量 256MB |
+
+### 「永久保存」= `navigator.storage.persist()`，不是「localStorage 没有 TTL」
+
+localStorage 自己确实不过期，但**没拿到持久化授权时它随时会被整体清掉**，所以「永久」这句话
+光靠 localStorage 是兑现不了的：
+
+- **Chrome / Edge**：磁盘吃紧时按 LRU **整个 origin 一起驱逐**（best-effort 配额）
+- **Safari（WebKit ITP）**：**7 天不访问就删**脚本可写存储，而且它压根不支持 `persist()`——
+  那边唯一的豁免是「添加到主屏幕」。这条兜不住，只能如实标出来
+- **Firefox**：`persist()` 会弹权限请求
+
+于是 `useHistory` 里：`requestPersistentStorage()` 先 `persisted()` 再 `persist()`
+（已授权还去调会在 Firefox 白弹一次窗），拿到的状态存在模块级的 `storagePersisted`（**origin 级状态**，
+不跟着某个页面的实例走）。
+
+- **请求的时机必须挂在「真的写下了一条」之后**，绝不在页面加载时请求：Firefox 那个权限弹窗凭空冒出来，
+  用户既不知道是谁要的、也想不出为什么要给。刚解析成功、正要记一条历史，才解释得通
+- 页面上只读状态用 `refreshPersistedState()`（`persisted()` 是纯查询、不弹窗）
+- **UI 要如实标「已持久化 / 未持久化」**：拿不到授权时嘴上说着永久保存，就是在骗用户
+- 用户手动「清除浏览数据」照样清得掉 —— 那是明确意图，不该也不能拦
+- 条数上限不做成完全不封顶：迟早有人攒到几万条，光渲染就卡（列表也因此加了 `max-h-96` 滚动）
 
 ## 踩过的坑（通用）
 

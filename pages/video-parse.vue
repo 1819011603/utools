@@ -369,12 +369,34 @@
     <!-- 历史 -->
     <UCard v-if="parseHistory.length">
       <template #header>
-        <div class="flex items-center justify-between">
-          <span class="font-medium">解析历史</span>
-          <UButton size="xs" variant="ghost" color="red" @click="clearAllHistory">清空</UButton>
+        <div class="flex items-center justify-between gap-2">
+          <span class="font-medium">
+            解析历史
+            <span class="font-normal text-xs text-gray-400">· {{ parseHistory.length }} 条</span>
+          </span>
+          <div class="flex items-center gap-2">
+            <!-- 「永久保存」得说得起来：能不能永久取决于浏览器给不给持久化授权，
+                 拿不到就如实标出来（Safari 尤其现实：7 天不来就清，而它压根没有这个 API） -->
+            <UBadge
+              v-if="storagePersisted === true"
+              color="green" variant="subtle" size="xs"
+              title="浏览器已授予持久化存储：磁盘吃紧时不会被自动清掉。手动「清除浏览数据」仍会清"
+            >
+              已持久化
+            </UBadge>
+            <UBadge
+              v-else-if="storagePersisted === false"
+              color="amber" variant="subtle" size="xs"
+              title="浏览器没给持久化授权：磁盘吃紧时可能被清；Safari 上 7 天不访问就会清。把本站加为书签/添加到主屏幕能提高授权几率"
+            >
+              未持久化
+            </UBadge>
+            <UButton size="xs" variant="ghost" color="red" @click="clearAllHistory">清空</UButton>
+          </div>
         </div>
       </template>
-      <div class="space-y-1">
+      <!-- 上限提到 2000 条，撑开卡片就没法看了 → 限高滚动 -->
+      <div class="space-y-1 max-h-96 overflow-y-auto">
         <div
           v-for="(h, i) in parseHistory"
           :key="i"
@@ -594,7 +616,12 @@ const playEmbed = async (i: number) => {
 // 已探明不给直链的线路（本次解析内记忆），置灰避免用户反复去点
 const deadLines = ref(new Set<number>())
 
-const { addToHistory, getHistory, clearHistory } = useHistory<{ url: string; title?: string }>('video-parse')
+// 解析历史要「永久保存」：条数上限从默认 50 提到 2000（一条只有 ~120 字节，2000 条也就 240KB，
+// 对着 256MB 的总量护栏毫无压力）。不做成完全不封顶——那样迟早会有人的历史攒到几万条，
+// 光渲染就卡，而这条列表的实际用途是「翻回最近看过的片子」。
+// 真正决定它能活多久的不是这个数字，而是 storagePersisted（见 useHistory 的 requestPersistentStorage）。
+const { addToHistory, getHistory, clearHistory, storagePersisted, refreshPersistedState }
+  = useHistory<{ url: string; title?: string }>('video-parse', { maxItems: 2000 })
 const parseHistory = ref(getHistory())
 
 const formatWhen = (ts: number) => new Date(ts).toLocaleString('zh-CN', { hour12: false })
@@ -978,6 +1005,8 @@ onMounted(() => {
   window.addEventListener('keydown', onKeydown)
   document.addEventListener('fullscreenchange', onFullscreenChange)
   userRules.value = loadUserParseRules()
+  // 只查不求：`persisted()` 是纯查询，不会弹权限窗（真正的请求在写入历史时才发，见 useHistory）
+  void refreshPersistedState()
   embedSandbox.value = localStorage.getItem(EMBED_SANDBOX_KEY) === '1'
   // 支持 /video-parse?url=…&line=N 直接带地址进来自动解析
   const q = parseQueryParams()

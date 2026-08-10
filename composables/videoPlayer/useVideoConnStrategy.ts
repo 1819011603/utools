@@ -232,12 +232,17 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
    * 探测顺手下载好的 m3u8 原文，交给引擎的 pLoader 直接喂 hls.js（省一次 RTT）。
    * 按**完整请求 URL** 存，一次性——见 useVideoEngine.createHlsPlaylistLoader 里的理由。
    */
-  let seededManifest: { url: string; text: string } | null = null
-  const takeSeededManifest = (url: string): string | null => {
+  let seededManifest: { url: string; finalUrl: string; text: string } | null = null
+  /**
+   * 返回原文 + **重定向后的最终地址**。后者必须一起给：hls.js 拿 `response.url` 当基准还原
+   * 清单里的相对分片 URI，真实 XHR 给它的恒是最终地址。只给请求地址会把分片指到错的机器上
+   *（实测 ncat22 的清单 302 换 IP 换端口，表现是「分片全 200、解码持续失败」）。
+   */
+  const takeSeededManifest = (url: string): { text: string; finalUrl: string } | null => {
     if (!seededManifest || !url || seededManifest.url !== url) return null
-    const text = seededManifest.text
+    const hit = { text: seededManifest.text, finalUrl: seededManifest.finalUrl }
     seededManifest = null
-    return text
+    return hit
   }
 
   /** 结论 → 生效（或退回阶梯）。runProbe 与「用预热结果」两处共用 */
@@ -246,7 +251,7 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     // 这一份原文只对紧接着的那一发加载有效（同一个完整 URL）。
     // 结论没结论（degraded → 走阶梯）时也照存：阶梯可能正好落在同一条通道上，命中就赚一次
     seededManifest = r.manifestText && r.manifestRequestUrl
-      ? { url: r.manifestRequestUrl, text: r.manifestText }
+      ? { url: r.manifestRequestUrl, finalUrl: r.manifestFinalUrl || r.manifestRequestUrl, text: r.manifestText }
       : null
     notifyProbeVerdict(r, url)
     const cfg = resolveConnConfig(r, selfOriginOf(url))

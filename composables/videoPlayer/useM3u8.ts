@@ -29,7 +29,7 @@ export function useM3u8(getProxyUrl: (url: string) => string) {
   // 带出去就能让 hls.js 少拉一遍同一个 URL（见 ProbeResult.manifestText）
   const fetchM3u8Manifest = async (
     m3u8Url: string, signal?: AbortSignal,
-  ): Promise<{ manifest: any; baseUrl: string; text: string; requestUrl: string }> => {
+  ): Promise<{ manifest: any; baseUrl: string; text: string; requestUrl: string; finalUrl: string }> => {
     const proxyUrl = m3u8Url.startsWith('/api/proxy') ? m3u8Url : getProxyUrl(m3u8Url)
     const res = await fetch(proxyUrl, { signal, referrerPolicy: 'no-referrer' })
     if (!res.ok) throw new Error(`获取 M3U8 失败: ${res.status}`)
@@ -47,7 +47,10 @@ export function useM3u8(getProxyUrl: (url: string) => string) {
     const parser = new M3u8Parser()
     parser.push(text)
     parser.end()
-    return { manifest: parser.manifest as any, baseUrl, text, requestUrl: proxyUrl }
+    // requestUrl = 我们请求的那个地址（用来跟 hls.js 的 context.url 比对）；
+    // finalUrl   = 重定向之后的地址（hls.js 用它当基准还原相对分片 URI）。两者可能不同，
+    // 实测 ncat22 的清单会 302 到另一个 IP + 另一个端口，混用会把分片指到错的机器上。
+    return { manifest: parser.manifest as any, baseUrl, text, requestUrl: proxyUrl, finalUrl: actualUrl }
   }
 
   const pickBestVariant = (manifest: any): any | null => {
