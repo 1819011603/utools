@@ -437,8 +437,11 @@ export function useVideoEngine(deps: VideoEngineDeps) {
 
     isVideoLoaded.value = true
     // 只有真重建了元素才需要等它挂载。复用时元素一直在 DOM 里，这 50ms 是白等——
-    // 而它落在切集的关键路径上，每切一集都赔一次
-    if (!reuseEl) {
+    // 而它落在切集的关键路径上，每切一集都赔一次。
+    // `!videoEl.value` 那半边是兜底：判定「可复用」是在 await 可达性探测**之前**做的，
+    // 那期间出错路径可能把 isVideoLoaded 关掉、Stage 连同 <video> 一起卸掉，
+    // 这时候还是得等它挂回来，而不是当场抛「视频元素未初始化」。
+    if (!reuseEl || !videoEl.value) {
       await nextTick()
       await new Promise(resolve => setTimeout(resolve, 50))
     }
@@ -509,11 +512,23 @@ export function useVideoEngine(deps: VideoEngineDeps) {
       xhrSetup: (xhr: XMLHttpRequest) => { xhr.withCredentials = false },
     })
 
-    // 窄口重新上膛：到这一刻才真正开始要分片。探测/manifest 那 1-2s 不该算进窄口的寿命
-    beginStartupNarrow()
-    hls.loadSource(finalUrl)
-    hls.attachMedia(videoEl.value)
+    /**
+     * 字幕默认不出。hls.js 的 `subtitleDisplay` 默认为真，清单里带字幕轨时它会自动选一条并渲染，
+     * 于是画面上凭空多出一层字幕——而本播放器压根没有字幕开关，用户只能问「这怎么关」（实测被问到）。
+     * 源站带的字幕多半还硬编码在画面里，这一层纯属重叠。
+     * 真要字幕就用浏览器自带的字幕菜单，不在这里造一套 UI。
+     * 注意它是**实例属性**不是构造配置，写进 new Hls({...}) 里 tsc 直接报未知属性。
+     */
+    hls.subtitleDisplay = false
 
+    /**
+     * **事件必须在 loadSource 之前登记**（hls.js 官方也是这么建议的）。
+     *
+     * 原来是「loadSource → attachMedia → 然后才 hls.on(...)」，靠的是「网络请求总是异步的、
+     * 事件不可能在这几行之内就派发」。而 pLoader 命中探测下载好的清单时是**同步**回调的，
+     * 于是 MANIFEST_LOADED/MANIFEST_PARSED 在 `loadSource()` 里就派发完了——
+     * 那时还没有人订阅，`autoPlayHook` 一辈子不会被调，画面永远停在「加载中…」（踩过）。
+     */
     hls.on(HlsLib.Events.MANIFEST_PARSED, (_, data) => {
       console.log('HLS manifest 解析完成，画质数:', data.levels.length)
       markDataReceived()
@@ -595,6 +610,19 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     })
 
     hls.on(HlsLib.Events.LEVEL_SWITCHED, () => updateHlsStats())
+
+    // 全部事件登记完毕，这才开始加载（见上面 MANIFEST_PARSED 处的说明）。
+    // 窄口在这里重新上膛：到这一刻才真正开始要分片，前面探测/manifest 那 1-2s 不该算进它的寿命
+    beginStartupNarrow()
+    /**
+     * **先 attachMedia 再 loadSource**。顺序反了在 pLoader 命中时会整个播不起来：
+     * 那一发清单是同步返回的，于是 `loadSource()` 一行之内就把清单解析完并开始拉分片，
+     * 而此时 `<video>` 还没 attach、MediaSource 压根不存在——分片下下来无处可 append，
+     * 表现是「分片一个接一个 200，缓冲恒 0，画面一直转圈」（踩过）。
+     * 这也是 hls.js 文档里给的标准顺序，异步那条路上同样更稳。
+     */
+    hls.attachMedia(videoEl.value)
+    hls.loadSource(finalUrl)
   }
 
   const loadNativeVideo = async (url: string) => {
@@ -621,26 +649,45 @@ export function useVideoEngine(deps: VideoEngineDeps) {
    * 而真正加载时只有 manifestOnly 才带，两者不同就说明内容不同（服务端会不会重写分片 URI），
    * 喂错了会让 hls.js 拿到一份分片指向错地方的清单。宁可 miss。
    * 一次性：用掉即清，避免播到一半 hls.js 重载 level 时拿到一份陈旧清单。
+   *
+   * **回调必须延到下一个宏任务，绝不能同步回**。同步回等于在 `loadSource()` 这一行之内
+   * 把 MANIFEST_LOADED / MANIFEST_PARSED 全派发完，而此时 `attachMedia` 建的 MediaSource
+   * 还没等到异步的 `sourceopen`（MEDIA_ATTACHED 尚未派发）——hls.js 从这个状态起步会
+   * 「分片一个接一个 200、缓冲恒 0、画面一直转圈」（实测 A/B 确认：关掉复用立刻能播）。
+   * 让它像一个「快得离谱的网络请求」那样异步返回，行为就和原来完全一致，
+   * 而省下的是一整个 RTT（几十到几百毫秒），一个宏任务的代价可以忽略。
    */
   const createHlsPlaylistLoader = (BaseLoader: any) => {
     return class ProbeSeededPlaylistLoader extends BaseLoader {
+      private seedTimer: ReturnType<typeof setTimeout> | null = null
+
       load(context: any, config: any, callbacks: any): void {
         const seeded = conn.takeSeededManifest(context?.url)
-        if (seeded) {
+        if (!seeded) { super.load(context, config, callbacks); return }
+        const t = performance.now()
+        this.seedTimer = setTimeout(() => {
+          this.seedTimer = null
+          if (this.stats?.aborted) return
           const stats = this.stats ?? {}
-          const t = performance.now()
           // hls.js 只读这几个字段来算带宽/耗时；给一个自洽的最小集即可
-          stats.loading = { start: t, first: t, end: t }
+          stats.loading = { start: t, first: performance.now(), end: performance.now() }
           stats.parsing = { start: 0, end: 0 }
           stats.loaded = stats.total = seeded.length
-          stats.aborted = false
           stats.retry = 0
           stats.chunkCount = 1
           console.log('用探测已下载的 manifest，省掉一次请求:', context.url)
           callbacks.onSuccess({ data: seeded, url: context.url }, stats, context, null)
-          return
-        }
-        super.load(context, config, callbacks)
+        }, 0)
+      }
+
+      abort(): void {
+        if (this.seedTimer) { clearTimeout(this.seedTimer); this.seedTimer = null }
+        super.abort()
+      }
+
+      destroy(): void {
+        if (this.seedTimer) { clearTimeout(this.seedTimer); this.seedTimer = null }
+        super.destroy()
       }
     }
   }

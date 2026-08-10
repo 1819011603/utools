@@ -10,19 +10,34 @@ import type { VideoConnStrategy } from './useVideoConnStrategy'
 import type { VideoPlaylistCtl } from './useVideoPlaylistCtl'
 
 /**
- * 起播预缓冲：缓冲够 N 秒即起播，剩下的交给并行预取在播放中补齐；
+ * 起播预缓冲：缓冲够了就起播，剩下的交给并行预取在播放中补齐；
  * 慢站最多等 AUTOPLAY_MAX_WAIT_MS 兜底避免卡死。非 HLS 固定等 2s。
  *
- * **门槛分两档**，因为用户的预期完全不同：
- * · 首次冷启动（刚点开页面，人还在看别的）—— 多等两秒攒厚一点划算，仍用 6s；
- * · 定位类起播（切集 / 拖进度 / 重载）—— 画面停着，每多一秒都在盯转圈。
- *   2.5s 足够 hls.js 起播，后面由预取追；真追不上还有抗卡环兜。
- *   实测这一档配合起播窄口（见 useVideoEngine.beginStartupNarrow）才有意义：
- *   不收窄并发的话，2.5s 这个量本身就被 6~12 条并行下载拖慢了。
+ * **门槛的单位是「能播多少秒」，不是「缓冲了多少秒」**——两者差一个倍速。
+ * 3x 下缓冲 6 秒只够播 2 秒，1x 下缓冲 2 秒就够播 2 秒；拿固定秒数当门槛，
+ * 等于在高倍速下过早起播（马上再卡）、在 1x 下过晚起播（干等）。所以一律 × 倍速。
+ *
+ * 两档只差「要几秒的播放量」：
+ * · 定位类起播（切集 / 拖进度 / 重载）—— 画面停着，每多一秒都在盯转圈 → 够播 2 秒就走，
+ *   后面由预取追；真追不上还有抗卡环兜。
+ * · 首次冷启动（刚点开页面，人还在看别的）—— 多等一会儿攒厚一点划算 → 至少 6 秒缓冲，
+ *   高倍速下同样按「够播 2 秒」放宽（3x 时两者正好都是 6s）。
+ *
+ * 实测这两档配合起播窄口（见 useVideoEngine.beginStartupNarrow）才有意义：
+ * 不收窄并发的话，门槛要的这点量本身就被 6~12 条并行下载拖慢了。
  */
-const AUTOPLAY_BUFFER_TARGET = 6
-const AUTOPLAY_BUFFER_TARGET_RELOCATE = 2.5
+const AUTOPLAY_PLAYABLE_SECS = 2      // 「够播几秒」就可以出画面
+const AUTOPLAY_COLD_MIN_BUFFER = 6    // 冷启动的缓冲下限（1x 时就是它）
+const AUTOPLAY_MIN_BUFFER = 1         // 再快也得有这么多，否则等于没缓冲就播
 const AUTOPLAY_MAX_WAIT_MS = 8000
+
+/** 起播门槛（秒缓冲）。relocating = 切集/拖进度/重载那一档 */
+const autoPlayTarget = (rate: number, relocating: boolean): number => {
+  const byRate = AUTOPLAY_PLAYABLE_SECS * Math.max(1, rate)
+  return relocating
+    ? Math.max(AUTOPLAY_MIN_BUFFER, byRate)
+    : Math.max(AUTOPLAY_COLD_MIN_BUFFER, byRate)
+}
 /**
  * 起播就绪的轮询间隔。原来是 300ms 固定轮询 + 起手先空等 500ms——
  * 那 500ms 是纯自造延迟（每次切集都赔一次），而 300ms 的粒度意味着「其实早就够了」
@@ -98,13 +113,14 @@ export function useVideoEvents(deps: VideoEventsDeps) {
     // 定位类起播（切集/拖进度/重载）走低门槛。engine 在 loadVideo 里置位，这里只读一次：
     // 后面 endStartupNarrow 会把它清掉，读晚了会退回 6s 那一档
     const relocating = engine.isRelocatingStart()
-    const target = relocating ? AUTOPLAY_BUFFER_TARGET_RELOCATE : AUTOPLAY_BUFFER_TARGET
 
     const tryPlay = () => {
       const video = videoEl.value
       if (!video) { delayedPlayTimer = null; return }
       const ahead = engine.getAheadBuffered(video)
       const waited = performance.now() - startTs
+      // 门槛每一拍现算：倍速可能在等待期间被自愈环改掉（尤其「自动最佳倍速」刚测出带宽那一下）
+      const target = autoPlayTarget(playbackRate.value, relocating)
       const ready = !isHls.value
         ? waited >= 2000
         : ahead >= target || waited >= AUTOPLAY_MAX_WAIT_MS
@@ -113,7 +129,8 @@ export function useVideoEvents(deps: VideoEventsDeps) {
         return
       }
       delayedPlayTimer = null
-      console.log(`开始自动播放（预缓冲 ${ahead.toFixed(1)}s / 门槛 ${target}s，等待 ${(waited / 1000).toFixed(1)}s）`)
+      console.log(`开始自动播放（预缓冲 ${ahead.toFixed(1)}s / 门槛 ${target.toFixed(1)}s @${playbackRate.value}x`
+        + `，等待 ${(waited / 1000).toFixed(1)}s）`)
       // 能播了 → 解除起播窄口，把并发交回闭环去爬满（窄口自己也有 2.5s 兜底，
       // 但那条是给「第一片迟迟不来」的慢源留的，正常路径应该由这里准时解除）
       engine.endStartupNarrow()
@@ -208,6 +225,14 @@ export function useVideoEvents(deps: VideoEventsDeps) {
     videoEl.value.playbackRate = playbackRate.value
     videoEl.value.volume = volume.value
     videoEl.value.muted = isMuted.value
+
+    // 字幕轨一律先关掉。hls 那边已经 subtitleDisplay: false，但原生轨（MP4 内嵌、
+    // 或已经被加到元素上的 TextTrack）不受它管，仍会自己 showing。
+    // 只在起播这一下关：之后用户从浏览器自带的字幕菜单打开，我们不再去动它。
+    const tracks = videoEl.value.textTracks
+    for (let i = 0; i < tracks.length; i++) {
+      if (tracks[i].mode === 'showing') tracks[i].mode = 'disabled'
+    }
   }
 
   const onVolumeChange = () => {
@@ -318,9 +343,9 @@ export function useVideoEvents(deps: VideoEventsDeps) {
     isBuffering.value = false
     // 立刻在当前位置并行预取（不等 1s 心跳），尽快把目标分片拉下来
     if (isHls.value) engine.primePrefetch()
-    // 落点本来就有缓冲（拖回已看过的段落）→ 立刻解除窄口，别让它白按 2.5s 并发
+    // 落点本来就有缓冲（拖回已看过的段落）→ 立刻解除窄口，别让它白按着并发
     const v = videoEl.value
-    if (v && engine.getAheadBuffered(v) >= AUTOPLAY_BUFFER_TARGET_RELOCATE) engine.endStartupNarrow()
+    if (v && engine.getAheadBuffered(v) >= autoPlayTarget(playbackRate.value, true)) engine.endStartupNarrow()
   }
 
   /**

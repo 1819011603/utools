@@ -139,9 +139,16 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
 
   // ── 指针事件 ──
 
-  /** 控制栏、按钮这些自己有交互的区域不参与手势判定 */
+  /**
+   * 控制栏、按钮这些自己有交互的区域不参与手势判定。
+   *
+   * 除了显式的 `data-no-gesture`，**原生可交互元素一律放过**：漏挂一处标记的代价特别难看——
+   * 点在按钮上却被手势层当成画面双击，直接把人拽进全屏（实测用户报「点上下集就全屏了」）。
+   * 与其指望每个新控件都记得加标记，不如在这里兜住。
+   */
+  const INTERACTIVE = 'button, a, input, select, textarea, [role="button"], [data-no-gesture]'
   const fromControls = (e: PointerEvent) =>
-    !!(e.target as HTMLElement | null)?.closest?.('[data-no-gesture]')
+    !!(e.target as HTMLElement | null)?.closest?.(INTERACTIVE)
 
   const rectOf = (e: PointerEvent) => (e.currentTarget as HTMLElement).getBoundingClientRect()
 
@@ -309,7 +316,7 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
 
   /** 这一发鼠标事件该不该管：控制栏内、触摸补发的合成事件、刚拖过进度 —— 都不管 */
   const mouseIgnored = (e: MouseEvent) =>
-    !!(e.target as HTMLElement | null)?.closest?.('[data-no-gesture]')
+    !!(e.target as HTMLElement | null)?.closest?.(INTERACTIVE)
     || performance.now() - lastTouchAt < 900
     || isLocked.value
     || performance.now() - lastDragEndAt < 300

@@ -47,7 +47,9 @@
       "Bash(python -)",
       "Bash(cp /tmp/tsconfig.check.json ./tsconfig.check.json)",
       "Bash(node_modules/.bin/tsc -p tsconfig.check.json)",
-      "Bash('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --remote-debugging-port=9333 --user-data-dir=/tmp/cdp-profile --headless=new --no-first-run --no-default-browser-check --autoplay-policy=no-user-gesture-required --mute-audio about:blank)"
+      "Bash('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --remote-debugging-port=9333 --user-data-dir=/tmp/cdp-profile --headless=new --no-first-run --no-default-browser-check --autoplay-policy=no-user-gesture-required --mute-audio about:blank)",
+      "Bash(\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --remote-debugging-port=9333 --user-data-dir=/tmp/cdp-profile --headless=new --no-first-run --no-default-browser-check --autoplay-policy=no-user-gesture-required --mute-audio about:blank)",
+      "Bash(export HTTPS_PROXY=http://127.0.0.1:7897)"
     ],
     "ask": [
       "Bash(rm *)",

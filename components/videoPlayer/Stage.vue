@@ -252,21 +252,29 @@
             </button>
 
             <!--
-              上一集在窄屏藏起来：竖屏一行放不下，而「下一集」的使用频率高一个量级。
+              **窄屏也要有「上一集」**。原来是 `hidden sm:block`（竖屏一行放不下就砍它），
+              代价是手机上根本没法往回切集，而且更坑的是：用户会去点「本该有这枚按钮的位置」，
+              那儿是画面本身 → 连点两下正好被手势层判成双击 → 整个进了全屏
+              （用户报「小屏点上下集就全屏了，没法切集」，根因就是这枚按钮不在）。
+              一行放得下：窄屏本来就把音量整组、下载、画中画都收了。
+
               两个按钮在切集期间换成转圈图标：切集要等取址/探测/建流，画面中央那个转圈
               离手指很远，按钮自己不给反馈的话看着就像「点了没用」（于是用户又点一下）。
+              **但绝不能 `:disabled`**：Chrome 不给 disabled 控件派发鼠标事件，那一下会落到
+              容器上被手势层接走 → 又是「点切集结果全屏了」。切集中照样可点，
+              交给 playByIndex 的 latest-wins 排队处理（连点两下就是跳两集，本来就该这样）。
             -->
             <button
               v-if="playlist.length > 1"
-              class="order-1 hidden sm:block p-1.5 rounded-lg text-white transition-all shrink-0"
-              :class="hasPrev && !isSwitching ? 'hover:bg-white/15 active:scale-90' : 'opacity-40 cursor-not-allowed'"
-              :disabled="!hasPrev || isSwitching"
+              class="order-1 p-1 sm:p-1.5 rounded-lg text-white transition-all shrink-0"
+              :class="hasPrev ? 'hover:bg-white/15 active:scale-90' : 'opacity-40 cursor-not-allowed'"
+              :disabled="!hasPrev"
               title="上一集（P）"
               @click="playPrev"
             >
               <UIcon
                 :name="isSwitching ? 'i-heroicons-arrow-path' : 'i-heroicons-backward-solid'"
-                class="w-6 h-6" :class="{ 'animate-spin': isSwitching }"
+                class="w-5 h-5 sm:w-6 sm:h-6" :class="{ 'animate-spin': isSwitching }"
               />
             </button>
             <!--
@@ -276,9 +284,9 @@
             -->
             <button
               v-if="playlist.length > 1"
-              class="order-1 p-1.5 rounded-lg text-white transition-all shrink-0"
-              :class="hasNext && !isSwitching ? 'hover:bg-white/15 active:scale-90' : 'opacity-40 cursor-not-allowed'"
-              :disabled="!hasNext || isSwitching"
+              class="order-1 p-1 sm:p-1.5 rounded-lg text-white transition-all shrink-0"
+              :class="hasNext ? 'hover:bg-white/15 active:scale-90' : 'opacity-40 cursor-not-allowed'"
+              :disabled="!hasNext"
               title="下一集（N）"
               @pointerenter="hasNext && prewarmNextNow()"
               @touchstart.passive="hasNext && prewarmNextNow()"

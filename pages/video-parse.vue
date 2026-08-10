@@ -294,54 +294,43 @@
         <div class="space-y-2">
           <div class="text-sm font-medium text-gray-700 dark:text-gray-300">
             <template v-if="isEmbedLine">选集（共 {{ currentLine?.episodes.length || 0 }} 集，点一集在上面的内嵌播放器里播）</template>
-            <template v-else-if="isLazy">选集（共 {{ currentLine?.episodes.length || 0 }} 集，播到哪集取哪集）</template>
-            <template v-else>选集（{{ resolvedCount }}/{{ currentLine?.episodes.length || 0 }} 解析成功）</template>
+            <template v-else-if="isLazy">选集（共 {{ currentLine?.episodes.length || 0 }} 集，播到哪集取哪集；点一集在新标签播）</template>
+            <template v-else>
+              选集（{{ resolvedCount }}/{{ currentLine?.episodes.length || 0 }} 解析成功；点一集在新标签播，右键复制该集地址）
+            </template>
           </div>
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            <div
-              v-for="(ep, i) in currentLine?.episodes || []"
-              :key="i"
-              class="flex items-center gap-2 p-2 rounded-lg text-sm bg-gray-50 dark:bg-gray-800"
-            >
-              <UIcon
-                :name="epIcon(ep, i)"
-                class="w-4 h-4 shrink-0"
-                :class="epIconClass(ep, i)"
-              />
-              <div class="min-w-0 flex-1">
-                <div class="font-medium truncate">{{ ep.title || `第 ${i + 1} 集` }}</div>
-                <div class="text-xs text-gray-400 truncate">{{ epDesc(ep, i) }}</div>
-              </div>
-              <UButton
-                v-if="ep.videoUrl"
-                size="2xs"
-                variant="ghost"
-                icon="i-heroicons-clipboard"
-                title="复制地址"
-                @click="copyOne(ep.videoUrl)"
-              />
-              <!-- 内嵌线路：换的是上面 iframe 的 src，不去播放器 -->
-              <UButton
-                v-if="isEmbedLine"
-                size="2xs"
-                :variant="i === embedIndex ? 'solid' : 'ghost'"
-                :color="i === embedIndex ? 'violet' : 'gray'"
-                icon="i-heroicons-play"
-                :loading="embedPending === i"
-                :disabled="busy"
-                title="在上面的内嵌播放器里播这一集"
-                @click="playEmbed(i)"
-              />
-              <!-- 按需取址时每一集都能播（地址由播放器现取），不能按 videoUrl 判 -->
-              <UButton
-                v-else-if="ep.videoUrl || isLazy"
-                size="2xs"
-                variant="ghost"
-                icon="i-heroicons-play"
-                :disabled="busy"
-                title="从这一集开始播放（新标签页）"
-                @click="requestPlay(i)"
-              />
+          <!-- 网格排布，与播放器的 PlaylistPanel 同一套：几十集竖着列要滚好几屏，
+               横着摆一眼就能扫到目标集（73 集一屏看完）。
+               代价是每格只放得下集名——单集复制挪到右键，「复制全部地址」在卡片头上 -->
+          <div class="max-h-80 overflow-y-auto p-2 bg-gray-50 dark:bg-gray-800 rounded-lg">
+            <div class="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10 xl:grid-cols-12 gap-2">
+              <button
+                v-for="(ep, i) in currentLine?.episodes || []"
+                :key="i"
+                type="button"
+                :disabled="busy || !epPlayable(ep)"
+                class="rounded text-sm text-center px-2 py-2 truncate transition-colors"
+                :class="[
+                  isEmbedLine && i === embedIndex
+                    ? 'bg-violet-500 text-white font-medium'
+                    : epPlayable(ep)
+                      ? 'bg-white dark:bg-gray-700 hover:bg-violet-100 dark:hover:bg-gray-600 cursor-pointer'
+                      : 'bg-white/50 dark:bg-gray-700/40 text-gray-400 cursor-not-allowed',
+                  busy ? 'opacity-60' : '',
+                ]"
+                :title="epTip(ep, i)"
+                @click="epClick(ep, i)"
+                @contextmenu.prevent="ep.videoUrl && copyOne(ep.videoUrl)"
+              >
+                <!-- 内嵌线路点一集要现去取地址（好几秒），转圈就画在那一格里，
+                     否则点完毫无反应，只能盯着上面的播放器猜 -->
+                <UIcon
+                  v-if="isEmbedLine && embedPending === i"
+                  name="i-heroicons-arrow-path"
+                  class="w-3.5 h-3.5 inline-block mr-1 align-text-bottom animate-spin"
+                />
+                {{ ep.title || `第 ${i + 1} 集` }}
+              </button>
             </div>
           </div>
         </div>
@@ -523,22 +512,30 @@ const onKeydown = (e: KeyboardEvent) => {
   toggleEmbedFullscreen()
 }
 
-/** 选集行的状态呈现。三种线路（直链 / 按需取址 / 内嵌）各一套说法，写成内联三元没法看 */
-const epIcon = (ep: ParsedEpisode, i: number) => {
-  if (ep.videoUrl) return 'i-heroicons-check-circle'
-  if (isEmbedLine.value) return i === embedIndex.value ? 'i-heroicons-play-circle' : 'i-heroicons-tv'
-  return isLazy.value ? 'i-heroicons-bolt' : 'i-heroicons-x-circle'
+/**
+ * 选集格子的三件事：能不能点、点了干什么、悬浮说什么。
+ *
+ * 三种线路（直链 / 按需取址 / 内嵌）语义各不相同，写成内联三元没法看：
+ * · 内嵌线路每一集都能点（地址点了才现取）
+ * · 按需取址同理，**不能按 `videoUrl` 判**——列表里存的是占位地址
+ * · 只有普通直链线路才是「没解析出地址就点不动」
+ */
+const epPlayable = (ep: ParsedEpisode) =>
+  isEmbedLine.value || isLazy.value || !!ep.videoUrl
+
+const epClick = (ep: ParsedEpisode, i: number) => {
+  if (busy.value || !epPlayable(ep)) return   // disabled 之外再兜一道：键盘回车也会触发 click
+  // 内嵌线路换的是上面那个 iframe 的 src，不去播放器
+  if (isEmbedLine.value) void playEmbed(i)
+  else requestPlay(i)
 }
-const epIconClass = (ep: ParsedEpisode, i: number) => {
-  if (ep.videoUrl) return 'text-green-500'
-  if (isEmbedLine.value) return i === embedIndex.value ? 'text-violet-500' : 'text-blue-400'
-  return isLazy.value ? 'text-blue-400' : 'text-gray-400'
-}
-const epDesc = (ep: ParsedEpisode, i: number) => {
-  if (ep.videoUrl) return ep.videoUrl
-  if (ep.error) return ep.error
-  if (isEmbedLine.value) return i === embedIndex.value ? '正在内嵌播放' : '点右侧按钮内嵌播放'
-  return isLazy.value ? '播放时现取地址' : '未解析'
+
+const epTip = (ep: ParsedEpisode, i: number) => {
+  const name = ep.title || `第 ${i + 1} 集`
+  if (isEmbedLine.value) return `${name} · ${i === embedIndex.value ? '正在内嵌播放' : '点一下在上面的内嵌播放器里播'}`
+  if (ep.videoUrl) return `${name} · ${ep.videoUrl}`   // 右键能复制的就是这条
+  if (ep.error) return `${name} · ${ep.error}`
+  return `${name} · ${isLazy.value ? '播放时现取地址' : '未解析出地址'}`
 }
 
 /**

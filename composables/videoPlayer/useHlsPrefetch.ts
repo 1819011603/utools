@@ -57,7 +57,20 @@ export interface StrategySnapshot {
 }
 
 const MAX_CONN = 6               // 浏览器同 host 连接上限（HTTP/1.1，硬顶）
-const LOW_BUFFER_MAX_CONN = 3    // 不可并行(每IP硬顶)且吃紧时最多并发：集中带宽拿紧邻分片，别被远处预取抢占
+/**
+ * 卡的时候的并发上限：濒卡 2 条、吃紧 3 条。**不看「聚合能不能随线程增长」**。
+ *
+ * 原来这条只在「每 IP 硬顶（聚合不随线程增长）」时才生效，理由是「可并行时低缓冲更该多开线程
+ * 做满聚合」。实测那是错的：截图里源站被判「差」档（concurrencyFloor=6）、标着「可并行」，
+ * 于是卡到已缓冲 0.3s 时仍在跑 6 线程——而聚合速度 2.10 MB/s（16.8 Mbps）是视频码率
+ * 2.1 Mbps 的八倍。**带宽压根不是瓶颈，摊薄才是**：6 条线程在下第 2..6 片，
+ * 而决定「现在能不能播」的只有紧邻播放头那一两片，它还得跟另外 5 条抢同 host 那 6 个连接槽。
+ * 越卡越多开，那一片就越晚到。这与起播窄口（NARROW_CONN）是同一条道理，只是发生在播放中途。
+ *
+ * 它排在 floorConn 之后生效，所以能压过档位给的并发下限——「差」档那个 6 正是要压的对象。
+ */
+const PANIC_MAX_CONN = 2
+const LOW_BUFFER_MAX_CONN = 3
 /**
  * 起播窄口内的并发（见 opts.isStartupNarrow）。
  *
@@ -364,10 +377,12 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
       return narrow
     }
     let target = paused ? hostConcurrencyCap : Math.min(hostConcurrencyCap, Math.max(floorConn(), ctrlConn))
-    // 仅当「聚合不随线程增长」(每 IP 硬顶) 且吃紧时才收敛到 3 线程：此时多开连接只是分摊同一份带宽，
-    // 集中拿播放头紧邻分片更快恢复。可并行(每连接限速)时相反——低缓冲更该多开线程做满聚合，不收敛。
-    if (cachedAhead !== undefined && cachedAhead < tier().lowSecs && !getAggregateScales()) {
-      target = Math.min(target, LOW_BUFFER_MAX_CONN)
+    // 卡的时候收敛到 2~3 条，把连接和带宽让给紧邻播放头那一片（理由见 PANIC_MAX_CONN）。
+    // 放在最后，好压过档位的 concurrencyFloor（「差」档给的是 6）。
+    if (cachedAhead !== undefined) {
+      const t = tier()
+      if (cachedAhead < t.panicSecs) target = Math.min(target, PANIC_MAX_CONN)
+      else if (cachedAhead < t.lowSecs) target = Math.min(target, LOW_BUFFER_MAX_CONN)
     }
     refreshStrategy(target)
     return target
