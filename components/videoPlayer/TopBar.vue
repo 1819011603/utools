@@ -26,6 +26,30 @@
         </div>
       </div>
 
+      <!--
+        时间 + 电量，**只在全屏出**：小窗时系统状态栏就在上面，再画一份纯属重复。
+        位置放在「选集」左边而不是最右——右上角是拇指最难够到的地方，那儿该留给要点的东西
+      -->
+      <div v-if="isFullscreen" class="flex items-center gap-2 shrink-0 text-white/85 tabular-nums">
+        <span class="text-sm font-medium drop-shadow">{{ clock }}</span>
+        <!-- 电量画成一枚小电池而不是写个数字：形状本身就传达「还剩多少」，扫一眼不用读数。
+             拿不到电量的浏览器（Safari/Firefox）整块不渲染 -->
+        <span v-if="batteryLevel !== null" class="flex items-center gap-1">
+          <span class="flex items-center">
+            <span class="relative w-6 h-3 rounded-[3px] ring-1 ring-white/60 p-[1.5px] flex items-center">
+              <span
+                class="h-full rounded-[1px] transition-all duration-700"
+                :class="batteryLevel <= 20 && !charging ? 'bg-rose-400' : 'bg-white'"
+                :style="{ width: Math.max(8, batteryLevel) + '%' }"
+              />
+              <UIcon v-if="charging" name="i-heroicons-bolt-solid" class="absolute inset-0 m-auto w-2.5 h-2.5 text-amber-300 drop-shadow" />
+            </span>
+            <span class="w-[2px] h-1.5 rounded-r-[1px] bg-white/60" />
+          </span>
+          <span class="text-xs">{{ batteryLevel }}%</span>
+        </span>
+      </div>
+
       <button
         v-if="playlist.length > 1"
         class="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium shrink-0 transition-all active:scale-95"
@@ -52,6 +76,10 @@ const {
   showEpisodes, isFullscreen, controlsVisible,
   toggleFullscreen, keepControlsAlive,
 } = useVideoPlayerCtx()
+
+// 时钟/电量**不进 ctx**：它只服务这一个组件，进 ctx 就得跟别的模块抢键名
+// （「各模块返回的键名不能重复」那条约束），而它跟播放逻辑没有半点关系
+const { clock, batteryLevel, charging } = useDeviceStatus(isFullscreen)
 </script>
 
 <style scoped>
