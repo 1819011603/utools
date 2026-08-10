@@ -404,8 +404,27 @@
           @click="inputUrl = h.data.url; startResolve()"
         >
           <UIcon name="i-heroicons-clock" class="w-4 h-4 shrink-0 text-gray-400" />
+          <!-- 站点徽标：优先规则表里的中文站名，认不出（规则删了/改了 pattern）才退回裸域名。
+               光有片名认不出是哪来的——同一部片在好几个站都有，而各站的线路和防盗链完全不同 -->
+          <UBadge :color="historySite(h.data.url).known ? 'violet' : 'gray'" variant="subtle" size="xs" class="shrink-0">
+            {{ historySite(h.data.url).label }}
+          </UBadge>
           <span class="flex-1 truncate">{{ h.data.title || h.data.url }}</span>
           <span class="text-xs text-gray-400 shrink-0">{{ formatWhen(h.timestamp) }}</span>
+          <!-- 回原网页。**必须 @click.stop**：外层那一整行点了就重新解析，
+               不拦住的话点这个图标会既开新标签又跑一遍解析 -->
+          <UButton
+            :to="h.data.url"
+            target="_blank"
+            rel="noopener"
+            size="2xs"
+            variant="ghost"
+            color="gray"
+            icon="i-heroicons-arrow-top-right-on-square"
+            title="在新标签页打开原网页"
+            class="shrink-0"
+            @click.stop
+          />
         </div>
       </div>
     </UCard>
@@ -441,6 +460,17 @@ const matchedRule = computed(() => {
   if (!u) return null
   return matchParseSite(u, userRules.value)
 })
+
+/**
+ * 历史条目的站点标签。走 `matchParseSite`（跟输入框那个徽标同一个来源，站名只该有一处），
+ * 认不出就退回裸域名——历史能存 2000 条、跨很久，期间规则可能被删掉或改了 pattern，
+ * 那时显示域名也比显示空白有用。`known` 只用来决定徽标颜色。
+ */
+const historySite = (url: string): { label: string; known: boolean } => {
+  const hit = matchParseSite(url, userRules.value)
+  if (hit) return { label: hit.name, known: true }
+  try { return { label: new URL(url).hostname.replace(/^www\./, ''), known: false } } catch { return { label: '未知来源', known: false } }
+}
 
 const currentLine = computed(() => result.value?.lines[result.value.activeLineIndex] ?? null)
 const resolvedEpisodes = computed(() => (currentLine.value?.episodes || []).filter(e => e.videoUrl))
