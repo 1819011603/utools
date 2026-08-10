@@ -23,7 +23,7 @@ import type { VideoPlaylistCtl } from './useVideoPlaylistCtl'
  * · 首次冷启动（刚点开页面，人还在看别的）—— 多等一会儿攒厚一点划算 → 至少 6 秒缓冲，
  *   高倍速下同样按「够播 2 秒」放宽（3x 时两者正好都是 6s）。
  *
- * 实测这两档配合起播窄口（见 useVideoEngine.beginStartupNarrow）才有意义：
+ * 实测这两档配合「存货不够就少开线程」（见 useHlsPrefetch 的 SAFE_WALL_SECS）才有意义：
  * 不收窄并发的话，门槛要的这点量本身就被 6~12 条并行下载拖慢了。
  */
 const AUTOPLAY_PLAYABLE_SECS = 2      // 「够播几秒」就可以出画面
@@ -111,7 +111,7 @@ export function useVideoEvents(deps: VideoEventsDeps) {
     isBuffering.value = true
     const startTs = performance.now()
     // 定位类起播（切集/拖进度/重载）走低门槛。engine 在 loadVideo 里置位，这里只读一次：
-    // 后面 endStartupNarrow 会把它清掉，读晚了会退回 6s 那一档
+    // 起播成功后 clearRelocating 会把它清掉，读晚了会退回冷启动那一档
     const relocating = engine.isRelocatingStart()
 
     const tryPlay = () => {
@@ -131,9 +131,6 @@ export function useVideoEvents(deps: VideoEventsDeps) {
       delayedPlayTimer = null
       console.log(`开始自动播放（预缓冲 ${ahead.toFixed(1)}s / 门槛 ${target.toFixed(1)}s @${playbackRate.value}x`
         + `，等待 ${(waited / 1000).toFixed(1)}s）`)
-      // 能播了 → 解除起播窄口，把并发交回闭环去爬满（窄口自己也有 2.5s 兜底，
-      // 但那条是给「第一片迟迟不来」的慢源留的，正常路径应该由这里准时解除）
-      engine.endStartupNarrow()
       engine.clearRelocating()
       isBuffering.value = false
       void attemptPlay(0)
@@ -335,17 +332,13 @@ export function useVideoEvents(deps: VideoEventsDeps) {
       // 不清空已完成缓存：seek 回跳/来回拖动时直接命中内存，不重新下载（TTL+LRU 兜底）
       engine.abortAllPrefetches()
       engine.prefetchInfo.value.pending = 0
-      // 用户真跳了位置 = 又一次「定位」：新位置前方缓存归零，闭环会照常想拉满并发，
-      // 又变成「12 条去下第 2..12 片，而播放头要的那一片在排队」。先收窄，能播了再放开。
-      // 落点已缓存时窄口几乎立刻被下面的解除条件撤掉，不影响「拖到已看过的地方秒回」。
-      engine.beginStartupNarrow()
+      // 收窄并发这件事不用在这里做：新位置前方缓存归零 → 「存货够播几秒」自然为 0，
+      // useHlsPrefetch 的 SAFE_WALL_SECS 那条规则会立刻把线程压到 2~3，
+      // 等补到够播 5 秒再自己放开。拖回已缓存段落时存货本来就足，一条也不压。
     }
     isBuffering.value = false
     // 立刻在当前位置并行预取（不等 1s 心跳），尽快把目标分片拉下来
     if (isHls.value) engine.primePrefetch()
-    // 落点本来就有缓冲（拖回已看过的段落）→ 立刻解除窄口，别让它白按着并发
-    const v = videoEl.value
-    if (v && engine.getAheadBuffered(v) >= autoPlayTarget(playbackRate.value, true)) engine.endStartupNarrow()
   }
 
   /**

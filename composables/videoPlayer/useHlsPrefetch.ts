@@ -28,22 +28,15 @@ export interface HlsPrefetchOptions {
   // 预取以 max(currentTime, 此值) 为起点——起播即在正确位置全力并行预取，既不浪费带宽下开头，
   // 也不会退化成「只有 hls.js 串行下 1 片」。播放头到位/用户跳转后返回 0（改用 currentTime）。默认 0。
   getStartPosition?: () => number
+  // 「存货保险线」（秒，墙钟）：缓存够播的秒数低于它就把预取线程收敛到 2~3（见 SAFE_WALL_SECS）。
+  // 由「HLS 配置」里的 safeWallSecs 提供，不设则用兜底值。
+  getSafeWallSecs?: () => number
   // 连接 lane：返回同一分片在「不同 origin」下的多个 URL（如 [直连CDN, /api/proxy]）。
   // 浏览器 per-origin 只给 6 条连接，分属两个 origin 即可并行 ~12 条。默认单 lane（当前 getProxyUrl 结果）。
   getLaneUrls?: (url: string) => string[]
   // 当前服务器档位参数（好/中/差预设 + 页面覆盖）。不设则用中档兜底。
   // 抗卡阈值(panicSecs/lowSecs)、安全系数、对冲/跳片超时、并发下限、预取深度全从这里读。
   getTierParams?: () => TierParams
-  /**
-   * 是否处于「起播窄口」——刚定位、还一帧都没出来的那几百毫秒（见 useVideoEngine.beginStartupNarrow）。
-   *
-   * 这一段的唯一目标是**让 hls.js 正在等的那一片尽快到**，而不是把后面预满。
-   * 不区分的话结果是反的：`stepControl` 见缓存少就把并发拉满、`getAdaptivePrefetchCount`
-   * 又因为还没 play() 而恒走 `paused → 顶格`，于是 6~12 条连接全去下第 2..12 片，
-   * 而浏览器同 host 只给 6 条——真正决定「能不能播」的第一片排在队尾，带宽还被瓜分。
-   * 越想快，第一片越慢，等待时间也就忽长忽短（实测切集/拖进度都吃这个）。默认恒 false。
-   */
-  isStartupNarrow?: () => boolean
 }
 
 export interface StrategySnapshot {
@@ -58,39 +51,47 @@ export interface StrategySnapshot {
 
 const MAX_CONN = 6               // 浏览器同 host 连接上限（HTTP/1.1，硬顶）
 /**
- * 卡的时候的并发上限：濒卡 2 条、吃紧 3 条。**不看「聚合能不能随线程增长」**。
+ * 「手上的存货还够播几秒」不足时的并发上限：< SAFE_WALL_SECS 收到 3 条，< 2 秒再收到 2 条。
  *
- * 原来这条只在「每 IP 硬顶（聚合不随线程增长）」时才生效，理由是「可并行时低缓冲更该多开线程
- * 做满聚合」。实测那是错的：截图里源站被判「差」档（concurrencyFloor=6）、标着「可并行」，
- * 于是卡到已缓冲 0.3s 时仍在跑 6 线程——而聚合速度 2.10 MB/s（16.8 Mbps）是视频码率
- * 2.1 Mbps 的八倍。**带宽压根不是瓶颈，摊薄才是**：6 条线程在下第 2..6 片，
- * 而决定「现在能不能播」的只有紧邻播放头那一两片，它还得跟另外 5 条抢同 host 那 6 个连接槽。
- * 越卡越多开，那一片就越晚到。这与起播窄口（NARROW_CONN）是同一条道理，只是发生在播放中途。
+ * **判据是墙钟秒数（缓存秒数 ÷ 倍速），不是缓存秒数**——3x 下缓存 6 秒只够播 2 秒。
+ * 与起播门槛（见 useVideoEvents.autoPlayTarget）用的是同一把尺子。
  *
- * 它排在 floorConn 之后生效，所以能压过档位给的并发下限——「差」档那个 6 正是要压的对象。
+ * 为什么存货少反而要少开线程（反直觉，但实测如此）：决定「现在能不能播下去」的只有紧邻
+ * 播放头那一两片，而浏览器同 host 只给 6 个连接槽。多开的每一条都在下更远的分片，
+ * 却要跟那一片抢连接和带宽——**越缺越多开，最需要的那一片反而越晚到**。
+ * 用户截图里就是这么坏的：源站被判「差」档（concurrencyFloor=6）、标着「可并行」，
+ * 卡到已缓冲 0.3s 仍在跑 6 线程，而聚合速度 2.10 MB/s（16.8 Mbps）是码率 2.1 Mbps 的八倍
+ * ——带宽压根不是瓶颈，摊薄才是。
+ *
+ * 这一条统一覆盖三种场景（刚起播 / 刚拖完进度 / 播着播着要卡了）：它们的共同点正是
+ * 「存货不够播 5 秒」。所以不需要另做一个「起播窄口」计时器——那种时间窗口既要上膛又要解除，
+ * 上膛早了会在真正开始要分片之前就烧完（踩过）。
+ *
+ * 它排在 floorConn 之后生效，好压过档位给的并发下限——「差」档那个 6 正是要压的对象。
+ * 注意它只管**预取**：hls.js 正在等的那一片走 fLoader 的对冲竞速（hedgedLoad），
+ * 该抢连接时照样抢，不受这里限制。
+ *
+ * 这条线可在「HLS 配置」里调（`hlsConfig.safeWallSecs`），这里的 5 只是没配置时的兜底。
  */
+const SAFE_WALL_SECS = 5
+/** 濒卡线固定取保险线的 40%（5s → 2s）：跟着一起调，省一个用户看不懂的输入框 */
+const PANIC_WALL_RATIO = 0.4
 const PANIC_MAX_CONN = 2
 const LOW_BUFFER_MAX_CONN = 3
-/**
- * 起播窄口内的并发（见 opts.isStartupNarrow）。
- *
- * 取 2 而不是 1：`fLoader` 要的那一片自己占一条，留一条给紧邻的下一片——
- * 起播门槛要攒够 2.5s，单片往往不够，只给 1 条会变成「播一片停一下」。
- * 也不能更大：这一刻多开的每一条都在跟第一片抢同 host 那 6 条连接和带宽。
- */
-const NARROW_CONN = 2
-/** 起播窄口内预取的触达范围（锚点后几片）。只为凑够起播门槛，远处等能播了再说 */
-const NARROW_LOOKAHEAD = 3
 
 export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   const { getProxyUrl, cache, getConcurrencyCap } = opts
   const getPlaybackRate = opts.getPlaybackRate ?? (() => 1)
   const getPrefetchTargetSecs = opts.getPrefetchTargetSecs ?? (() => Infinity)
   const getStartPosition = opts.getStartPosition ?? (() => 0)
+  // 用户填 0/负数视为「关掉这条保险」——那时一律按闭环原有的爬坡走
+  const getSafeWallSecs = (): number => {
+    const v = opts.getSafeWallSecs?.()
+    return typeof v === 'number' && v >= 0 ? v : SAFE_WALL_SECS
+  }
   const getLaneUrls = opts.getLaneUrls ?? ((url: string) => [getProxyUrl(url)])
   // 档位参数：好/中/差预设，抗卡阈值/超时/安全系数全从这里取（默认中档）
   const tier = (): TierParams => opts.getTierParams?.() ?? SERVER_TIERS[DEFAULT_TIER]
-  const isNarrow = (): boolean => opts.isStartupNarrow?.() ?? false
   // 并发下限：外部兜底值与档位 concurrencyFloor 取大
   const floorConn = (): number => Math.max(1, getConcurrencyCap(), tier().concurrencyFloor)
   // 有效预取深度：只认用户「预加载时长」（maxBufferLength）。档位不收窄它——
@@ -350,11 +351,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     const drained = lastAhead >= 0 && cachedAhead < lastAhead - 0.5
     lastAhead = cachedAhead
     const target = effectivePrefetchTarget()
-    // 起播窄口优先于下面所有分支：这一刻缓存必然接近 0（刚定位），照常走「缓存极少 → 拉满猛下」
-    // 恰好会把连接和带宽从 fLoader 正在等的第一片手里抢走。健康区照常更新（上面那几行），
-    // 只是不据此拉并发——窄口本身最多两秒半，抗卡环不会因此漏判。
-    if (isNarrow()) ctrlConn = NARROW_CONN
-    else if (cachedAhead < t.panicSecs) ctrlConn = hostConcurrencyCap                               // 缓存极少：拉满猛下
+    if (cachedAhead < t.panicSecs) ctrlConn = hostConcurrencyCap                                    // 缓存极少：拉满猛下
     else if (cachedAhead < t.lowSecs || drained) ctrlConn = Math.min(hostConcurrencyCap, ctrlConn + 1) // 偏低/在掉：加
     else if (Number.isFinite(target) && cachedAhead > target * 0.75) ctrlConn = Math.max(2, ctrlConn - 1) // 接近目标：省
     // 中间且未在掉：维持
@@ -367,22 +364,16 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     // 暂停时带宽全空闲 → 顶格并发猛缓存后续分片（下到 JS 预取缓存，恢复播放即命中）。
     // 播放时按闭环受控值走，钳制在 [floor, hostCap]。
     //
-    // **起播窄口必须排在 paused 之前**：起播前 video.paused 恒为真（还没 play()），
-    // 所以「paused → 顶格」正是「定位那一刻并发最大」的直接来源。窄口内不受 floorConn 抬升，
-    // 否则档位的 concurrencyFloor（差档给得高）会把窄口撑回去。
     const paused = opts.getVideoEl()?.paused ?? false
-    if (isNarrow()) {
-      const narrow = Math.min(hostConcurrencyCap, NARROW_CONN)
-      refreshStrategy(narrow)
-      return narrow
-    }
     let target = paused ? hostConcurrencyCap : Math.min(hostConcurrencyCap, Math.max(floorConn(), ctrlConn))
-    // 卡的时候收敛到 2~3 条，把连接和带宽让给紧邻播放头那一片（理由见 PANIC_MAX_CONN）。
-    // 放在最后，好压过档位的 concurrencyFloor（「差」档给的是 6）。
+    // 存货不够播 5 秒就收敛到 2~3 条，把连接和带宽让给紧邻播放头那一片（理由见 SAFE_WALL_SECS）。
+    // 放在最后，好压过 `paused → 顶格` 和档位的 concurrencyFloor（「差」档给的是 6）——
+    // 起播那一刻正是「还没 play() 所以 paused 为真」+「缓存为 0」同时成立，两条都得压住。
     if (cachedAhead !== undefined) {
-      const t = tier()
-      if (cachedAhead < t.panicSecs) target = Math.min(target, PANIC_MAX_CONN)
-      else if (cachedAhead < t.lowSecs) target = Math.min(target, LOW_BUFFER_MAX_CONN)
+      const wall = cachedAhead / Math.max(1, getPlaybackRate())
+      const safe = getSafeWallSecs()
+      if (wall < safe * PANIC_WALL_RATIO) target = Math.min(target, PANIC_MAX_CONN)
+      else if (wall < safe) target = Math.min(target, LOW_BUFFER_MAX_CONN)
     }
     refreshStrategy(target)
     return target
@@ -639,8 +630,8 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     if (canStart === 0) return
 
     // 候选窗口：从 startIdx 往后扫描，最多看 count*3 个，足以跳过已缓存/下载中的。
-    // 起播窄口内收紧到锚点后几片：远处那些对「能不能出画面」毫无帮助，只是抢连接
-    const candidates = frags.slice(startIdx, startIdx + (isNarrow() ? NARROW_LOOKAHEAD : count * 3))
+    // 存货不够时 count 已被收到 2~3（见 SAFE_WALL_SECS），窗口自然跟着收窄、只取紧邻的几片
+    const candidates = frags.slice(startIdx, startIdx + count * 3)
 
     const ct = anchorTime(video)
     let started = 0

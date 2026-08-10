@@ -28,6 +28,13 @@ export interface HlsTuning {
   fragLoadingMaxRetry: number
   enableWorker: boolean
   lowLatencyMode: boolean
+  /**
+   * 「存货保险线」（秒，墙钟）。手上缓存**够播**的秒数低于它 = 吃紧，预取线程收敛到 2~3，
+   * 把连接和带宽让给紧邻播放头那一片；补够了再放开爬满。
+   * 判据是 `缓存秒数 ÷ 倍速`，所以 3x 下缓存 15 秒才等于这里的 5 秒。
+   * 详见 useHlsPrefetch 的 SAFE_WALL_SECS。调大 = 更保守（更早收敛、更稳但预取铺得慢）。
+   */
+  safeWallSecs: number
 }
 
 /**
@@ -53,6 +60,7 @@ export const DEFAULT_HLS_TUNING: HlsTuning = {
   fragLoadingMaxRetry: 3,
   enableWorker: true,
   lowLatencyMode: false,
+  safeWallSecs: 5,             // 存货不够播 5 秒就收敛线程（见 HlsTuning 上的说明）
 }
 
 /**

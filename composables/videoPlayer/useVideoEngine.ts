@@ -77,29 +77,6 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   const getAppliedStartPos = () => appliedStartPos
 
   /**
-   * 起播窄口：从「刚定位」到「已经能播」的那几百毫秒里把预取并发钳到 2（见 useHlsPrefetch 的 NARROW_CONN）。
-   *
-   * 为什么需要它：定位那一刻缓存必然接近 0，而闭环的规则是「缓存少 → 拉满并发」，
-   * 加上起播前 `video.paused` 恒为真（还没 play()）又走「暂停 → 顶格并发」，
-   * 结果 6~12 条连接全去下第 2..12 片。浏览器同 host 只给 6 条，
-   * 真正决定能不能出画面的第一片排在队尾，带宽还被瓜分——越想快，第一片越慢。
-   *
-   * 三个入口都要进：切集/重载（loadVideo）、用户拖进度（onSeeked）、恢复进度起播。
-   * 解除取二者先到：① 起播门槛达成（由 useVideoEvents 在真正 play() 时调 endStartupNarrow）；
-   * ② 兜底 NARROW_MAX_MS——极慢源上第一片可能几秒都下不来，窄口不能无限期按着并发。
-   *
-   * **计时必须从「真正开始要分片」那一刻起算**，不能从 loadVideo 的开头。
-   * 起播前面还有可达性探测和 manifest（合起来 1-2s，慢源更久），从开头起算的话
-   * 这 2.5s 往往在 hls.js 发出第一个分片请求之前就烧完了——实测冷启动首 1.2s 里
-   * 依然有 32 个并发分片请求，等于窄口压根没生效。所以 loadSource 之前要**重新上膛**。
-   */
-  const NARROW_MAX_MS = 2500
-  let narrowUntil = 0
-  const beginStartupNarrow = () => { narrowUntil = performance.now() + NARROW_MAX_MS }
-  const endStartupNarrow = () => { narrowUntil = 0 }
-  const isStartupNarrow = () => narrowUntil > 0 && performance.now() < narrowUntil
-
-  /**
    * 本次起播是不是「定位类」（切集 / 重载 / 拖进度），供 useVideoEvents 选起播门槛：
    * 定位类只等 2.5s 缓冲就出画面，首次冷启动仍等 6s。
    *
@@ -133,6 +110,8 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     },
     // 起播锚点：定位未到位前，预取从 pendingStartPos 起（而非 currentTime=0）
     getStartPosition: () => (startAnchorActive ? pendingStartPos : 0),
+    // 存货保险线：缓存够播的秒数低于它就把预取线程收敛到 2~3（见 useHlsPrefetch 的 SAFE_WALL_SECS）
+    getSafeWallSecs: () => hlsConfig.value.safeWallSecs,
     // 直连+代理双通道：仅在「开启 + 该分片直连可达」时加一条本站代理 lane（不同 origin → 各享 6 连接）。
     // 需注入头/走代理的源直连 lane 会 403，退回单 lane。
     getLaneUrls: (url: string) => {
@@ -141,8 +120,6 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     },
     // 服务器档位参数（好/中/差预设 + 页面覆盖）：抗卡阈值/超时/安全系数/并发下限/预取深度全从这里读
     getTierParams: () => tier.effectiveTierParams.value,
-    // 起播窄口：刚定位的那几百毫秒只给 2 条连接，先把「能不能播」那一片拿到手
-    isStartupNarrow,
   })
   const {
     getAheadBuffered, getCachedAhead, createHlsFragLoader, triggerAdaptivePrefetch,
@@ -352,13 +329,12 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     mediaErrorRecovered = 0
     appliedStartPos = 0   // 非 HLS 那条路不设 startPosition，别留上一次的值
     /**
-     * 「定位类起播」= 页面上已经有播放器了（切集 / 重载 / 改配置），门槛走 2.5s 那一档。
-     * 本次会话第一发（`isVideoLoaded` 还是 false）算冷启动，仍用 6s——那时用户刚打开页面，
-     * 多等两秒攒厚一点划算；而切集时画面是停着的，每多一秒都在盯转圈。
+     * 「定位类起播」= 页面上已经有播放器了（切集 / 重载 / 改配置），起播门槛走「够播 2 秒」那一档。
+     * 本次会话第一发（`isVideoLoaded` 还是 false）算冷启动，仍要攒够 6 秒——那时用户刚打开页面，
+     * 多等一会儿攒厚一点划算；而切集时画面是停着的，每多一秒都在盯转圈。
      * 必须在下面把 isVideoLoaded 置真**之前**读。
      */
     isRelocating = isVideoLoaded.value
-    beginStartupNarrow()
 
     const url = videoUrl.value.trim()
     const nextIsHls = conn.isHlsUrl(url)
@@ -611,9 +587,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
 
     hls.on(HlsLib.Events.LEVEL_SWITCHED, () => updateHlsStats())
 
-    // 全部事件登记完毕，这才开始加载（见上面 MANIFEST_PARSED 处的说明）。
-    // 窄口在这里重新上膛：到这一刻才真正开始要分片，前面探测/manifest 那 1-2s 不该算进它的寿命
-    beginStartupNarrow()
+    // 全部事件登记完毕，这才开始加载（见上面 MANIFEST_PARSED 处的说明）
     /**
      * **先 attachMedia 再 loadSource**。顺序反了在 pLoader 命中时会整个播不起来：
      * 那一发清单是同步返回的，于是 `loadSource()` 一行之内就把清单解析完并开始拉分片，
@@ -725,7 +699,6 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     aggregateKBps, aggregateMbps, deadLaneLabel,
     // 起播锚点 / 起播窄口
     clearStartAnchor, isArrivingAtStart, getAppliedStartPos,
-    beginStartupNarrow, endStartupNarrow, isStartupNarrow,
     isRelocatingStart, clearRelocating,
     forceRecomposite, videoTransform,
     // 统计

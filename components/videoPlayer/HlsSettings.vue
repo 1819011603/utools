@@ -21,6 +21,14 @@
           <span class="text-sm text-gray-500">MB</span>
         </div>
       </UFormGroup>
+      <!-- 这条是「起播/拖进度/快卡了」三种场景共用的收敛线，见 useHlsPrefetch 的 SAFE_WALL_SECS。
+           单位是「够播几秒」而不是「缓存几秒」——3x 倍速下缓存 15 秒才等于这里的 5 秒 -->
+      <UFormGroup label="存货保险线" help="手上缓存够播的秒数低于此 → 预取线程收敛到 2~3，先保住眼前这一片（0=关闭）">
+        <div class="flex items-center gap-2">
+          <UInput v-model.number="hlsConfig.safeWallSecs" type="number" :min="0" :max="60" class="flex-1" />
+          <span class="text-sm text-gray-500">秒</span>
+        </div>
+      </UFormGroup>
     </div>
 
     <!-- 抗卡策略（服务器档位参数）：留空=用当前档位预设（灰字占位） -->
