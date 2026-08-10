@@ -251,26 +251,43 @@
               <UIcon :name="isPlaying ? 'i-heroicons-pause-solid' : 'i-heroicons-play-solid'" class="w-6 h-6 sm:w-7 sm:h-7" />
             </button>
 
-            <!-- 上一集在窄屏藏起来：竖屏一行放不下，而「下一集」的使用频率高一个量级 -->
+            <!--
+              上一集在窄屏藏起来：竖屏一行放不下，而「下一集」的使用频率高一个量级。
+              两个按钮在切集期间换成转圈图标：切集要等取址/探测/建流，画面中央那个转圈
+              离手指很远，按钮自己不给反馈的话看着就像「点了没用」（于是用户又点一下）。
+            -->
             <button
               v-if="playlist.length > 1"
               class="order-1 hidden sm:block p-1.5 rounded-lg text-white transition-all shrink-0"
-              :class="hasPrev ? 'hover:bg-white/15 active:scale-90' : 'opacity-40 cursor-not-allowed'"
-              :disabled="!hasPrev"
-              title="上一集"
+              :class="hasPrev && !isSwitching ? 'hover:bg-white/15 active:scale-90' : 'opacity-40 cursor-not-allowed'"
+              :disabled="!hasPrev || isSwitching"
+              title="上一集（P）"
               @click="playPrev"
             >
-              <UIcon name="i-heroicons-backward-solid" class="w-6 h-6" />
+              <UIcon
+                :name="isSwitching ? 'i-heroicons-arrow-path' : 'i-heroicons-backward-solid'"
+                class="w-6 h-6" :class="{ 'animate-spin': isSwitching }"
+              />
             </button>
+            <!--
+              hover / 手指按下就开始备下一集（见 useVideoPrewarm.prewarmNextNow）：
+              比任何时间窗口都准的意图信号，能把「中途手动点下一集」从全冷路径救回来。
+              pointerenter 覆盖鼠标与触摸笔，touchstart 补上手指（触摸端没有真正的 hover）。
+            -->
             <button
               v-if="playlist.length > 1"
               class="order-1 p-1.5 rounded-lg text-white transition-all shrink-0"
-              :class="hasNext ? 'hover:bg-white/15 active:scale-90' : 'opacity-40 cursor-not-allowed'"
-              :disabled="!hasNext"
-              title="下一集"
+              :class="hasNext && !isSwitching ? 'hover:bg-white/15 active:scale-90' : 'opacity-40 cursor-not-allowed'"
+              :disabled="!hasNext || isSwitching"
+              title="下一集（N）"
+              @pointerenter="hasNext && prewarmNextNow()"
+              @touchstart.passive="hasNext && prewarmNextNow()"
               @click="playNext"
             >
-              <UIcon name="i-heroicons-forward-solid" class="w-5 h-5 sm:w-6 sm:h-6" />
+              <UIcon
+                :name="isSwitching ? 'i-heroicons-arrow-path' : 'i-heroicons-forward-solid'"
+                class="w-5 h-5 sm:w-6 sm:h-6" :class="{ 'animate-spin': isSwitching }"
+              />
             </button>
 
             <!-- 手机上没有 hover，滑条永远展不开；音量有硬件键和竖滑手势，整组藏起来腾地方 -->
@@ -451,7 +468,7 @@ const {
   videoTransform,
   onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onMouseMove, onClick, onDblClick,
   boostActive, boostRate,
-  playPrev, playNext,
+  playPrev, playNext, isSwitching, prewarmNextNow,
   onTimeUpdate, onLoadedMetadata, onLoadedData, onVideoEnded, onWaiting, onCanPlay,
   onCanPlayThrough, onSeeking, onSeeked, onPlaying, onPause, onVolumeChange, onVideoError,
 } = useVideoPlayerCtx()

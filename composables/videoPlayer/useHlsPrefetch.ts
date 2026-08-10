@@ -34,6 +34,16 @@ export interface HlsPrefetchOptions {
   // 当前服务器档位参数（好/中/差预设 + 页面覆盖）。不设则用中档兜底。
   // 抗卡阈值(panicSecs/lowSecs)、安全系数、对冲/跳片超时、并发下限、预取深度全从这里读。
   getTierParams?: () => TierParams
+  /**
+   * 是否处于「起播窄口」——刚定位、还一帧都没出来的那几百毫秒（见 useVideoEngine.beginStartupNarrow）。
+   *
+   * 这一段的唯一目标是**让 hls.js 正在等的那一片尽快到**，而不是把后面预满。
+   * 不区分的话结果是反的：`stepControl` 见缓存少就把并发拉满、`getAdaptivePrefetchCount`
+   * 又因为还没 play() 而恒走 `paused → 顶格`，于是 6~12 条连接全去下第 2..12 片，
+   * 而浏览器同 host 只给 6 条——真正决定「能不能播」的第一片排在队尾，带宽还被瓜分。
+   * 越想快，第一片越慢，等待时间也就忽长忽短（实测切集/拖进度都吃这个）。默认恒 false。
+   */
+  isStartupNarrow?: () => boolean
 }
 
 export interface StrategySnapshot {
@@ -48,6 +58,16 @@ export interface StrategySnapshot {
 
 const MAX_CONN = 6               // 浏览器同 host 连接上限（HTTP/1.1，硬顶）
 const LOW_BUFFER_MAX_CONN = 3    // 不可并行(每IP硬顶)且吃紧时最多并发：集中带宽拿紧邻分片，别被远处预取抢占
+/**
+ * 起播窄口内的并发（见 opts.isStartupNarrow）。
+ *
+ * 取 2 而不是 1：`fLoader` 要的那一片自己占一条，留一条给紧邻的下一片——
+ * 起播门槛要攒够 2.5s，单片往往不够，只给 1 条会变成「播一片停一下」。
+ * 也不能更大：这一刻多开的每一条都在跟第一片抢同 host 那 6 条连接和带宽。
+ */
+const NARROW_CONN = 2
+/** 起播窄口内预取的触达范围（锚点后几片）。只为凑够起播门槛，远处等能播了再说 */
+const NARROW_LOOKAHEAD = 3
 
 export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   const { getProxyUrl, cache, getConcurrencyCap } = opts
@@ -57,6 +77,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   const getLaneUrls = opts.getLaneUrls ?? ((url: string) => [getProxyUrl(url)])
   // 档位参数：好/中/差预设，抗卡阈值/超时/安全系数全从这里取（默认中档）
   const tier = (): TierParams => opts.getTierParams?.() ?? SERVER_TIERS[DEFAULT_TIER]
+  const isNarrow = (): boolean => opts.isStartupNarrow?.() ?? false
   // 并发下限：外部兜底值与档位 concurrencyFloor 取大
   const floorConn = (): number => Math.max(1, getConcurrencyCap(), tier().concurrencyFloor)
   // 有效预取深度：只认用户「预加载时长」（maxBufferLength）。档位不收窄它——
@@ -316,7 +337,11 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     const drained = lastAhead >= 0 && cachedAhead < lastAhead - 0.5
     lastAhead = cachedAhead
     const target = effectivePrefetchTarget()
-    if (cachedAhead < t.panicSecs) ctrlConn = hostConcurrencyCap                                    // 缓存极少：拉满猛下
+    // 起播窄口优先于下面所有分支：这一刻缓存必然接近 0（刚定位），照常走「缓存极少 → 拉满猛下」
+    // 恰好会把连接和带宽从 fLoader 正在等的第一片手里抢走。健康区照常更新（上面那几行），
+    // 只是不据此拉并发——窄口本身最多两秒半，抗卡环不会因此漏判。
+    if (isNarrow()) ctrlConn = NARROW_CONN
+    else if (cachedAhead < t.panicSecs) ctrlConn = hostConcurrencyCap                               // 缓存极少：拉满猛下
     else if (cachedAhead < t.lowSecs || drained) ctrlConn = Math.min(hostConcurrencyCap, ctrlConn + 1) // 偏低/在掉：加
     else if (Number.isFinite(target) && cachedAhead > target * 0.75) ctrlConn = Math.max(2, ctrlConn - 1) // 接近目标：省
     // 中间且未在掉：维持
@@ -328,7 +353,16 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     if (ctrlConn === 0) ctrlConn = computeTargetConcurrency()
     // 暂停时带宽全空闲 → 顶格并发猛缓存后续分片（下到 JS 预取缓存，恢复播放即命中）。
     // 播放时按闭环受控值走，钳制在 [floor, hostCap]。
+    //
+    // **起播窄口必须排在 paused 之前**：起播前 video.paused 恒为真（还没 play()），
+    // 所以「paused → 顶格」正是「定位那一刻并发最大」的直接来源。窄口内不受 floorConn 抬升，
+    // 否则档位的 concurrencyFloor（差档给得高）会把窄口撑回去。
     const paused = opts.getVideoEl()?.paused ?? false
+    if (isNarrow()) {
+      const narrow = Math.min(hostConcurrencyCap, NARROW_CONN)
+      refreshStrategy(narrow)
+      return narrow
+    }
     let target = paused ? hostConcurrencyCap : Math.min(hostConcurrencyCap, Math.max(floorConn(), ctrlConn))
     // 仅当「聚合不随线程增长」(每 IP 硬顶) 且吃紧时才收敛到 3 线程：此时多开连接只是分摊同一份带宽，
     // 集中拿播放头紧邻分片更快恢复。可并行(每连接限速)时相反——低缓冲更该多开线程做满聚合，不收敛。
@@ -578,6 +612,9 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
       threads: count,
       cached: segPrefetchCache.size,
       pending: segPrefetching.size,
+      // bytes 由每秒的 refreshCacheStats 算（遍历一遍缓存，不值得在这条热路径上重算）。
+      // 但**必须原样带上**：整个对象是被替换掉的，漏了它「预取缓存 X MB」会闪回 0
+      bytes: prefetchInfo.value.bytes,
     }
 
     if (count === 0) return
@@ -586,8 +623,9 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     const canStart = Math.max(0, count - segPrefetching.size)
     if (canStart === 0) return
 
-    // 候选窗口：从 startIdx 往后扫描，最多看 count*3 个，足以跳过已缓存/下载中的
-    const candidates = frags.slice(startIdx, startIdx + count * 3)
+    // 候选窗口：从 startIdx 往后扫描，最多看 count*3 个，足以跳过已缓存/下载中的。
+    // 起播窄口内收紧到锚点后几片：远处那些对「能不能出画面」毫无帮助，只是抢连接
+    const candidates = frags.slice(startIdx, startIdx + (isNarrow() ? NARROW_LOOKAHEAD : count * 3))
 
     const ct = anchorTime(video)
     let started = 0

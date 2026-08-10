@@ -68,10 +68,54 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   let startAnchorActive = false
   const clearStartAnchor = () => { startAnchorActive = false; pendingStartPos = 0 }
   const isArrivingAtStart = (ct: number) => startAnchorActive && Math.abs(ct - pendingStartPos) < 3
+  /**
+   * 本次交给 hls.js `startPosition` 的位置。与 pendingStartPos 分开存：后者是预取锚点、
+   * 到位就被 clearStartAnchor 清 0，而 useVideoEvents 在 loadedmetadata 里要知道
+   * 「引擎到底把起播位置定在哪」才能判断还要不要补一次 seek（见那里的片尾区兜底）。
+   */
+  let appliedStartPos = 0
+  const getAppliedStartPos = () => appliedStartPos
+
+  /**
+   * 起播窄口：从「刚定位」到「已经能播」的那几百毫秒里把预取并发钳到 2（见 useHlsPrefetch 的 NARROW_CONN）。
+   *
+   * 为什么需要它：定位那一刻缓存必然接近 0，而闭环的规则是「缓存少 → 拉满并发」，
+   * 加上起播前 `video.paused` 恒为真（还没 play()）又走「暂停 → 顶格并发」，
+   * 结果 6~12 条连接全去下第 2..12 片。浏览器同 host 只给 6 条，
+   * 真正决定能不能出画面的第一片排在队尾，带宽还被瓜分——越想快，第一片越慢。
+   *
+   * 三个入口都要进：切集/重载（loadVideo）、用户拖进度（onSeeked）、恢复进度起播。
+   * 解除取二者先到：① 起播门槛达成（由 useVideoEvents 在真正 play() 时调 endStartupNarrow）；
+   * ② 兜底 NARROW_MAX_MS——极慢源上第一片可能几秒都下不来，窄口不能无限期按着并发。
+   *
+   * **计时必须从「真正开始要分片」那一刻起算**，不能从 loadVideo 的开头。
+   * 起播前面还有可达性探测和 manifest（合起来 1-2s，慢源更久），从开头起算的话
+   * 这 2.5s 往往在 hls.js 发出第一个分片请求之前就烧完了——实测冷启动首 1.2s 里
+   * 依然有 32 个并发分片请求，等于窄口压根没生效。所以 loadSource 之前要**重新上膛**。
+   */
+  const NARROW_MAX_MS = 2500
+  let narrowUntil = 0
+  const beginStartupNarrow = () => { narrowUntil = performance.now() + NARROW_MAX_MS }
+  const endStartupNarrow = () => { narrowUntil = 0 }
+  const isStartupNarrow = () => narrowUntil > 0 && performance.now() < narrowUntil
+
+  /**
+   * 本次起播是不是「定位类」（切集 / 重载 / 拖进度），供 useVideoEvents 选起播门槛：
+   * 定位类只等 2.5s 缓冲就出画面，首次冷启动仍等 6s。
+   *
+   * 区别在于用户的预期：冷启动时他刚点开、还在看页面，多等两秒攒厚一点划算；
+   * 而切集/拖进度时画面是停着的，每多一秒都在盯着转圈——那时「先出画面、边播边补」明显更好。
+   */
+  let isRelocating = false
+  const isRelocatingStart = () => isRelocating
+  const clearRelocating = () => { isRelocating = false }
 
   // ── 预取缓存 + 自适应预取 + 卡顿记录 ──
   const segmentCache = useSegmentCache({ getMaxBufferSizeMB: () => hlsConfig.value.maxBufferSizeMB })
-  const { prefetchInfo, useCacheForVideo, abortAllPrefetches, startPrefetchCleanup, stopPrefetchCleanup, refreshCacheStats } = segmentCache
+  const {
+    prefetchInfo, useCacheForVideo, abortAllPrefetches, startPrefetchCleanup, stopPrefetchCleanup,
+    refreshCacheStats, stageSegments,
+  } = segmentCache
 
   const prefetch = useHlsPrefetch({
     getHls: () => hls,
@@ -97,6 +141,8 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     },
     // 服务器档位参数（好/中/差预设 + 页面覆盖）：抗卡阈值/超时/安全系数/并发下限/预取深度全从这里读
     getTierParams: () => tier.effectiveTierParams.value,
+    // 起播窄口：刚定位的那几百毫秒只给 2 条连接，先把「能不能播」那一片拿到手
+    isStartupNarrow,
   })
   const {
     getAheadBuffered, getCachedAhead, createHlsFragLoader, triggerAdaptivePrefetch,
@@ -304,12 +350,42 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     bufferedPercent.value = 0
     hlsRetryCount.value = 0
     mediaErrorRecovered = 0
-
-    videoKey.value++     // 强制重新创建 video 元素，彻底重置状态
-    isVideoLoaded.value = true
-    destroyHls()
+    appliedStartPos = 0   // 非 HLS 那条路不设 startPosition，别留上一次的值
+    /**
+     * 「定位类起播」= 页面上已经有播放器了（切集 / 重载 / 改配置），门槛走 2.5s 那一档。
+     * 本次会话第一发（`isVideoLoaded` 还是 false）算冷启动，仍用 6s——那时用户刚打开页面，
+     * 多等两秒攒厚一点划算；而切集时画面是停着的，每多一秒都在盯转圈。
+     * 必须在下面把 isVideoLoaded 置真**之前**读。
+     */
+    isRelocating = isVideoLoaded.value
+    beginStartupNarrow()
 
     const url = videoUrl.value.trim()
+    const nextIsHls = conn.isHlsUrl(url)
+    /**
+     * **HLS → HLS 时复用同一个 `<video>` 元素**，不再 `videoKey++`。
+     *
+     * 重建元素要付四笔账：等一次 `nextTick` + 50ms（新元素挂载）；解码器被卸掉重建；
+     * 刚发出的 `play()` 撞上 attach 变成 `AbortError`、再等 400ms×n 重试；
+     * 以及**画面立刻变黑**——切集体感「慢」有一半来自这一下黑屏，跟真实耗时无关。
+     * 换成复用之后，上一集最后一帧会留在屏幕上直到新流出画面。
+     *
+     * 只有「HLS ↔ MP4 互转」才必须重建：原生播放要 `src`，而 MSE 那套挂在同一个元素上，
+     * 两种模式的内部状态（error / networkState / 已 append 的 buffer）混在一起清不干净。
+     * `videoTransform` 也不再被重建冲掉（见 forceRecomposite）。
+     */
+    const reuseEl = !!videoEl.value && isVideoLoaded.value && nextIsHls && isHls.value
+    if (!reuseEl) videoKey.value++
+    isVideoLoaded.value = true
+    destroyHls()
+    // 复用时元素上还留着上一条流的痕迹（MSE 的 blob src、error、已缓冲区间）。
+    // hls.js 的 attachMedia 会重设 srcObject/src，但先手动摘掉更稳：
+    // 残留的 src 会让 <video> 在 attach 之前先对旧地址发一次请求（表现是控制台多一条取消的请求）。
+    if (reuseEl && videoEl.value) {
+      videoEl.value.removeAttribute('src')
+      try { videoEl.value.load() } catch {}
+    }
+
     // 按视频切换缓存：同一视频（重播/点回去）保留内存缓存，换了视频才清空旧的
     useCacheForVideo(url)
     // 可达性探测可能阻塞（首访该 host 时约 0.5-3s）——必须在 startLoadTimeout 之前 await，
@@ -318,13 +394,13 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     if (videoUrl.value.trim() !== url) return   // 探测期间用户切了地址 → 放弃本次加载
 
     startLoadTimeout()
-    isHls.value = conn.isHlsUrl(url)
+    isHls.value = nextIsHls
 
     console.log('开始加载视频:', url, '是否HLS:', isHls.value,
       '使用代理:', conn.useProxy.value)
 
     try {
-      if (isHls.value) await loadHlsVideo(url)
+      if (isHls.value) await loadHlsVideo(url, reuseEl)
       else await loadNativeVideo(url)
     } catch (e) {
       console.error('加载视频失败:', e)
@@ -355,13 +431,17 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     destroyHls()
   }
 
-  const loadHlsVideo = async (url: string) => {
+  const loadHlsVideo = async (url: string, reuseEl = false) => {
     if (!Hls) Hls = (await import('hls.js')).default
     const HlsLib = Hls   // 取成局部常量，闭包里就不用到处写 Hls!
 
     isVideoLoaded.value = true
-    await nextTick()
-    await new Promise(resolve => setTimeout(resolve, 50))
+    // 只有真重建了元素才需要等它挂载。复用时元素一直在 DOM 里，这 50ms 是白等——
+    // 而它落在切集的关键路径上，每切一集都赔一次
+    if (!reuseEl) {
+      await nextTick()
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
 
     if (!HlsLib.isSupported()) {
       // 尝试原生支持（Safari）
@@ -378,12 +458,23 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     const finalUrl = conn.getProxyUrl(url)
     console.log('加载 HLS 视频:', finalUrl)
 
-    // 恢复播放进度：直接告诉 hls.js 从目标位置起播，避免它先从头猛下一堆用不上的分片、
-    // 等 onLoadedMetadata 里再 seek 过去（那样等于白下了一遍开头）。
-    // 进度按稳定键存（按需取址的站点真实地址每次都变），不能用 url 查
+    /**
+     * 起播位置：直接告诉 hls.js 从这里起播，避免它先从头猛下一堆用不上的分片、
+     * 等 onLoadedMetadata 里再 seek 过去（那样等于白下了一遍开头）。
+     *
+     * **跳过片头也走这条路**。原来 startPosition 只认进度记录，`skipIntro` 是在
+     * onLoadedMetadata 里手动 `currentTime = skipIntro` 实现的——于是开着「跳过片头 90s」时
+     * hls.js 从 0 开始下，下到一半被 seek 打断，再从 90s 重下一遍。片头那段全是白下的流量，
+     * 起播还平白多等一轮。两者语义本来就一样：都是「从第 N 秒开始播」。
+     * 进度优先于片头（看到一半回来的人不该被扔回片头之后）。
+     *
+     * 进度按稳定键存（按需取址的站点真实地址每次都变），不能用 url 查。
+     */
     const resumeTime = deps.getSavedProgress(deps.progressKey())
-    pendingStartPos = resumeTime > 0 ? resumeTime : 0
-    startAnchorActive = resumeTime > 0
+    const startPos = resumeTime > 0 ? resumeTime : (media.skipIntro.value > 0 ? media.skipIntro.value : 0)
+    pendingStartPos = startPos
+    appliedStartPos = startPos
+    startAnchorActive = startPos > 0
 
     hls = new HlsLib({
       // MSE 缓冲要「小而健康」——append 太多（几百 MB）会触发浏览器 MSE 配额/驱逐，
@@ -408,13 +499,18 @@ export function useVideoEngine(deps: VideoEngineDeps) {
       enableWorker: hlsConfig.value.enableWorker,
       lowLatencyMode: hlsConfig.value.lowLatencyMode,
       startLevel: -1,
-      startPosition: resumeTime > 0 ? resumeTime : -1,
+      startPosition: startPos > 0 ? startPos : -1,
       // 自定义分片加载器：接管分片请求，命中预取缓存直接返回
       fLoader: createHlsFragLoader() as any,
+      // 自定义清单加载器：命中「探测刚下载过的同一份 m3u8」就同步返回，省一次 RTT。
+      // 必须包在 hls.js 默认 loader 之上（miss 时要走它原来的那套重试/超时）
+      pLoader: createHlsPlaylistLoader((HlsLib as any).DefaultConfig.loader) as any,
       // Origin/Referer 由 /api/proxy 服务端注入，XHR 层只需关闭 credentials
       xhrSetup: (xhr: XMLHttpRequest) => { xhr.withCredentials = false },
     })
 
+    // 窄口重新上膛：到这一刻才真正开始要分片。探测/manifest 那 1-2s 不该算进窄口的寿命
+    beginStartupNarrow()
     hls.loadSource(finalUrl)
     hls.attachMedia(videoEl.value)
 
@@ -513,6 +609,42 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     videoEl.value.load()
   }
 
+  /**
+   * 自定义 playlist loader：hls.js 第一次要 manifest 时，如果**刚刚**的可达性探测已经
+   * 拉过同一个 URL，就把那份原文同步交给它，省掉一次 RTT。
+   *
+   * 为什么值得做：探测为了数分片本来就把 m3u8 整个 body 读完了，紧接着 hls.js 又去拉同一个地址。
+   * 代理通道靠浏览器 HTTP 缓存能命中（/api/proxy 对点播 m3u8 发 1 天缓存头），
+   * 但**直连通道多数 CDN 的 m3u8 是 no-cache**——那一发就是白等，而它正卡在切集的关键路径上。
+   *
+   * 按**完整 URL** 严格匹配，对不上就老实走网络：探测的 manifest URL 恒带 `noseg=1`，
+   * 而真正加载时只有 manifestOnly 才带，两者不同就说明内容不同（服务端会不会重写分片 URI），
+   * 喂错了会让 hls.js 拿到一份分片指向错地方的清单。宁可 miss。
+   * 一次性：用掉即清，避免播到一半 hls.js 重载 level 时拿到一份陈旧清单。
+   */
+  const createHlsPlaylistLoader = (BaseLoader: any) => {
+    return class ProbeSeededPlaylistLoader extends BaseLoader {
+      load(context: any, config: any, callbacks: any): void {
+        const seeded = conn.takeSeededManifest(context?.url)
+        if (seeded) {
+          const stats = this.stats ?? {}
+          const t = performance.now()
+          // hls.js 只读这几个字段来算带宽/耗时；给一个自洽的最小集即可
+          stats.loading = { start: t, first: t, end: t }
+          stats.parsing = { start: 0, end: 0 }
+          stats.loaded = stats.total = seeded.length
+          stats.aborted = false
+          stats.retry = 0
+          stats.chunkCount = 1
+          console.log('用探测已下载的 manifest，省掉一次请求:', context.url)
+          callbacks.onSuccess({ data: seeded, url: context.url }, stats, context, null)
+          return
+        }
+        super.load(context, config, callbacks)
+      }
+    }
+  }
+
   // MANIFEST_PARSED 之后要触发的起播预缓冲，由 useVideoEvents 登记（避免引擎依赖它）
   let autoPlayHook: (() => void) | null = null
   const registerAutoPlayHook = (fn: () => void) => { autoPlayHook = fn }
@@ -542,10 +674,12 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     // 预取 / 缓存 / 卡顿
     prefetchInfo, strategy, stall,
     getAheadBuffered, getCachedAhead, primePrefetch, startOnePrefetch, prefetchTick,
-    abortAllPrefetches, triggerAdaptivePrefetch, purgePlayedSegments,
+    abortAllPrefetches, triggerAdaptivePrefetch, purgePlayedSegments, stageSegments,
     aggregateKBps, aggregateMbps, deadLaneLabel,
-    // 起播锚点
-    clearStartAnchor, isArrivingAtStart,
+    // 起播锚点 / 起播窄口
+    clearStartAnchor, isArrivingAtStart, getAppliedStartPos,
+    beginStartupNarrow, endStartupNarrow, isStartupNarrow,
+    isRelocatingStart, clearRelocating,
     forceRecomposite, videoTransform,
     // 统计
     updateHlsStats,

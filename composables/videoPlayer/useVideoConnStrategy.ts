@@ -228,9 +228,26 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     toast.add({ id: VERDICT_TOAST_ID, title: v.title, description: v.detail, color: 'red', timeout: 0 })
   }
 
+  /**
+   * 探测顺手下载好的 m3u8 原文，交给引擎的 pLoader 直接喂 hls.js（省一次 RTT）。
+   * 按**完整请求 URL** 存，一次性——见 useVideoEngine.createHlsPlaylistLoader 里的理由。
+   */
+  let seededManifest: { url: string; text: string } | null = null
+  const takeSeededManifest = (url: string): string | null => {
+    if (!seededManifest || !url || seededManifest.url !== url) return null
+    const text = seededManifest.text
+    seededManifest = null
+    return text
+  }
+
   /** 结论 → 生效（或退回阶梯）。runProbe 与「用预热结果」两处共用 */
   const applyProbeResult = (r: ProbeResult, url: string) => {
     probeResult.value = r
+    // 这一份原文只对紧接着的那一发加载有效（同一个完整 URL）。
+    // 结论没结论（degraded → 走阶梯）时也照存：阶梯可能正好落在同一条通道上，命中就赚一次
+    seededManifest = r.manifestText && r.manifestRequestUrl
+      ? { url: r.manifestRequestUrl, text: r.manifestText }
+      : null
     notifyProbeVerdict(r, url)
     const cfg = resolveConnConfig(r, selfOriginOf(url))
     if (cfg) {
@@ -250,7 +267,33 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   // 按需取址的站点每集都是现签的地址，签名/路径一换，上一集的结论对这一集就是 403。
   // 同一个具体地址几分钟内的结论才是稳定的，那不是猜测，是同一次实测。
   const WARM_PROBE_TTL = 90_000
-  let warmProbe: { url: string; result: ProbeResult } | null = null
+  /**
+   * 容量。原来是**单槽**，于是只有「刚预热的那一条」能命中：
+   * 点「上一集」永远全冷（那一集几分钟前才播过，结论明明还在手上），
+   * 预热过下一集之后又手动跳去别的集，那份结论也白扔。
+   * 4 条足够覆盖「上一集 / 当前 / 下一集 / 刚重探过的」，又不至于攒下一堆过期结论。
+   */
+  const WARM_PROBE_MAX = 4
+  /** 按**完整 URL**存的近期探测结论（Map 自带插入序，用它做 LRU） */
+  const warmProbes = new Map<string, ProbeResult>()
+
+  const rememberWarmProbe = (url: string, r: ProbeResult) => {
+    warmProbes.delete(url)                 // 重新插到队尾，维持 LRU 顺序
+    warmProbes.set(url, r)
+    while (warmProbes.size > WARM_PROBE_MAX) {
+      const oldest = warmProbes.keys().next().value
+      if (oldest === undefined) break
+      warmProbes.delete(oldest)
+    }
+  }
+
+  /** 取一条还没过期的近期结论；**取用即删**（同一份结论不重复吃第二次） */
+  const takeWarmProbe = (url: string): ProbeResult | null => {
+    const r = warmProbes.get(url)
+    if (!r) return null
+    warmProbes.delete(url)
+    return Date.now() - r.at < WARM_PROBE_TTL ? r : null
+  }
 
   /**
    * 后台探一个还没开始播的地址。**不写任何生效 ref、不碰 probeSeq/isProbing/probeResult**——
@@ -260,7 +303,7 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     if (!isProbeable(url)) return null
     try {
       const r = await probeReachability(url, hintPair())
-      warmProbe = { url, result: r }
+      rememberWarmProbe(url, r)
       return r
     } catch (e) {
       console.warn('预热探测失败（不影响当前播放）:', e)
@@ -275,6 +318,9 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     try {
       const r = await probeReachability(url, hintPair())
       if (seq !== probeSeq) return null            // 已被更新的一次探测取代，丢弃
+      // 前台探测的结论也存一份：这是「点上一集永远全冷」的修法——那一集几分钟前刚播过，
+      // 结论明明还在手上。也顺带让「重探 → reload」这条路不再连着探两遍同一个地址。
+      rememberWarmProbe(url, r)
       applyProbeResult(r, url)
       return r
     } catch (e) {
@@ -313,11 +359,10 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     //
     // 唯一的例外是预热：后台刚给**这个同一个地址**测过一轮，直接拿来用。
     // 这不违背上面那条——变的是地址，不是同一地址的结论；用完即弃，不留第二次。
-    const warm = warmProbe
-    warmProbe = null
-    if (warm && warm.url === url && Date.now() - warm.result.at < WARM_PROBE_TTL) {
-      console.log('用预热探测结果，跳过本轮探测:', url)
-      applyProbeResult(warm.result, url)
+    const warm = takeWarmProbe(url)
+    if (warm) {
+      console.log('用近期探测结果，跳过本轮探测:', url)
+      applyProbeResult(warm, url)
       return
     }
     await runProbe(url, true)
@@ -386,8 +431,14 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     if (videoUrl.value) deps.reload()
   }
 
-  // 没有可达性缓存了（见 applyStrategy），这里只把「本次加载已重探过」的标记清掉
-  const invalidateReachCache = () => { reprobedFor = '' }
+  /**
+   * 作废近期探测结论 + 「本次加载已重探过」的标记。
+   *
+   * `warmProbes` 也必须清：它按完整 URL 存，但**不含候选头**。用户改了 Origin/Referer 之后
+   * 不清的话，新填的域名压根没机会被试（直接命中上一次用旧候选值探出的结论），
+   * 表现是「填了没反应」——这正是 CLAUDE.md 里记着的那个坑，只是缓存换了个地方。
+   */
+  const invalidateReachCache = () => { reprobedFor = ''; warmProbes.clear() }
 
   // 重探（作废缓存，重新实测一遍并按结论重载）
   const reprobeNow = async () => {
@@ -431,7 +482,7 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     originSuggestions, refererSuggestions,
     // 探测
     probeResult, isProbing, ladderMode, autoStrategyStep,
-    applyStrategy, escalateStrategyAndReload, applyReachabilityStep, prewarmProbe,
+    applyStrategy, escalateStrategyAndReload, applyReachabilityStep, prewarmProbe, takeSeededManifest,
     // 展示 / 操作
     strategyLabel, probeRows, probeVerdict, reprobeNow,
   }

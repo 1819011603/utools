@@ -9,10 +9,27 @@ import type { VideoEngine } from './useVideoEngine'
 import type { VideoConnStrategy } from './useVideoConnStrategy'
 import type { VideoPlaylistCtl } from './useVideoPlaylistCtl'
 
-// 起播预缓冲：缓冲够 AUTOPLAY_BUFFER_TARGET 秒即起播，剩下的交给并行预取播放中补齐；
-// 慢站最多等 AUTOPLAY_MAX_WAIT_MS 兜底避免卡死。非 HLS 固定等 2s。
+/**
+ * 起播预缓冲：缓冲够 N 秒即起播，剩下的交给并行预取在播放中补齐；
+ * 慢站最多等 AUTOPLAY_MAX_WAIT_MS 兜底避免卡死。非 HLS 固定等 2s。
+ *
+ * **门槛分两档**，因为用户的预期完全不同：
+ * · 首次冷启动（刚点开页面，人还在看别的）—— 多等两秒攒厚一点划算，仍用 6s；
+ * · 定位类起播（切集 / 拖进度 / 重载）—— 画面停着，每多一秒都在盯转圈。
+ *   2.5s 足够 hls.js 起播，后面由预取追；真追不上还有抗卡环兜。
+ *   实测这一档配合起播窄口（见 useVideoEngine.beginStartupNarrow）才有意义：
+ *   不收窄并发的话，2.5s 这个量本身就被 6~12 条并行下载拖慢了。
+ */
 const AUTOPLAY_BUFFER_TARGET = 6
+const AUTOPLAY_BUFFER_TARGET_RELOCATE = 2.5
 const AUTOPLAY_MAX_WAIT_MS = 8000
+/**
+ * 起播就绪的轮询间隔。原来是 300ms 固定轮询 + 起手先空等 500ms——
+ * 那 500ms 是纯自造延迟（每次切集都赔一次），而 300ms 的粒度意味着「其实早就够了」
+ * 还要再等最多 300ms。现在立刻跑第一拍，之后 100ms 一拍。
+ * 每一拍只读 `video.buffered`（不发请求、不遍历分片表），加密到 100ms 也可忽略。
+ */
+const AUTOPLAY_POLL_MS = 100
 
 export interface VideoEventsDeps {
   media: VideoMediaState
@@ -78,6 +95,10 @@ export function useVideoEvents(deps: VideoEventsDeps) {
     if (delayedPlayTimer) { clearTimeout(delayedPlayTimer); delayedPlayTimer = null }
     isBuffering.value = true
     const startTs = performance.now()
+    // 定位类起播（切集/拖进度/重载）走低门槛。engine 在 loadVideo 里置位，这里只读一次：
+    // 后面 endStartupNarrow 会把它清掉，读晚了会退回 6s 那一档
+    const relocating = engine.isRelocatingStart()
+    const target = relocating ? AUTOPLAY_BUFFER_TARGET_RELOCATE : AUTOPLAY_BUFFER_TARGET
 
     const tryPlay = () => {
       const video = videoEl.value
@@ -86,18 +107,24 @@ export function useVideoEvents(deps: VideoEventsDeps) {
       const waited = performance.now() - startTs
       const ready = !isHls.value
         ? waited >= 2000
-        : ahead >= AUTOPLAY_BUFFER_TARGET || waited >= AUTOPLAY_MAX_WAIT_MS
+        : ahead >= target || waited >= AUTOPLAY_MAX_WAIT_MS
       if (!ready) {
-        delayedPlayTimer = setTimeout(tryPlay, 300)
+        delayedPlayTimer = setTimeout(tryPlay, AUTOPLAY_POLL_MS)
         return
       }
       delayedPlayTimer = null
-      console.log(`开始自动播放（预缓冲 ${ahead.toFixed(1)}s，等待 ${(waited / 1000).toFixed(1)}s）`)
+      console.log(`开始自动播放（预缓冲 ${ahead.toFixed(1)}s / 门槛 ${target}s，等待 ${(waited / 1000).toFixed(1)}s）`)
+      // 能播了 → 解除起播窄口，把并发交回闭环去爬满（窄口自己也有 2.5s 兜底，
+      // 但那条是给「第一片迟迟不来」的慢源留的，正常路径应该由这里准时解除）
+      engine.endStartupNarrow()
+      engine.clearRelocating()
       isBuffering.value = false
       void attemptPlay(0)
     }
 
-    delayedPlayTimer = setTimeout(tryPlay, 500)
+    // 立刻跑第一拍。原来起手 setTimeout(…, 500) 是无条件的自造延迟：
+    // 预热命中、分片已在缓存里时，这 500ms 就是全部的等待时间
+    tryPlay()
   }
 
   // HLS 走 MANIFEST_PARSED 触发起播；destroyHls 时要清掉在飞的定时器
@@ -159,8 +186,16 @@ export function useVideoEvents(deps: VideoEventsDeps) {
       savedTime = 0
       if (isHls.value && videoEl.value.currentTime >= finishedAt) videoEl.value.currentTime = 0
     }
-    if (isHls.value && savedTime > 0 && savedTime < duration.value - 5) {
-      hasSkippedIntro.value = true
+    // HLS 的两种起播位置（恢复进度 / 跳过片头）都已由 hls.js 的 startPosition 落位
+    //（见 useVideoEngine.loadHlsVideo 的 startPos），所以这里**不再 seek 一次**——
+    // 多余的 seek 会打断刚起播的加载，而片头那段还会被白下一遍。
+    // 唯一要补的是上面那段兜底刚把老进度作废、播放头拨回 0 的情况：
+    // 那时引擎给的起播位置是那条作废的进度，若还开着「跳过片头」就得在这里补上。
+    if (isHls.value) {
+      if (skipIntro.value > 0 && engine.getAppliedStartPos() !== skipIntro.value && savedTime === 0) {
+        videoEl.value.currentTime = skipIntro.value
+      }
+      if (savedTime > 0 || skipIntro.value > 0) hasSkippedIntro.value = true
     } else if (savedTime > 0 && savedTime < duration.value - 5) {
       videoEl.value.currentTime = savedTime
       hasSkippedIntro.value = true   // 已恢复进度，视为已跳过片头
@@ -275,10 +310,17 @@ export function useVideoEvents(deps: VideoEventsDeps) {
       // 不清空已完成缓存：seek 回跳/来回拖动时直接命中内存，不重新下载（TTL+LRU 兜底）
       engine.abortAllPrefetches()
       engine.prefetchInfo.value.pending = 0
+      // 用户真跳了位置 = 又一次「定位」：新位置前方缓存归零，闭环会照常想拉满并发，
+      // 又变成「12 条去下第 2..12 片，而播放头要的那一片在排队」。先收窄，能播了再放开。
+      // 落点已缓存时窄口几乎立刻被下面的解除条件撤掉，不影响「拖到已看过的地方秒回」。
+      engine.beginStartupNarrow()
     }
     isBuffering.value = false
     // 立刻在当前位置并行预取（不等 1s 心跳），尽快把目标分片拉下来
     if (isHls.value) engine.primePrefetch()
+    // 落点本来就有缓冲（拖回已看过的段落）→ 立刻解除窄口，别让它白按 2.5s 并发
+    const v = videoEl.value
+    if (v && engine.getAheadBuffered(v) >= AUTOPLAY_BUFFER_TARGET_RELOCATE) engine.endStartupNarrow()
   }
 
   /**

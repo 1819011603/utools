@@ -65,12 +65,12 @@ export function useVideoPlayerController() {
   const autoTune = useVideoAutoTune({ media, tier, conn, engine })
   engine.registerTickHook(autoTune.selfHeal)
 
-  // 下一集预热同样挂心跳：快播完这一集时后台把下一集的取址/探测/manifest 先做掉
-  const prewarm = useVideoPrewarm({ media, conn, playlist })
+  // 下一集预热同样挂心跳：快播完这一集时后台把下一集的取址/探测/manifest/首几片先做掉
+  const prewarm = useVideoPrewarm({ media, handoff, conn, engine, playlist })
   engine.registerTickHook(prewarm.prewarmTick)
 
   const events = useVideoEvents({ media, engine, conn, playlist })
-  const controls = useVideoUiControls({ media, autoTune })
+  const controls = useVideoUiControls({ media, autoTune, playlist })
   // 手势层建在控制层之上：它把「一次指针交互」翻译成控制层已有的动作
   const gestures = useVideoGestures({ media, controls, autoTune })
 

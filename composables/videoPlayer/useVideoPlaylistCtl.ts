@@ -352,15 +352,43 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
    * 用户手速快连点两下「下一集」是同一个问题的轻症版。
    */
   let switching = false
+  /**
+   * 切集中又来了新目标（latest-wins）。
+   *
+   * 原来是 `if (switching) return`——**静默丢弃**。防跳片尾连跳那件事它做到了，
+   * 但用户连点两下「下一集」只跳一集、在选集面板上急着改主意点了别的集也没反应，
+   * 看着就是「点了没用」。现在把最新目标记下来，本轮落地后若目标变了就接着切过去：
+   * 门闩仍然只允许一轮在飞（跳片尾那十几次重复调用照旧被吸收——它们的目标都是同一集，
+   * 记下来也等于没变），但用户的最后一次点击一定会兑现。
+   */
+  let queuedIndex: number | null = null
+  /** 切集中（含取址/探测/建流）。UI 据此给上/下一集按钮上 loading，别只有画面中央一个转圈 */
+  const isSwitching = ref(false)
 
   const playByIndex = async (index: number) => {
     if (index < 0 || index >= playlist.value.length) return
-    if (switching) return
+    if (switching) { queuedIndex = index; return }
     switching = true
+    isSwitching.value = true
     try {
       await doPlayByIndex(index)
+      // 排队的目标可能又被后来的点击改过，所以是 while 而不是 if；
+      // 每一轮都先把槽清空，避免「切到 A 的过程中又点了 A」自己跟自己循环。
+      //
+      // 连排上限：`playNext` 也被「播完自动下一集」和「跳过片尾」调，
+      // 而一个坏源可能一 attach 就立刻 `ended`——那时每一集都会往槽里塞下一集，
+      // 于是整份列表被飞快走完（用户看到集数自己一路涨）。原来那句 `if (switching) return`
+      // 顺带把这种情况挡掉了，改成排队就得自己封顶。3 次足够覆盖「手快连点几下」。
+      let drained = 0
+      while (queuedIndex !== null && queuedIndex !== currentIndex.value && drained++ < 3) {
+        const next = queuedIndex
+        queuedIndex = null
+        await doPlayByIndex(next)
+      }
     } finally {
+      queuedIndex = null
       switching = false
+      isSwitching.value = false
     }
   }
 
@@ -591,7 +619,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
   }
 
   return {
-    playlist, currentIndex, hasPrev, hasNext, isRefreshingLinks, lastRefreshAt,
+    playlist, currentIndex, hasPrev, hasNext, isRefreshingLinks, lastRefreshAt, isSwitching,
     progressKey, currentVideoName, saveCurrentProgress, getSavedProgress, clearAllProgress,
     parseAndLoad, playByIndex, playPrev, playNext, clearPlaylist, loadExample, dropSavedProgress,
     resolveLazyUrl, peekLazyUrl, refetchCurrentUrl, refreshPlaylistLinks, loadFromParseSource,

@@ -43,7 +43,7 @@
  */
 import {
   probeReachability, diagnoseProbe, probeMatrixRows,
-  type ProbeResult,
+  type ProbeResult, type ProbeVerdict,
 } from '~/composables/videoPlayer/useReachabilityProbe'
 
 const props = defineProps<{
@@ -54,6 +54,13 @@ const props = defineProps<{
   origin?: string
   referer?: string
 }>()
+
+/**
+ * 结论上报给页面：播放按钮要据此决定「直接播」还是「先二次确认」。
+ * `verdict` 为 null = 还没测出结论（刚换线路 / 正在跑 / 检测本身报错），
+ * 页面把这几种都当「没过」处理——「没测过」和「测出来不通」对用户的意义是一样的：进去可能白等。
+ */
+const emit = defineEmits<{ status: [{ probing: boolean; verdict: ProbeVerdict | null }] }>()
 
 const probing = ref(false)
 const result = ref<ProbeResult | null>(null)
@@ -112,4 +119,11 @@ const run = async () => {
 watch(() => props.url, () => { void run() }, { immediate: true })
 // 组件卸下（换成内嵌线路 / 离开本页）时把还在跑的那轮收掉，别留一串没人要的请求
 onUnmounted(() => inflight?.abort())
+
+// 上报用 watchEffect 而不是在 run() 里手动 emit：状态有三处会变（开始探、拿到结论、换线路清空），
+// 漏一处页面就会拿着过期结论放行播放
+watchEffect(() => emit('status', {
+  probing: probing.value,
+  verdict: result.value ? verdict.value : null,
+}))
 </script>

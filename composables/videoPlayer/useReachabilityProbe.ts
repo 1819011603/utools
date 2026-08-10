@@ -75,6 +75,19 @@ export interface ProbeResult {
    * 见 `server/api/proxy.ts` 的 `DEAD_SOURCE_LANDINGS`。
    */
   deadSource?: boolean
+  /**
+   * 胜出通道那次拉到的 m3u8 原文 + 它实际请求的 URL。
+   *
+   * 探测为了数分片，本来就把 manifest 整个 body 下下来了；而紧接着 hls.js 又会去拉同一个 URL。
+   * 代理通道靠浏览器 HTTP 缓存能命中（/api/proxy 对点播 m3u8 发 1 天缓存头），
+   * 但**直连通道多数 CDN 的 m3u8 是 no-cache**，那就是白等一个 RTT。
+   * 带上原文，引擎的 pLoader 就能把这一发直接喂给 hls.js（见 useVideoEngine.createHlsPlaylistLoader）。
+   *
+   * 只在「下钻到媒体列表」这一层记：master 列表对 hls.js 没有省事的价值，
+   * 而且它会自己再下钻一次，喂错层级只会打乱它的画质选择。
+   */
+  manifestText?: string
+  manifestRequestUrl?: string
 }
 
 /** 代理对「已被官方下线的源」回这个码（451 Unavailable For Legal Reasons） */
@@ -246,11 +259,11 @@ export async function probeReachability(
     const onDeadline = () => ctrl.abort()
     deadline.addEventListener('abort', onDeadline)
     try {
-      let { manifest, baseUrl } = await fetchM3u8Manifest(target, ctrl.signal)
+      let { manifest, baseUrl, text, requestUrl } = await fetchM3u8Manifest(target, ctrl.signal)
       // master 列表：下钻一层拿真正的媒体列表（变体 URI 含 .m3u8，代理会把它重写成代理 URL，可直接再喂回去）
       const best = pickBestVariant(manifest)
       if (best?.uri) {
-        ({ manifest, baseUrl } = await fetchM3u8Manifest(resolveUrl(baseUrl, best.uri), ctrl.signal))
+        ({ manifest, baseUrl, text, requestUrl } = await fetchM3u8Manifest(resolveUrl(baseUrl, best.uri), ctrl.signal))
       }
       const seg = manifest?.segments?.[0]
       // 拿到了响应但里面一个分片都没有 → 判 fail，不能算这条通道「可达」。
@@ -261,6 +274,10 @@ export async function probeReachability(
         reach: 'ok' as Reach, ms: Math.round(performance.now() - t0),
         segmentUrl: resolveUrl(baseUrl, seg.uri),
         keyUrl: seg?.key?.uri ? resolveUrl(baseUrl, seg.key.uri) : undefined,
+        // 只在「没有 master 需要下钻」时才把原文交出去：有 master 时 hls.js 拿到的第一份是
+        // master 本身，喂媒体列表给它等于替它做了画质选择，会打乱 ABR
+        manifestText: best?.uri ? undefined : text,
+        manifestRequestUrl: best?.uri ? undefined : requestUrl,
       }
     } catch {
       return {
@@ -297,6 +314,11 @@ export async function probeReachability(
   const winner = CHANNEL_ORDER.map(c => runs[c]).find(r => r?.reach === 'ok')
   result.segmentUrl = winner?.segmentUrl
   result.keyUrl = winner?.keyUrl
+  // 顺手把胜出那次的 m3u8 原文带走，省掉 hls.js 重拉一遍（见 ProbeResult.manifestText）。
+  // 注意胜出通道可能在 Phase 2 之后被改（分片必须走代理时会补测），那时这份原文就对不上了——
+  // 所以下面重算 manifestChannel 时要一并作废。
+  result.manifestText = winner?.manifestText
+  result.manifestRequestUrl = winner?.manifestRequestUrl
 
   if (!result.manifestChannel) {
     result.degraded = true              // manifest 三条路全不通 → 没结论，交回兜底
@@ -334,6 +356,11 @@ export async function probeReachability(
     if (result.manifest.rootRef === 'skip' && result.segment.rootRef === 'ok' && rootOrigin) pending.push(runManifest('rootRef'))
     await Promise.all(pending)
     result.manifestChannel = pickChannel(result.manifest)
+    // 胜出通道换人了 → 原文跟着换（对不上就作废）。留着别人通道的原文不会出错
+    //（pLoader 按完整 URL 匹配，对不上自然 miss），但会让人误以为这次能命中
+    const finalRun = result.manifestChannel ? runs[result.manifestChannel] : undefined
+    result.manifestText = finalRun?.manifestText
+    result.manifestRequestUrl = finalRun?.manifestRequestUrl
   }
 
   // 双通道判据：分片「直连」和「代理·伪装」双向都实测通，且最终就走直连。

@@ -2,19 +2,23 @@
  * 用户交互：播放/暂停、进度条拖拽、音量、倍速、全屏、画中画、控制栏显隐、键盘快捷键。
  *
  * 只碰 `<video>` 元素和界面 ref，不参与加载决策，所以只依赖 media 和 autoTune（倍速换算）。
- * 「上/下一集」不在这里——那是播放列表的事，模板直接用 playlist 那份。
+ * 「上/下一集」的实现不在这里（那是播放列表的事，模板直接用 playlist 那份），
+ * 但**快捷键**得在这里——全局 keydown 只有这一处，切集键散在别处必然漂移。
  */
 import type { VideoMediaState } from './useVideoMediaState'
 import type { VideoAutoTune } from './useVideoAutoTune'
+import type { VideoPlaylistCtl } from './useVideoPlaylistCtl'
 
 export interface VideoUiControlsDeps {
   media: VideoMediaState
   /** 倍速换算在自愈调参环里（实际生效倍速受带宽/抗卡守卫钳制） */
   autoTune: VideoAutoTune
+  /** 只为 N/P 两个切集快捷键（实现仍在播放列表里） */
+  playlist: VideoPlaylistCtl
 }
 
 export function useVideoUiControls(deps: VideoUiControlsDeps) {
-  const { media, autoTune } = deps
+  const { media, autoTune, playlist } = deps
   const {
     videoEl, playerContainer, progressBar, isPlaying, isVideoLoaded, duration,
     volume, isMuted, desiredRate, autoBestRate, autoFullscreen, isFullscreen, showControls, showPlayIcon, showSpeedMenu,
@@ -300,7 +304,14 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
         toggleMute(); break
       case 'f': case 'F':
         toggleFullscreen(); break
+      // 切集：N 下一集 / P 上一集。看剧时用得最多，而原来只能去点画面上的按钮
+      //（窄屏还把「上一集」整个藏了）。P 让给上一集，画中画挪到 I——
+      // 画中画在这一页几乎没人用，而 P/N 相邻正好是 prev/next 的直觉。
+      case 'n': case 'N':
+        e.preventDefault(); void playlist.playNext(); break
       case 'p': case 'P':
+        e.preventDefault(); void playlist.playPrev(); break
+      case 'i': case 'I':
         togglePiP(); break
       case '<': case ',': {
         const i = PLAYBACK_RATES.indexOf(desiredRate.value)

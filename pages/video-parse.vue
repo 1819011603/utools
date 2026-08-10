@@ -129,8 +129,8 @@
               size="xs"
               icon="i-heroicons-play"
               :disabled="!playableCount || busy"
-              :title="busy ? '正在解析，稍候' : ''"
-              @click="playAll()"
+              :title="busy ? '正在解析，稍候' : '在新标签页打开播放器'"
+              @click="requestPlay()"
             >
               播放全部 ({{ playableCount }}<template v-if="busy">…</template>)
             </UButton>
@@ -287,6 +287,7 @@
           :ep-title="checkTarget.title"
           :origin="hintOrigin"
           :referer="hintReferer"
+          @status="reach = $event"
         />
 
         <!-- 选集 -->
@@ -338,14 +339,43 @@
                 variant="ghost"
                 icon="i-heroicons-play"
                 :disabled="busy"
-                title="从这一集开始播放"
-                @click="playAll(i)"
+                title="从这一集开始播放（新标签页）"
+                @click="requestPlay(i)"
               />
             </div>
           </div>
         </div>
       </div>
     </UCard>
+
+    <!-- 播放前的二次确认：只在可达性检测没通过时出现（通过了直接开新标签，不打扰） -->
+    <UModal v-model="confirmOpen">
+      <UCard>
+        <template #header>
+          <div class="flex items-center gap-2">
+            <UIcon
+              :name="reach.verdict?.severity === 'fatal' ? 'i-heroicons-x-circle' : 'i-heroicons-exclamation-triangle'"
+              class="w-5 h-5 shrink-0"
+              :class="reach.verdict?.severity === 'fatal' ? 'text-red-500' : 'text-amber-500'"
+            />
+            <span class="font-medium">{{ playGuard.title }}</span>
+          </div>
+        </template>
+        <p class="text-sm text-gray-600 dark:text-gray-300">{{ playGuard.detail }}</p>
+        <p class="mt-3 text-xs text-gray-400">
+          换一条线路通常比硬着头皮播更快——左边那排线路点一下就会自动重测。
+        </p>
+        <template #footer>
+          <div class="flex justify-end gap-2">
+            <UButton color="gray" variant="ghost" @click="confirmOpen = false">先不播</UButton>
+            <!-- 不做成 primary：这是「知道有风险还要继续」的那一侧 -->
+            <UButton color="amber" variant="soft" icon="i-heroicons-play" @click="confirmPlay">
+              仍要播放
+            </UButton>
+          </div>
+        </template>
+      </UCard>
+    </UModal>
 
     <!-- 历史 -->
     <UCard v-if="parseHistory.length">
@@ -373,6 +403,7 @@
 
 <script setup lang="ts">
 import type { ParsedEpisode, ParseResult, ParseRule } from '~/composables/videoParseRules'
+import type { ProbeVerdict } from '~/composables/videoPlayer/useReachabilityProbe'
 
 const toast = useToast()
 
@@ -776,6 +807,65 @@ const hintOrigin = computed(() => result.value?.origin || srcOrigin.value)
 const hintReferer = computed(() =>
   result.value?.referer || (srcOrigin.value ? srcOrigin.value + '/' : ''))
 
+// ── 可达性检测的结论（由 <VideoParseReachCheck> 上报）与「播放前二次确认」 ──
+//
+// 检测通过就直接进播放器；没过（没测出结论 / 正在测 / 实测不通）就先问一句。
+// 理由：这一步的成本是一次点击，而它避免的是「进播放器 → 转圈一分钟 → 回来换线路」那一整圈。
+// 反过来也要成立——**通过了就绝不多问**，否则每次播放都弹窗只会被训练成无脑点确认。
+const reach = ref<{ probing: boolean; verdict: ProbeVerdict | null }>({ probing: false, verdict: null })
+const reachPassed = computed(() => reach.value.verdict?.severity === 'ok')
+
+// 被测地址一变就先把结论清空。**必须按 url 字符串盯**，不能盯 checkTarget 本身：
+// 那是个 computed 出来的新对象，选集数组一动就换引用，而此时子组件的状态没变、不会重新上报，
+// 于是「通过」被清成 null，明明测过也要弹一次确认。
+// 反过来这道清空也不能省：换到没有可测地址的线路时子组件压根不渲染（也就不再上报），
+// 不清就会拿上一条线路的「通过」给这一条放行
+watch(() => checkTarget.value?.url, () => { reach.value = { probing: false, verdict: null } })
+
+const confirmOpen = ref(false)
+let pendingPlay: (() => void) | null = null
+
+/** 弹窗里的说法：三种「没过」各有各的原因，混成一句「可能播不了」就等于没说 */
+const playGuard = computed(() => {
+  const { probing, verdict } = reach.value
+  if (probing) return {
+    title: '可达性检测还没跑完',
+    detail: '再等一两秒就有结论了。现在进播放器也行，只是万一这条线路是死的，你会在那边白等一轮转圈。',
+  }
+  if (!verdict) return {
+    title: '这条线路还没测出可达性',
+    detail: '可能是刚切过来、或检测本身失败了。没测过就进播放器，遇到死链只能在那边干等。',
+  }
+  return { title: verdict.title, detail: verdict.detail }
+})
+
+const requestPlay = (startIndex = 0) => {
+  if (reachPassed.value) { playAll(startIndex); return }
+  pendingPlay = () => playAll(startIndex)
+  confirmOpen.value = true
+}
+
+const confirmPlay = () => {
+  confirmOpen.value = false
+  // 必须同步调用：window.open 只在用户手势的调用栈里才不被拦（这里就是那次点击）
+  pendingPlay?.()
+  pendingPlay = null
+}
+
+/**
+ * 播放器**开新标签页**。看片是个长时间停留的动作，而解析页上还有整张线路表——
+ * 同标签跳走的话想换条线路就得按返回键（还要重跑一遍解析，见 video-parse-last-result 那份缓存）。
+ *
+ * 交接槽走的是 localStorage，同源新标签照样读得到，长列表/按需取址的站点不受影响。
+ * 弹窗被拦（返回 null）时退回同标签跳转：宁可跳走也别让按钮点了没反应。
+ */
+const openPlayer = (qs: string) => {
+  const href = '/video-player?' + qs
+  if (window.open(href, '_blank')) return
+  toast.add({ title: '新标签被浏览器拦了，已在当前页打开', color: 'orange' })
+  void navigateTo(href)
+}
+
 const playAll = (startIndex = 0) => {
   const eps = currentLine.value?.episodes || []
   // 按需取址的站点整份带走（列表里是占位地址，下标必须与作业单对齐）；
@@ -858,7 +948,7 @@ const playAll = (startIndex = 0) => {
   if (hintReferer.value) params.set('referer', hintReferer.value)
   if (hintOrigin.value) params.set('origin', hintOrigin.value)
 
-  navigateTo('/video-player?' + params.toString())
+  openPlayer(params.toString())
 }
 
 const copyOne = async (url: string) => {

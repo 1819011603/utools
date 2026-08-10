@@ -22,6 +22,20 @@ const segPrefetching = new Map<string, Promise<ArrayBuffer>>()  // 正在预取�
 const segPrefetchAborts = new Map<string, AbortController>()    // 正在预取的 AbortController，seek 时取消
 let cachedVideoUrl = ''                                         // 当前缓存归属的视频 URL
 
+/**
+ * 「下一集」的分片暂存区（见 useVideoPrewarm 的第四段）。
+ *
+ * 为什么不能直接写进 segPrefetchCache：切集时 `useCacheForVideo(新地址)` 会整块 clear，
+ * 把刚预热好的下一集分片一起清掉——预热白做。所以先存在这儿、按视频地址归档，
+ * 等 useCacheForVideo 换到那个地址时再搬进去（adopt）。
+ *
+ * 自带上限与 TTL：它跟主缓存不同，主缓存的量由播放头和 LRU 管着，
+ * 而这里的分片可能永远用不上（用户没点下一集就关了页面），不封顶就是第二个内存黑洞。
+ */
+const STAGE_TTL_MS = 5 * 60 * 1000
+const STAGE_MAX_BYTES = 64 * 1024 * 1024
+let staged: { videoUrl: string; at: number; entries: Map<string, ArrayBuffer> } | null = null
+
 export function useSegmentCache(opts: { getMaxBufferSizeMB: () => number }) {
   const prefetchInfo = ref<PrefetchInfo>({ bufferSecs: 0, threads: 0, cached: 0, pending: 0, bytes: 0 })
 
@@ -58,6 +72,24 @@ export function useSegmentCache(opts: { getMaxBufferSizeMB: () => number }) {
     return { removed, freedBytes }
   }
 
+  /**
+   * 预热好的下一集分片先存这儿，等切过去时由 useCacheForVideo 搬进主缓存。
+   * 只留最新一份：同时预备两集没有意义（用户只会点一次下一集），留着白占内存。
+   */
+  const stageSegments = (videoUrl: string, entries: Array<[string, ArrayBuffer]>) => {
+    if (!videoUrl || !entries.length) return
+    let bytes = 0
+    const kept = new Map<string, ArrayBuffer>()
+    for (const [url, buf] of entries) {
+      if (bytes + buf.byteLength > STAGE_MAX_BYTES) break
+      bytes += buf.byteLength
+      kept.set(url, buf)
+    }
+    staged = { videoUrl, at: Date.now(), entries: kept }
+  }
+
+  const clearStagedSegments = () => { staged = null }
+
   // 换视频时调用：URL 变了 → 旧缓存全属于上个视频，整块清掉（含在途请求）；
   // 同一视频（重播 / 点回去）→ 原样保留，直接命中内存。
   const useCacheForVideo = (videoUrl: string) => {
@@ -67,8 +99,19 @@ export function useSegmentCache(opts: { getMaxBufferSizeMB: () => number }) {
     segPrefetching.clear()
     segPrefetchCache.clear()
     cachedVideoUrl = videoUrl
-    prefetchInfo.value.cached = 0
-    prefetchInfo.value.bytes = 0
+    // 清空之后再搬：暂存区里那几片正是这个新地址的，搬进来切集就能立刻起播。
+    // 顺序反了会被上面的 clear 一起扔掉（预热白做）。
+    if (staged) {
+      const fresh = staged.videoUrl === videoUrl && Date.now() - staged.at < STAGE_TTL_MS
+      if (fresh) {
+        const ts = Date.now()
+        for (const [url, buf] of staged.entries) segPrefetchCache.set(url, { buf, ts })
+        console.log(`用预热好的 ${staged.entries.size} 个分片，切集可立即起播`)
+      }
+      staged = null   // 用过/过期/换了别的地址 → 一律扔掉，绝不留到下一集
+    }
+    prefetchInfo.value.cached = segPrefetchCache.size
+    prefetchInfo.value.bytes = cacheBytes()
   }
 
   // 取消所有正在预取的 fetch（seek 后位置改变，旧的预取无意义）
@@ -144,5 +187,7 @@ export function useSegmentCache(opts: { getMaxBufferSizeMB: () => number }) {
     evictPrefetchCache,
     refreshCacheStats,
     purgeCache,
+    stageSegments,
+    clearStagedSegments,
   }
 }

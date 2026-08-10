@@ -32,7 +32,8 @@ const SHORTCUTS = [
   { keys: 'F', desc: '全屏' },
   { keys: 'Enter', desc: '全屏/恢复' },
   { keys: '</>', desc: '倍速调整' },
-  { keys: 'P', desc: '画中画' },
+  { keys: 'N / P', desc: '下一集 / 上一集' },
+  { keys: 'I', desc: '画中画' },
 ]
 
 // 与 useVideoGestures 一一对应，改手势时两处都要动

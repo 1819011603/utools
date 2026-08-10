@@ -25,7 +25,11 @@ export function useM3u8(getProxyUrl: (url: string) => string) {
     }
   }
 
-  const fetchM3u8Manifest = async (m3u8Url: string, signal?: AbortSignal): Promise<{ manifest: any; baseUrl: string }> => {
+  // 返回里带上 text 与 requestUrl：可达性探测为了数分片本来就把 body 读完了，
+  // 带出去就能让 hls.js 少拉一遍同一个 URL（见 ProbeResult.manifestText）
+  const fetchM3u8Manifest = async (
+    m3u8Url: string, signal?: AbortSignal,
+  ): Promise<{ manifest: any; baseUrl: string; text: string; requestUrl: string }> => {
     const proxyUrl = m3u8Url.startsWith('/api/proxy') ? m3u8Url : getProxyUrl(m3u8Url)
     const res = await fetch(proxyUrl, { signal, referrerPolicy: 'no-referrer' })
     if (!res.ok) throw new Error(`获取 M3U8 失败: ${res.status}`)
@@ -43,7 +47,7 @@ export function useM3u8(getProxyUrl: (url: string) => string) {
     const parser = new M3u8Parser()
     parser.push(text)
     parser.end()
-    return { manifest: parser.manifest as any, baseUrl }
+    return { manifest: parser.manifest as any, baseUrl, text, requestUrl: proxyUrl }
   }
 
   const pickBestVariant = (manifest: any): any | null => {
@@ -119,6 +123,38 @@ export function useM3u8(getProxyUrl: (url: string) => string) {
     return result
   }
 
+  /**
+   * 解析**已经拿到手的** m3u8 原文，返回分片绝对地址 + 时长 + AES key 地址。
+   *
+   * 给「预热下一集首几片」用（见 useVideoPrewarm.warmSegments）：那边已经为了进浏览器缓存
+   * 把 body 读完了，不该再发一次请求。`requestUrl` 是那一发实际请求的地址，
+   * 用来把相对 URI 还原成绝对地址——所以解析出来的结果与 hls.js 之后看到的 `frag.url` 一致
+   *（分片走代理时服务端已改写过 URI，直连时就是裸 CDN 地址）。
+   */
+  const parseManifestText = (
+    text: string, requestUrl: string,
+  ): { segments: Array<{ url: string; duration: number }>; keyUrl?: string } => {
+    const parser = new M3u8Parser()
+    parser.push(text)
+    parser.end()
+    const manifest = parser.manifest as any
+    let baseUrl: string
+    try {
+      const u = new URL(requestUrl, window.location.href)
+      baseUrl = u.origin + u.pathname.replace(/\/[^/]*$/, '/')
+    } catch {
+      baseUrl = requestUrl.replace(/\/[^/]*$/, '/')
+    }
+    const segs: Array<{ url: string; duration: number }> = []
+    let keyUrl: string | undefined
+    for (const seg of manifest?.segments ?? []) {
+      if (!seg?.uri) continue
+      segs.push({ url: resolveUrl(baseUrl, seg.uri), duration: seg.duration ?? 0 })
+      if (!keyUrl && seg.key?.uri) keyUrl = resolveUrl(baseUrl, seg.key.uri)
+    }
+    return { segments: segs, keyUrl }
+  }
+
   // 递归解析到媒体播放列表，返回带加密信息的分片列表
   const getM3u8SegmentsWithMeta = async (m3u8Url: string, signal?: AbortSignal): Promise<HlsSegment[]> => {
     const { manifest, baseUrl } = await fetchM3u8Manifest(m3u8Url, signal)
@@ -183,6 +219,7 @@ export function useM3u8(getProxyUrl: (url: string) => string) {
   return {
     resolveUrl,
     fetchM3u8Manifest,
+    parseManifestText,
     pickBestVariant,
     pickAudioPlaylistUrl,
     extractMediaSegmentsWithMeta,
