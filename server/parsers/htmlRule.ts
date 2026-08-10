@@ -184,6 +184,17 @@ export function createHtmlParser(rule: ParseRule): SiteParser {
     pattern: rule.pattern,
     challenge: rule.challenge === 'cdndefend' ? cdndefendChallenge : undefined,
 
+    // 详情页 → 第 1 集播放页（见 ParseRule.detailRe）。抠不到就返回 null 让上层照常解析：
+    // 详情页的 URL 判据命中、页面里却一条播放链接都没有，多半是站点改版或那部片没有资源，
+    // 这时拿详情页去跑选集正则会得到空结果，报出来的「页面结构不匹配」比这里硬报错更准
+    detailPlayUrl: (rule.detailRe && rule.detailPlayRe)
+      ? (ctx, html) => {
+          if (!new RegExp(rule.detailRe!, 'i').test(ctx.pageUrl)) return null
+          const href = html.match(new RegExp(rule.detailPlayRe!, 'i'))?.[1]
+          return href ? absolutize(decodeEntities(href), ctx.pageUrl) : null
+        }
+      : undefined,
+
     async parse(ctx: ParserContext, html: string): Promise<ParseResult> {
       const { lines, activeIndex } = parseLines(html, rule, ctx.pageUrl)
 

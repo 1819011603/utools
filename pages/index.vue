@@ -157,6 +157,14 @@ const categories: Category[] = [
         iconColor: 'text-fuchsia-600 dark:text-fuchsia-400'
       },
       {
+        name: '按片名搜索',
+        path: '/video-search',
+        icon: 'i-heroicons-magnifying-glass',
+        description: '一个片名，各站同时搜，点一格直接解析并播放',
+        bgColor: 'bg-rose-100 dark:bg-rose-900/50',
+        iconColor: 'text-rose-600 dark:text-rose-400'
+      },
+      {
         name: '视频解析',
         path: '/video-parse',
         icon: 'i-heroicons-link',

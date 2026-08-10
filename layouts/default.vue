@@ -141,6 +141,7 @@ const toolCategories: Category[] = [
       { label: '图片格式转换', path: '/image-convert', icon: 'i-heroicons-arrows-right-left' },
       { label: '视频转GIF', path: '/video-to-gif', icon: 'i-heroicons-film' },
       { label: '放映厅', path: '/video-player', icon: 'i-heroicons-play-circle' },
+      { label: '按片名搜索', path: '/video-search', icon: 'i-heroicons-magnifying-glass' },
       { label: '视频解析', path: '/video-parse', icon: 'i-heroicons-link' },
       { label: '音频格式转换', path: '/audio-convert', icon: 'i-heroicons-musical-note' }
     ]

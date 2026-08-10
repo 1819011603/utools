@@ -83,6 +83,7 @@ server/api/resolve.ts 播放页解析接口（薄壳，站点策略在 server/pa
 | `/audio-convert` | WebAudio 解码 + OfflineAudioContext 重采样 |
 | `/video-player` | M3U8/MP4 播放器，见下节（最复杂的一页） |
 | `/video-parse` | 播放页地址 → 整季选集 m3u8 → 送进播放器 |
+| `/video-search` | 片名 → 各站并发搜 → 点一条送去解析（见下节） |
 | `/json-format` | 格式化 + 高亮 + 树形 + 智能解析（递归去转义 ≤3 层）+ 路径删除/撤销 |
 | `/json-diff` | JSON 差异对比，可指定数组匹配键 |
 | `/json-extract` | JQ 风格路径提取 |
@@ -699,7 +700,61 @@ hls.js 再拉一次 manifest。三段全发生在用户点了「下一集」之�
 - **连接策略一概不写**；多个地址用 `urls=a|b`；超 2000 字符或按需取址时转存交接槽（`?handoff=1`）
 - **有 `playlistSource` 就一律写 `parseUrl` 那套**
 
+## 按片名搜索（/video-search）
+
+一个关键词 → 各站**并发**搜 → 左侧竖排站点、右侧结果网格 → 点一格新标签打开 `/video-parse?url=…`。
+搜索本身不解析任何视频地址，它只负责「把片名变成一个能解析的地址」。
+
+**全部配置化**（`composables/videoSearchRules.ts` 一张 `SEARCH_RULES` 表），接新站/站点改版只改表：
+搜索地址模板（`%KW%` / `%TOKEN%` / `%TS%` / `%CB%`）+ 一条卡片正则 + 几条字段正则。
+执行器是 `server/parsers/searchRule.ts`（与 `htmlRule.ts` 平级，不认识任何具体站点），
+接口是 `server/api/search.ts`（一次只搜一个站，并发是前端的事）。
+
+- **一次只搜一个站**：各站快慢差好几秒（ylsp ~0.6s、ncat 要先算一轮 PoW），
+  服务端一发把五个站串起来等于按最慢的算。`useVideoSearch` 同时发、各自落地各自渲染
+- **反爬复用解析那套**：`needPow` → 浏览器算 nonce（`solvePow`）→ 带 cookie 重发。
+  cookie 存在 `server/parsers/cookieStore.ts`（按 host），**搜索算过的解析页直接用，反之亦然**
+- **站点列表放左侧竖排不是顶部 tab**：站名带括号里的英文（「奈飞工厂 (netflixgc)」），
+  五个横着摆一行放不下、会被挤成省略号；竖排一屏看全，加站也不撑爆。窄屏才退回横向滚动
+- **结果缓存**：内存 Map + `video-search-last-result`（TTL 1 小时）。
+  **`saveCache()` 必须写在「自动选中第一个有结果的站」那段逻辑之外**——写在里面的话
+  第一个站落地后闩就锁上了，后面几站一份都存不进去，表现是「点进一条结果再回来只剩第一个站有数据」（踩过）
+
+### 各站搜索的实测结论
+
+- **kpkuang 的 `/vodsearch/` 挂着 Cloudflare 人机校验**（403 + `cf-mitigated: challenge`，
+  `.org/.com` 都一样），但**同一个客户端取 `/voddetail/`、`/vodplay/` 全是 200**——
+  说明那是一条只打在搜索路径上的 WAF 规则，不是 IP 信誉也不是 TLS 指纹，
+  **换 UA / 换请求头 / curl_cffi 那类指纹伪装一概没用**（我们的指纹本来就过得去）。
+  出路是**绕开那条路径**：站点首页那颗搜索框调的是另一个域名上的 JSONP 接口
+  （`kpdata.flixfiend.top/esearch/index`），没有 CF。于是规则表加了 `json` 模式——
+  纯声明的 JSON 取值（JSONP 外壳 / base64 载荷 / 点分路径 / `%ID%` 拼落点），不写代码。
+  两个坑：① **不带 `Referer: https://www.kpkuang.org/` 恒回空结果**；
+  ② 同样的参数偶发回 `{"code":0,"js":""}`，下一秒就正常 → `retries` 重试，
+  且**每次重试都要重新 `buildSearchUrl`**（`%TS%`/`%CB%` 复用旧值会被判重放）
+- **ncat 搜索要一个 `t`**：不是签名，是站点任意页面搜索表单里的隐藏字段（`<input name="t">`），
+  全站同一个值，抓一次按 host 缓存 30 分钟。取那一页本身要过 cdndefend PoW
+- **ncat 的封面不在站点域名下**：页面里写的是 `/vod1/vod/cover/…jpg`，但那个路径在
+  `www.ncat22.com` 上恒 403（openresty 直接拒，带反爬 cookie、带 Referer、全套浏览器头都一样）。
+  可用图床列在页面引的 `rdul.js` 里（`window.RDUL` 数组）→ `SearchRule.picBase` **现抠现用**，
+  不写死域名（同 `ParseRule.playerOrigin` 的思路）
+- **封面加载走两级退路**：直连 → `/api/thumb`（服务端代取，带得上反爬 cookie 和 Referer）→ 占位块。
+  失败**按图床 host 记在模块级 Set 里**：整站取不到时一页 18 张各自试两遍 = 36 个白跑的请求
+
 ## 视频解析（/video-parse）
+
+### 详情页也能解析（`ParseRule.detailRe` / `detailPlayRe`）
+
+搜索结果给的落点多半是**详情页**（`…/voddetail/1033381/`、`…/detail/351103.html`），
+而播放地址只写在播放页上。`resolve.ts` 在过完反爬之后加了一跳：命中 `detailRe` 就抓详情页、
+按 `detailPlayRe` 抠出第 1 集播放页，**换成它重抓一次**，下游（策略、线路号、地址栏同步、
+交接槽、播放器的 `parseUrl`）一律只见播放页。
+
+- 放在解析侧而不是搜索侧：手动粘详情页地址的人同样受益，搜索页也不必认识各站的 URL 形态
+- **`ParseResult.pageUrl` 返回的是换过之后的播放页**，`video-parse.vue` 要把 `inputUrl` 跟着回写——
+  不回写的话 `syncUrlToQuery` 那道「结果属不属于当前地址」的校验不成立，`line` 永远写不进地址栏
+- 抠出来的不一定是**第 1 条线路**的第 1 集（实测 netflixgc 详情页把 2 线排在最前 → `48800-2-1`）。
+  这不要紧：解析结果带着整张线路表，点一下就能换；为精确到 1 线给每个站再写一条容器正则不值
 
 ### 分工（策略模式）
 

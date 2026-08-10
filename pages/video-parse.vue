@@ -678,6 +678,12 @@ const startResolve = async (line?: number) => {
     powCookie.value = cookie
     result.value = res
 
+    // 传进来的是**详情页**时（搜索结果、或用户自己粘的），服务端会换成第 1 集的播放页，
+    // 这里把输入框跟着改过去。不改的话 syncUrlToQuery 里那道「结果属不属于当前地址」的校验
+    // 不成立，`line` 永远写不进地址栏，分享出去就丢了线路；结果缓存也会按详情页存，
+    // 下次带 line 回来对不上、白解析一轮
+    if (res.pageUrl && res.pageUrl !== url) inputUrl.value = res.pageUrl
+
     // 内嵌播放器归位：换线路/换片子后 iframe 还停在上一条线路的那一集，
     // 而下面的集名早就换了，对不上。服务端探测到的那一集就是起点。
     // 「限制广告」不复位：它是用户的偏好，不是某条线路的临时状态

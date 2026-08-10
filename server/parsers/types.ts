@@ -13,6 +13,8 @@ import type { ChallengeKind, ParseResult, PowChallenge } from '../../composables
 export interface FetchedPage {
   status: number
   body: string
+  /** 有的反爬只在响应头上留痕（Cloudflare 的 `cf-mitigated: challenge`），body 里看不出来 */
+  headers?: Headers
 }
 
 export interface ParserContext {
@@ -54,5 +56,12 @@ export interface SiteParser {
   /** 与 videoSiteRules 同语义：`/正则/` 按正则匹配整个 URL，否则按 host 子串 */
   pattern: string
   challenge?: ChallengeHandler
+  /**
+   * 传入的是「详情页」（只有简介和选集入口、没有播放地址）时，从它的 HTML 里抠出
+   * 第 1 集播放页的绝对地址；不是详情页就返回 null。
+   *
+   * 搜索结果给的多半是详情页，用户手动粘的也可能是。换这一跳之后下游只见播放页。
+   */
+  detailPlayUrl?: (ctx: Pick<ParserContext, 'pageUrl' | 'host'>, html: string) => string | null
   parse: (ctx: ParserContext, html: string) => Promise<ParseResult>
 }

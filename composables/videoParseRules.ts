@@ -124,6 +124,27 @@ export interface ParseRule {
   }
 
   /**
+   * 「这是一个详情页地址」的判据（正则串，匹配整个 URL）。命中就先抓详情页、
+   * 按 detailPlayRe 抠出第 1 集的播放页，再照常解析。
+   *
+   * 由来：搜索页给出的落点多半是详情页（`…/voddetail/1033381/`、`…/detail/351103.html`），
+   * 用户手动粘过来的也常是它——那是站点上「一部片」的主页，比播放页更好找、也更稳定。
+   * 而播放地址只写在播放页上，所以要有这一跳。放在解析侧而不是搜索侧：手动粘详情页的人
+   * 同样受益，且搜索页从此不必关心各站的 URL 形态。
+   */
+  detailRe?: string
+
+  /**
+   * 从详情页 HTML 抠出**某条线路的第 1 集**播放页地址，取第 1 个捕获组（相对地址会被 absolutize）。
+   * 实测四个站的详情页里第一条播放链接都是「某条线路的第 1 集」，一条正则够用。
+   *
+   * 注意落到哪条线路不一定是第 1 条（实测 netflixgc 的详情页把 2 线排在最前，抠出来的是
+   * `48800-2-1`）——**这不要紧**：解析结果会把整张线路表带出来，用户点一下就能换线路，
+   * 而集数是对的。想精确到 1 线的话得给每个站写一条「线路容器」正则，为这点收益不值。
+   */
+  detailPlayRe?: string
+
+  /**
    * 按需取址：解析阶段只取传入的那一集，其余集播到哪集才去抓哪集的播放页。
    *
    * 这类规则的地址是**逐集抓页**抠出来的，一集一个子请求。长剧（实测 ylsp 186 集）
@@ -151,6 +172,9 @@ export const BUILTIN_PARSE_RULES: ParseRule[] = [
     // 所以一次请求就能拿到整张线路 × 集数表，不用逐线路翻页
     episodeGroupRe: '<div class="episode-list"[^>]*>([\\s\\S]*?)</div>',
     episodeRe: '<a[^>]*href="([^"]+)"[^>]*class="[^"]*episode-item[^"]*"[^>]*>\\s*<span>([^<]*)</span>',
+    // 搜索结果只给详情页（该站的搜索卡片里没有播放链接），必须靠这一跳
+    detailRe: '/detail/\\d+\\.html',
+    detailPlayRe: 'href="(/play/[^"]+)"',
     // 「整张线路×集数表一次拿到」省的只是列表，**地址仍要逐集抓页**——实测这部片 19 条线路
     // 每条 73-79 集，非 lazy 时首批 40 个子请求就要 7.8s，剩下 38 集还得再续一批，
     // 点一下线路卡好几秒（用户原话「点击线路巨卡无比」）。而用户通常只看几集。
@@ -174,6 +198,8 @@ export const BUILTIN_PARSE_RULES: ParseRule[] = [
     episodeRe: '<a class="module-play-list-link[^"]*" href="([^"]+)"[^>]*>\\s*<span>([^<]*)</span>',
     // title 是「剧名-免费在线观看-集号」，兜底只削得掉最后一段
     titleRe: '<title>([^<-]+)',
+    detailRe: '/voddetail/\\d+',
+    detailPlayRe: 'href="(/play/[^"]+)"',
     // 实测 186 集，一次抓完要 186 个子请求
     lazy: true,
   },
@@ -192,6 +218,8 @@ export const BUILTIN_PARSE_RULES: ParseRule[] = [
     episodeRe: '<a[^>]*href="([^"]+)"[^>]*>\\s*<span>([^<]*)</span>',
     // title 是一长串 SEO 文案，剧名只在书名号里
     titleRe: '<title>[^<]*《([^》]+)》',
+    detailRe: '/voddetail/\\d+',
+    detailPlayRe: 'href="(/vodplay/[^"]+)"',
     // 视频挂在与播放页无关的 CDN 上（v.fengbao10.com 之类），防盗链认的是站点自己的
     // 播放器页。地址从站点的播放器配置里现取，站点换域名时不用改代码
     playerOrigin: {
@@ -225,6 +253,10 @@ export const BUILTIN_PARSE_RULES: ParseRule[] = [
     episodeRe: '<a class="fed-btns-info[^"]*"[^>]*href="([^"]+)"[^>]*>\\s*([^<]*?)\\s*</a>',
     // title 是「《剧名》(年份) - 在线播放页面 - 当前播放:N - 线路:X - 站名」
     titleRe: '<title>[^<]*《([^》]+)》',
+    // 这个站的搜索被 Cloudflare 挡着（见 videoSearchRules 的 manual），
+    // 用户只能在源站搜到之后把详情页地址粘回来——那条路全靠这一跳
+    detailRe: '/voddetail/\\d+',
+    detailPlayRe: 'href="(/vodplay/[^"]+)"',
     // 防盗链域名**每条线路都不一样**，而且就写在播放页的 data-pars 上（那是这条线路用的
     // 解析播放器前缀）：睿映线认 soul.flixfiend.top、电影天堂线认 vip.dyttzyplay.com、
     // 芒果线认 jx.xmflv.com。所以不给 url —— 现抠当前页，也不按 host 缓存

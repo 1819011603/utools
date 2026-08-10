@@ -52,7 +52,10 @@
       "Bash(export HTTPS_PROXY=http://127.0.0.1:7897)",
       "Bash(cp /tmp/tsconfig.check.json ./tsconfig.check.json && node_modules/.bin/tsc -p tsconfig.check.json 2>&1 | grep -E \"^\\(composables|server|utils\\)\" | grep -vE \"useMediaProcess|m3u8-parser|useM3u8.ts\\\\\\(2[0-9][0-9],|proxy.ts\\\\\\(201\"; rm -f tsconfig.check.json; echo \"--- ts ok ---\")",
       "Bash(python3 -)",
-      "Bash(python3 - *)"
+      "Bash(python3 - *)",
+      "Bash(\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless=new --disable-gpu --no-first-run --user-data-dir=/tmp/cprof --virtual-time-budget=25000 --dump-dom \"http://localhost:3000/video-search?kw=%E4%B8%9C%E5%AE%AB\")",
+      "Bash(timeout 100 \"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless=new --disable-gpu --no-first-run --user-data-dir=/tmp/cprof4 --virtual-time-budget=30000 --dump-dom \"http://localhost:3000/video-search?kw=%E4%B8%9C%E5%AE%AB\")",
+      "Bash(lsof -ti:3000)"
     ],
     "ask": [
       "Bash(rm *)",
