@@ -31,6 +31,14 @@ const LOAD_TIMEOUT = 15000
 // 这样重新取址那一次还能落在用户耐心之内（重取成功会把两个计时器一起重置）。
 const STALE_URL_TIMEOUT = 10000
 const MAX_HLS_RETRY = 3
+/**
+ * `recoverMediaError()` 的次数上限。**必须有上限**：它重建 MediaSource 再从当前位置续拉，
+ * 前提是「数据本身没问题、只是解码器状态坏了」。可如果取回来的字节压根不是视频
+ *（实测被 Cloudflare 下线的源，每个分片都是同一张 20KB 诱饵图，见 server/api/proxy.ts 的
+ * DEAD_SOURCE_LANDINGS），那就是「恢复 → 立刻再失败 → 再恢复」的死循环，
+ * 屏幕上是**一直在闪**、永远出不来画面，而错误提示每次 2s 后自己清掉，用户连原因都看不到（踩过）。
+ */
+const MAX_MEDIA_ERROR_RECOVER = 3
 
 // 动态导入 hls.js（避免 SSR 问题），模块级缓存一次
 let Hls: typeof HlsType | null = null
@@ -45,6 +53,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
 
   let hls: HlsType | null = null
   const hlsRetryCount = ref(0)
+  let mediaErrorRecovered = 0   // 本次加载已恢复几次媒体错误（见 MAX_MEDIA_ERROR_RECOVER）
 
   let loadTimeoutTimer: ReturnType<typeof setTimeout> | null = null
   let staleUrlTimer: ReturnType<typeof setTimeout> | null = null
@@ -112,6 +121,18 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   const aggregateKBps = computed(() => Math.round(strategy.value.perConnKBps * strategy.value.targetConn))
   const aggregateMbps = computed(() => Math.round((aggregateKBps.value * 8 / 1024) * 10) / 10)
 
+  /**
+   * 报错文案：探测已经实测证伪时，一律用它的结论顶掉笼统的兜底话术。
+   *
+   * 「加载超时」「链接无效或已过期」这些兜底只是猜，而 `diagnoseProbe` 手上有实测证据
+   *（典型：源站已被 Cloudflare 下线，换哪条通道都一样）。更要紧的是**它得留在页面上**——
+   * toast 会自己消失，用户回过神来想看原因时只剩一句猜的（踩过：「提醒一下就没了」）。
+   */
+  const failMessage = (fallback: string): string => {
+    const v = conn.probeVerdict.value
+    return v.severity === 'fatal' ? `${v.title}——${v.detail}` : fallback
+  }
+
   // ── 加载超时 ──
   const clearLoadTimeout = () => {
     if (loadTimeoutTimer) { clearTimeout(loadTimeoutTimer); loadTimeoutTimer = null }
@@ -133,7 +154,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     }, STALE_URL_TIMEOUT)
     loadTimeoutTimer = setTimeout(() => {
       if (!hasReceivedData && isLoading.value) {
-        errorMessage.value = '加载超时，视频链接可能已过期或无法访问（403/404）'
+        errorMessage.value = failMessage('加载超时，视频链接可能已过期或无法访问（403/404）')
         isLoading.value = false
         isBuffering.value = false
         isVideoLoaded.value = false
@@ -282,6 +303,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     duration.value = 0
     bufferedPercent.value = 0
     hlsRetryCount.value = 0
+    mediaErrorRecovered = 0
 
     videoKey.value++     // 强制重新创建 video 元素，彻底重置状态
     isVideoLoaded.value = true
@@ -324,9 +346,9 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     errorMessage.value = '链接可能已过期，正在重新获取播放地址...'
     if (await deps.refetchUrl()) return
     if (conn.escalateStrategyAndReload()) return
-    errorMessage.value = details === 'manifestLoadError'
+    errorMessage.value = failMessage(details === 'manifestLoadError'
       ? '视频链接无效或已过期，请检查链接是否正确'
-      : `网络错误: ${details}，链接可能已过期`
+      : `网络错误: ${details}，链接可能已过期`)
     isLoading.value = false
     isBuffering.value = false
     isVideoLoaded.value = false
@@ -429,9 +451,25 @@ export function useVideoEngine(deps: VideoEngineDeps) {
           }
           break
         case HlsLib.ErrorTypes.MEDIA_ERROR:
-          errorMessage.value = '媒体错误，正在恢复...'
-          hls?.recoverMediaError()
-          setTimeout(() => { errorMessage.value = '' }, 2000)
+          mediaErrorRecovered++
+          if (mediaErrorRecovered > MAX_MEDIA_ERROR_RECOVER) {
+            // 恢复了几次还在同一个地方倒下 → 不是解码器状态坏了，是数据不对。
+            // 继续恢复只会无限闪屏，停下来把原因说清楚才是有用的
+            errorMessage.value = failMessage('媒体解码持续失败：取回的数据不是可播的视频（源站可能已下线或返回了占位内容），换一条线路试试')
+            isLoading.value = false
+            isBuffering.value = false
+            isVideoLoaded.value = false
+            destroyHls()
+            break
+          }
+          {
+            const msg = `媒体错误，正在恢复 (${mediaErrorRecovered}/${MAX_MEDIA_ERROR_RECOVER})...`
+            errorMessage.value = msg
+            hls?.recoverMediaError()
+            // **只在这条提示还没被别人改过时才清掉**。不加这道判断，恢复失败得快的时候
+            // 上一次的定时器会把刚写上去的「放弃原因」一起擦掉——表现正是「报了一下就没了」
+            setTimeout(() => { if (errorMessage.value === msg) errorMessage.value = '' }, 2000)
+          }
           break
         default:
           errorMessage.value = '播放失败: ' + data.details

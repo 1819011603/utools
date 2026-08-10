@@ -279,6 +279,16 @@
           description="源站限流，不能一次把整季的地址都取下来（会被判为请求过于频繁）。这里只取了当前这一集，其余集在播放器里切到哪集就取哪集，正常播放即可。"
         />
 
+        <!-- 可达性检测：只在手上真有一条已解析地址时出现（内嵌线路、不给直链的线路没有可测的东西）。
+             按需取址的站点这里只有当前那一集，测它即可——同一条线路各集的域名和防盗链通常一致 -->
+        <VideoParseReachCheck
+          v-if="checkTarget"
+          :url="checkTarget.url"
+          :ep-title="checkTarget.title"
+          :origin="hintOrigin"
+          :referer="hintReferer"
+        />
+
         <!-- 选集 -->
         <div class="space-y-2">
           <div class="text-sm font-medium text-gray-700 dark:text-gray-300">
@@ -400,6 +410,14 @@ const isLazy = computed(() => !!result.value?.clientTask?.lazy)
 const playableCount = computed(() =>
   isLazy.value ? (currentLine.value?.episodes.length ?? 0) : resolvedCount.value,
 )
+// 「可达性检测」测哪一集：第一条已经解析出真实地址的。
+// 按需取址的站点也有一条（解析页只取当前这一集），内嵌 / 不给直链的线路则一条都没有 → 整块不显示
+const checkTarget = computed(() => {
+  const eps = currentLine.value?.episodes || []
+  const i = eps.findIndex(e => e.videoUrl)
+  return i < 0 ? null : { url: eps[i]!.videoUrl!, title: eps[i]!.title || `第 ${i + 1} 集` }
+})
+
 const hasSignedUrl = computed(() =>
   // Expires/Signature 是 S3 风格预签名地址的标志（4kvm 的部分集数走网盘直链就是这种）
   resolvedEpisodes.value.some(e => /[?&](sign|signature|timestamp|token|auth_key|expires)=/i.test(e.videoUrl || '')),
@@ -746,6 +764,18 @@ const originOfPage = (pageUrl: string): string => {
   try { return new URL(u.startsWith('//') ? 'https:' + u : u).origin } catch { return '' }
 }
 
+/**
+ * 防盗链候选值。**送进播放器的那一对和本页「可达性检测」用的必须是同一对**——
+ * 差一点就等于测的是另一套配置，结论对播放毫无意义。
+ *
+ * 规则显式声明的优先（那是站点作者写死的正确值）：有的站点视频只认某个第三方域名，
+ * 播放页域名照样 403（实测 netflixgc.net → cjbfq.netflixgc.tv），拿播放页 origin 兜底反而是错的。
+ */
+const srcOrigin = computed(() => originOfPage(result.value?.pageUrl || inputUrl.value))
+const hintOrigin = computed(() => result.value?.origin || srcOrigin.value)
+const hintReferer = computed(() =>
+  result.value?.referer || (srcOrigin.value ? srcOrigin.value + '/' : ''))
+
 const playAll = (startIndex = 0) => {
   const eps = currentLine.value?.episodes || []
   // 按需取址的站点整份带走（列表里是占位地址，下标必须与作业单对齐）；
@@ -824,14 +854,9 @@ const playAll = (startIndex = 0) => {
   // 的顺序逐级降级，直连能通就走直连，带上它不会平白多绕一层代理。
   //
   // 走 parseUrl 时播放器自己解析也能拿到这对头，但命中交接槽那条路不会重新解析，
-  // 所以这里仍要带上。规则显式声明的那对头优先（那是站点作者写死的正确值）：
-  // 有的站点视频只认某个第三方域名，播放页域名照样 403
-  //（实测 netflixgc.net → cjbfq.netflixgc.tv），这时拿播放页 origin 兜底反而是错的。
-  const srcOrigin = originOfPage(result.value?.pageUrl || inputUrl.value)
-  if (result.value?.referer) params.set('referer', result.value.referer)
-  else if (srcOrigin) params.set('referer', srcOrigin + '/')
-  const playOrigin = result.value?.origin || srcOrigin
-  if (playOrigin) params.set('origin', playOrigin)
+  // 所以这里仍要带上。取值规则见 hintOrigin/hintReferer（与本页「可达性检测」共用同一对）。
+  if (hintReferer.value) params.set('referer', hintReferer.value)
+  if (hintOrigin.value) params.set('origin', hintOrigin.value)
 
   navigateTo('/video-player?' + params.toString())
 }

@@ -70,7 +70,15 @@ export interface ProbeResult {
   // 结论要连着证据一起带走——否则 resolveConnConfig 只能猜，猜错就变成「探的是 A、用的是 B」
   hdrOrigin?: string
   hdrReferer?: string
+  /**
+   * 源站已被官方下线（不是通道问题，换哪条都一样）。由代理回的 451 认出来，
+   * 见 `server/api/proxy.ts` 的 `DEAD_SOURCE_LANDINGS`。
+   */
+  deadSource?: boolean
 }
+
+/** 代理对「已被官方下线的源」回这个码（451 Unavailable For Legal Reasons） */
+const SOURCE_GONE_STATUS = 451
 
 const DEFAULT_TIMEOUT = 8000     // 单条通道超时
 const OVERALL_TIMEOUT = 12000    // 整轮探测硬上限（探测阻塞起播，不能让多个超时叠加）
@@ -118,7 +126,9 @@ function isMixedContent(url: string): boolean {
  * 很多 CDN 不处理预检 → 探测假阴性；而真实的分片请求（useHlsPrefetch 里的 fetch）
  * 是不带任何自定义头的 simple request。探测必须与真实请求完全同形才有意义。
  */
-async function probeUrl(url: string, timeoutMs: number, signal?: AbortSignal): Promise<{ reach: Reach; ms: number }> {
+async function probeUrl(
+  url: string, timeoutMs: number, signal?: AbortSignal,
+): Promise<{ reach: Reach; ms: number; status?: number }> {
   if (isMixedContent(url)) return { reach: 'fail', ms: 0 }
   const t0 = performance.now()
   const ctrl = new AbortController()
@@ -129,7 +139,7 @@ async function probeUrl(url: string, timeoutMs: number, signal?: AbortSignal): P
   try {
     const res = await fetch(url, { signal: ctrl.signal, referrerPolicy: 'no-referrer' })
     void res.body?.cancel().catch(() => {})
-    return { reach: res.ok ? 'ok' : 'fail', ms: Math.round(performance.now() - t0) }
+    return { reach: res.ok ? 'ok' : 'fail', ms: Math.round(performance.now() - t0), status: res.status }
   } catch {
     // 超时 / 撞上整体截止 → unknown（没拿到答案，不能判死，否则慢源会被误判成要代理）；
     // CORS 拒绝 / 网络错误 / 证书问题 → fail
@@ -201,9 +211,12 @@ export async function probeReachability(
   // 探一根轴：直连 + 伪装并发，两者都没通才追加防盗链，防盗链也没通才试主域
   const probeAxis = async (axis: AxisProbe, urlOf: (c: Channel) => string) => {
     const run = async (c: Channel) => {
-      const { reach, ms } = await probeUrl(urlOf(c), timeoutMs, deadline)
+      const { reach, ms, status } = await probeUrl(urlOf(c), timeoutMs, deadline)
       axis[c] = reach
       axis.ms[c] = ms
+      // 代理认出「源站已被官方下线」→ 记在结论上。这一条比「四条通道全不可达」有用得多：
+      // 后者听起来像还能换条路试试，前者说明换源之外没有别的办法
+      if (status === SOURCE_GONE_STATUS) result.deadSource = true
     }
     await Promise.all([run('direct'), run('disguise')])
     if (needsHeadersChannel(axis) && !expired()) await run('headers')
@@ -394,6 +407,119 @@ export function resolveConnConfig(r: ProbeResult, selfOrigin: string): ConnConfi
     return { disguiseAsDownloader: true, requestOrigin: '', requestReferer: '', manifestOnly: true, dualChannel: r.dualChannel }
   }
   return withHeaders(true, man)
+}
+
+// ── 结论判读（播放器与解析页共用）──
+//
+// 判读独立成函数而不是散在各调用点：同一份矩阵有三个读者（播放器起播前的提醒、
+// 折叠区的探测矩阵、解析页的「可达性检测」按钮），各写一遍必然漂移——
+// 尤其「四条通道全 fail」和「没测过（全 skip）」这两种长得像但含义相反的情况（见 axisMeasured）。
+
+const axisAnyOk = (a: AxisProbe): boolean => CHANNEL_ORDER.some(c => a[c] === 'ok')
+
+/**
+ * 这根轴到底测过没有。清单通了但没解析出分片时（master 下钻失败 / 空列表）probeAxis 压根不会跑，
+ * 四个通道全留在 'skip'——那是「没测」不是「测过不通」，拿它当证据会把结论说反（踩过）。
+ */
+export const axisMeasured = (a: AxisProbe): boolean => CHANNEL_ORDER.some(c => (a[c] ?? 'skip') !== 'skip')
+
+/** 测过、且每一条测过的通道都实测失败（没有 ok、也没有 unknown 可以指望）→ 已被证伪，重试无意义 */
+const axisAllFailed = (a: AxisProbe): boolean =>
+  axisMeasured(a)
+  && CHANNEL_ORDER.some(c => a[c] === 'fail')
+  && CHANNEL_ORDER.every(c => a[c] === 'fail' || (a[c] ?? 'skip') === 'skip')
+
+export type ProbeIssue =
+  'ok' | 'source-gone' | 'manifest-unreachable' | 'segment-unreachable' | 'combo-missing' | 'inconclusive'
+
+export interface ProbeVerdict {
+  /** fatal = 实测证伪，再等/再试都没用，值得立刻告诉用户；warn = 没结论，照常尝试 */
+  severity: 'ok' | 'warn' | 'fatal'
+  issue: ProbeIssue
+  title: string
+  detail: string
+}
+
+const INCONCLUSIVE: Omit<ProbeVerdict, 'title'> = {
+  severity: 'warn', issue: 'inconclusive',
+  detail: '有通道到超时都没响应（慢源常见，慢 ≠ 不可达），播放器会照常加载并在失败时逐级降级。',
+}
+
+/**
+ * 矩阵 → 一句结论 + 一段原因。
+ *
+ * 关键是把 `fatal` 摘出来：清单能取到、分片四条通道全 403 这种情况在探测结束的那一刻
+ * 就已经注定播不了，而后面还要跑 5 级线性阶梯盲试、每级一次 15s 加载超时——
+ * 用户盯着转圈一分多钟才看到一句「加载超时」。结论早就有了，就该早说。
+ */
+export function diagnoseProbe(r: ProbeResult | null): ProbeVerdict {
+  if (!r) return { ...INCONCLUSIVE, title: '尚未探测' }
+  const segName = r.isHls ? '分片' : '视频'
+  const advice = '多为地址已过期、源站换了防盗链规则，或 CDN 拒了我们的出口 IP。换一条线路或重新解析即可。'
+
+  // 已经确知原因就别说「不可达」这种废话——用户问的是「为什么播不了」，
+  // 而这一条的答案是「跟连接方式无关，这个源被下线了」
+  if (r.deadSource) {
+    return {
+      severity: 'fatal', issue: 'source-gone',
+      title: '这个源已被 Cloudflare 以违反服务条款下线',
+      detail: '源站内容被整个换成了一张「This content has been restricted」的占位图（我们照原样播只会一直闪），'
+        + '换通道、改 Origin/Referer 都没有用。只能换一条线路或换个片源。',
+    }
+  }
+
+  if (!axisAnyOk(r.manifest)) {
+    if (axisAllFailed(r.manifest)) {
+      return {
+        severity: 'fatal', issue: 'manifest-unreachable',
+        title: r.isHls ? 'm3u8 清单四条通道全部不可达' : '视频地址四条通道全部不可达',
+        detail: `直连与代理（伪装 / 防盗链 / 主域）全部失败，这条地址取不下来。${advice}`,
+      }
+    }
+    return { ...INCONCLUSIVE, title: r.isHls ? '清单探测未拿到结论' : '探测未拿到结论' }
+  }
+
+  // 分片轴没测过（全 skip）= 让分片跟随清单通道，不是问题，别报
+  if (axisMeasured(r.segment) && !axisAnyOk(r.segment)) {
+    if (axisAllFailed(r.segment)) {
+      return {
+        severity: 'fatal', issue: 'segment-unreachable',
+        title: `清单能取到，但${segName}四条通道全部不可达`,
+        detail: `第一个${segName}在直连和代理（伪装 / 防盗链 / 主域）上全部失败，播进去只会一直转圈。${advice}`,
+      }
+    }
+    return { ...INCONCLUSIVE, title: `${segName}探测未拿到结论` }
+  }
+
+  // 两轴各自都有可达通道，却凑不出一种「清单与分片同时可达」的组合（见 resolveConnConfig 的归一化）
+  if (!resolveConnConfig(r, '')) {
+    return {
+      severity: 'warn', issue: 'combo-missing',
+      title: '清单与分片的可达通道凑不出组合',
+      detail: '典型是「清单只能直连、分片只能走代理」这类方向相反的不对称要求，无法同时满足，播放器会退回线性阶梯盲试。',
+    }
+  }
+
+  return { severity: 'ok', issue: 'ok', title: '可以播放 · ' + describeProbe(r), detail: '' }
+}
+
+export interface ProbeMatrixRow {
+  name: string
+  cells: Array<{ channel: Channel; label: string; reach: Reach; ms?: number }>
+}
+
+/** 矩阵读数（两轴 × 四通道），供 `<ProbeMatrix>` 渲染 */
+export function probeMatrixRows(r: ProbeResult | null): ProbeMatrixRow[] {
+  if (!r) return []
+  const axes: Array<{ name: string; axis: AxisProbe }> = r.isHls
+    ? [{ name: '清单', axis: r.manifest }, { name: '分片', axis: r.segment }]
+    : [{ name: '视频', axis: r.segment }]
+  return axes.map(({ name, axis }) => ({
+    name,
+    // axis[c] 兜 'skip'：加通道之前写进 localStorage 的旧探测结果没有新字段，
+    // 直接渲染 undefined 会得到一个没有底色、也没有 title 的空格子
+    cells: CHANNEL_ORDER.map(c => ({ channel: c, label: CHANNEL_LABEL[c], reach: axis[c] ?? 'skip', ms: axis.ms[c] })),
+  }))
 }
 
 // 探测结论的一句话描述，供 UI 展示

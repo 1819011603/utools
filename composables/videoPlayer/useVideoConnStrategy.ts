@@ -8,7 +8,7 @@
  * 线性阶梯只保留为「探测拿不到结论」（断网/全超时）时的兜底。
  */
 import type { Ref } from 'vue'
-import type { ProbeResult, ConnConfig, AxisProbe } from './useReachabilityProbe'
+import type { ProbeResult, ConnConfig } from './useReachabilityProbe'
 import type { VideoMediaState } from './useVideoMediaState'
 import type { VideoServerTier } from './useVideoServerTier'
 
@@ -23,6 +23,9 @@ export interface VideoConnStrategyDeps {
   reload: () => void
 }
 
+/** 探测结论那条常驻 toast 的固定 id（同一时刻只留最新一条，见 notifyProbeVerdict） */
+const VERDICT_TOAST_ID = 'vp-probe-verdict'
+
 /** 线性阶梯每一级的展示文案（下标即 step） */
 const STRATEGY_STEP_LABELS = ['直连', '代理清单·分片直连', '代理·伪装', '代理·防盗链', '代理·防盗链·主域']
 const MAX_STRATEGY_STEP = 4
@@ -30,6 +33,11 @@ const MAX_STRATEGY_STEP = 4
 export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   const { media, tier } = deps
   const { videoUrl, videoUrlInput, errorMessage } = media
+  // 在 setup 期取一次。别放到探测回调里现取——那里已经跨了好几个 await，
+  // 而 applyProbeResult 有一条调用路径（applyStrategy 用预热结果那条）**不在 try/catch 里**，
+  // 一旦 useToast() 因为拿不到 Nuxt 实例而抛，异常会一路穿出 loadVideo，
+  // isLoading 永远停在 true——症状就是「转圈卡死」，而且完全看不出是谁抛的
+  const toast = useToast()
 
   // ── 生效中的连接配置（getProxyUrl 直接读这些）──
   // 这五个 ref 一律由引擎写：探测结论 / 兜底阶梯。用户改不动它们，
@@ -70,11 +78,6 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   // 注入头模式下表示「manifest 走防盗链 + 分片直连」。两者都没有时代理压根不会介入，勾了无效 → 禁用。
   const manifestOnlyDisabled = computed(() =>
     !disguiseAsDownloader.value && !requestOrigin.value.trim() && !requestReferer.value.trim())
-
-  // 分片轴是否真的被实测过。清单通了但没解析出分片时（master 下钻失败/空列表），
-  // probeAxis 压根不会跑，四个通道全留在 'skip'——那是「没测」不是「测过不通」。
-  // 拿它当证据会把双通道永久钉死在禁用，提示还振振有词说「实测分片无法直连」（踩过）。
-  const axisMeasured = (a: AxisProbe): boolean => CHANNEL_ORDER.some(c => (a[c] ?? 'skip') !== 'skip')
 
   // 双通道需要分片「直连」和「经代理」两条路都通。有实测就用实测，否则按当前配置推断。
   const dualChannelUnavailable = computed(() => {
@@ -200,9 +203,35 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   /** 交给探测的候选头（用户填的那对，空则由探测自己从视频地址推） */
   const hintPair = () => ({ origin: originHint.value.trim(), referer: refererHint.value.trim() })
 
+  /**
+   * 探测已经实测证伪时**立刻**说出来（典型：清单能取到，分片四条通道全 403）。
+   *
+   * 不早说的代价是用户干等一分多钟：探测结束后还要跑「重新取址 → 重探」，失败还要爬阶梯，
+   * 每级一次 15s 加载超时，画面全程转圈，最后只给一句「加载超时」——而结论在探测收尾那一刻
+   * 就已经定了。真正的止损在 escalateStrategyAndReload（fatal 不爬阶梯），这里只负责把话说清。
+   *
+   * 按 URL 记一次：同一集会因加载失败重探，重复弹同一条只是噪音。
+   */
+  let verdictNotifiedFor = ''
+  const notifyProbeVerdict = (r: ProbeResult, url: string) => {
+    const v = diagnoseProbe(r)
+    if (v.severity !== 'fatal' || verdictNotifiedFor === url) return
+    verdictNotifiedFor = url
+    errorMessage.value = v.title
+    // Toast 而不只是那条 UAlert：接下来的重取址/重探会把 errorMessage 改成
+    //「正在重新…」，真正的原因反而被自己的重试信息盖掉。
+    // **`timeout: 0` = 不自动消失**，要用户自己点掉：这条不是「进度播报」而是结论，
+    // 而且带着「换一条线路」这个待办。自动消失的话用户往往只瞥见一闪（踩过：「提醒一下就没了」）。
+    // 固定 id + 先 remove：不消失就得防堆积——一部整季都死的剧点过五集会摞五张，
+    // 而先 remove 保证留下的是最新那一集的结论（`add` 撞 id 时是丢弃新的，不是覆盖）
+    toast.remove(VERDICT_TOAST_ID)
+    toast.add({ id: VERDICT_TOAST_ID, title: v.title, description: v.detail, color: 'red', timeout: 0 })
+  }
+
   /** 结论 → 生效（或退回阶梯）。runProbe 与「用预热结果」两处共用 */
   const applyProbeResult = (r: ProbeResult, url: string) => {
     probeResult.value = r
+    notifyProbeVerdict(r, url)
     const cfg = resolveConnConfig(r, selfOriginOf(url))
     if (cfg) {
       ladderMode.value = false
@@ -307,6 +336,14 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
       runProbe(url, true).then(() => deps.reload())
       return true
     }
+    // 探测已经把四条通道全部实测证伪 → 不爬阶梯。阶梯那 5 级本就是同样这四种通道的排列组合，
+    // 每级还各要等一次 15s 加载超时；爬完只是把「注定播不了」拖成一分多钟的转圈 + 反复重载
+    //（每次 `videoKey++` 重建 `<video>`，看着就是页面一直在闪）。结论早就有了，直接交回上层报错。
+    // 注意这一步在「重新取址」和「重探一次」之后：地址过期比通道判断错常见得多，那两条路要先走完
+    if (diagnoseProbe(probeResult.value).severity === 'fatal') {
+      console.warn('探测已实测证伪（四条通道全不可达），不再爬线性阶梯')
+      return false
+    }
     if (autoStrategyStep.value >= MAX_STRATEGY_STEP) return false
     ladderMode.value = true
     autoStrategyStep.value++
@@ -324,20 +361,9 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     return STRATEGY_STEP_LABELS[autoStrategyStep.value] ?? '直连'
   })
 
-  // 探测矩阵读数（展开设置里展示，排查源站用）
-  const probeRows = computed(() => {
-    const r = probeResult.value
-    if (!r) return []
-    const axes: Array<{ name: string; axis: AxisProbe }> = r.isHls
-      ? [{ name: '清单', axis: r.manifest }, { name: '分片', axis: r.segment }]
-      : [{ name: '视频', axis: r.segment }]
-    return axes.map(({ name, axis }) => ({
-      name,
-      // axis[c] 兜 'skip'：加通道之前写进 localStorage 的旧探测结果没有新字段，
-      // 直接渲染 undefined 会得到一个没有底色、也没有 title 的空格子
-      cells: CHANNEL_ORDER.map(c => ({ channel: c, label: CHANNEL_LABEL[c], reach: axis[c] ?? 'skip', ms: axis.ms[c] })),
-    }))
-  })
+  // 探测矩阵读数（展开设置里展示，排查源站用）。渲染在 <ProbeMatrix>，与解析页共用一份
+  const probeRows = computed(() => probeMatrixRows(probeResult.value))
+  const probeVerdict = computed(() => diagnoseProbe(probeResult.value))
 
   // ── 用户操作 ──
 
@@ -407,7 +433,7 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     probeResult, isProbing, ladderMode, autoStrategyStep,
     applyStrategy, escalateStrategyAndReload, applyReachabilityStep, prewarmProbe,
     // 展示 / 操作
-    strategyLabel, probeRows, reprobeNow,
+    strategyLabel, probeRows, probeVerdict, reprobeNow,
   }
 }
 

@@ -82,28 +82,12 @@
             {{ isProbing ? '探测中…' : '重新探测' }}
           </button>
         </div>
-        <div class="space-y-1">
-          <div v-for="row in probeRows" :key="row.name" class="flex items-center gap-2 text-xs">
-            <span class="w-8 text-gray-500 dark:text-gray-400">{{ row.name }}</span>
-            <span
-              v-for="cell in row.cells"
-              :key="cell.channel"
-              class="px-1.5 py-0.5 rounded font-mono"
-              :class="{
-                'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300': cell.reach === 'ok',
-                'bg-red-100 text-red-600 dark:bg-red-900/40 dark:text-red-300': cell.reach === 'fail',
-                'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300': cell.reach === 'unknown',
-                'bg-gray-100 text-gray-400 dark:bg-gray-700 dark:text-gray-500': cell.reach === 'skip',
-              }"
-              :title="cell.reach === 'unknown' ? '超时，未判定'
-                : (cell.reach === 'skip' ? '未探测：已有更优通道可用' : '')"
-            >
-              {{ cell.reach === 'ok' ? '✓' : cell.reach === 'fail' ? '✗' : cell.reach === 'unknown' ? '?' : '–' }}
-              {{ cell.label }}
-              <span v-if="cell.ms" class="opacity-60">{{ cell.ms }}ms</span>
-            </span>
-          </div>
-        </div>
+        <ProbeMatrix :rows="probeRows" />
+        <!-- 已实测证伪（如分片四条通道全 403）时把原因摆在矩阵下面：矩阵是给会看的人的，
+             这一句是给不想数格子的人的。起播时的 toast 会消失，这里常驻 -->
+        <p v-if="probeVerdict.severity === 'fatal'" class="mt-1.5 text-xs text-red-500">
+          {{ probeVerdict.title }}——{{ probeVerdict.detail }}
+        </p>
       </div>
     </div>
   </div>
@@ -117,7 +101,7 @@
 const {
   manifestOnly, dualChannel,
   originHint, refererHint, hintStatus, refererHintHelp, onHeaderHintChange,
-  isProbing, probeRows, dualChannelHint, deadLaneLabel,
+  isProbing, probeRows, probeVerdict, dualChannelHint, deadLaneLabel,
   originSuggestions, refererSuggestions, reprobeNow,
 } = useVideoPlayerCtx()
 </script>

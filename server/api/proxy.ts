@@ -20,6 +20,19 @@
 
 import { isM3u8Url } from '../../utils/mediaUrl'
 
+/**
+ * 「这个 zone 已经被下线」的落地页域名。落在这上面的响应一律判上游失败，
+ * 不能当内容返回——它是 200 + 一张真图片，会一路骗过 res.ok 判定（详见下方调用处）。
+ *
+ * 只放**含义明确、全球一致**的官方落地页；一般的跳转 CDN 绝不能进这张表
+ *（签名边缘节点天天跨 host 重定向，误判会把好源判死）。
+ */
+const DEAD_SOURCE_LANDINGS = ['cloudflare-terms-of-service-abuse.com']
+
+const hostOfUrl = (u: string): string => {
+  try { return new URL(u).hostname.toLowerCase() } catch { return '' }
+}
+
 // 动态获取 undici Dispatcher（仅在 Node 可用）。
 // 用变量包裹 specifier + @vite-ignore 防止 Vite/Nitro 在 CF 构建时静态解析。
 let _dispatcher: any = undefined
@@ -104,6 +117,32 @@ export default defineEventHandler(async (event) => {
   }
 
   const contentType = response.headers.get('content-type') ?? ''
+
+  // ── 源站已被下线：跟随重定向后落在「域名违规」落地页 ──
+  //
+  // 实测 ylsp「大陆3线」的分片 host `tssn.r2tsbf.top`：**任何**请求（带头 / 不带头 / 换 Referer /
+  // 换 UA 全试过）都 302 到 `https://www.cloudflare-terms-of-service-abuse.com/stream.jpg`——
+  // Cloudflare 把违规 zone 的内容整个换成了那张 20KB 的诱饵图，对所有人一视同仁。
+  // 而 fetch 默认跟随重定向，于是我们**以 200 + image/jpeg 把诱饵图当分片返回**，一路假阳性：
+  //   · 可达性探测只看 `res.ok` → 代理通道判 `ok`（直连通道倒是天然 fail：落地页没有 ACAO）；
+  //   · hls.js 每片拿到同一张图片 → 解不出帧 → fatal MEDIA_ERROR → recoverMediaError → 再拿一遍，
+  //     页面**一直在闪**、永远出不来画面。
+  // 只有服务端看得见最终 URL（浏览器侧跨域响应读不到重定向链），所以这一刀必须在这里落。
+  // 状态码换成 502 后，探测那四条通道就会全判 fail，diagnoseProbe 直接报「分片全部不可达」。
+  const finalHost = hostOfUrl(response.url) || hostOfUrl(targetUrl)
+  const deadLanding = DEAD_SOURCE_LANDINGS.find(d => finalHost === d || finalHost.endsWith('.' + d))
+  // 状态码用 **451 Unavailable For Legal Reasons** 而不是笼统的 502：客户端探测据此把结论
+  // 从「四条通道全部不可达」升级成「源站已被官方下线」——后者才回答了用户的问题（换通道没用，只能换源）
+  if (deadLanding) {
+    void response.body?.cancel().catch(() => {})
+    console.warn('[proxy] 源站已下线（重定向到违规落地页）:', targetUrl, '→', response.url)
+    throw createError({ statusCode: 451, statusMessage: 'Upstream taken down: redirected to ' + deadLanding })
+  }
+  // 合法的跨 host 重定向（签名 CDN 边缘节点很常见）照常放过，只把落点记在响应头上：
+  // 「明明探测通了却播不了」这类问题，最终落在哪个 host 是第一手线索
+  if (finalHost && finalHost !== hostOfUrl(targetUrl)) {
+    setResponseHeader(event, 'X-Proxy-Final-Host', finalHost)
+  }
 
   // ── 上游非 2xx：原样把状态码透回去，绝不进 m3u8 改写 ──
   //
