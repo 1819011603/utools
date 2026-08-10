@@ -20,6 +20,19 @@
         <span v-if="cell.ms" class="opacity-60">{{ cell.ms }}ms</span>
       </span>
     </div>
+    <!-- 总耗时单独一行：上面各格的 ms 是并发跑出来的，加起来跟这个数没关系
+         （实测分片轴 946 + 5637，整轮只花 5.6s），不摆出来就没法判断「到底等了多久」 -->
+    <div v-if="totalMs" class="flex items-center gap-2 text-xs">
+      <span class="w-8 shrink-0 text-gray-500 dark:text-gray-400">总计</span>
+      <span
+        class="px-1.5 py-0.5 rounded font-mono"
+        :class="totalMs >= 6000 ? 'bg-red-100 text-red-600 dark:bg-red-900/40 dark:text-red-300'
+          : totalMs >= 3000 ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
+          : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400'"
+        title="整轮探测的墙钟耗时（各通道并发，非上面数字之和）"
+      >{{ totalMs }}ms</span>
+      <span class="text-gray-400">整轮墙钟耗时，起播前要等的就是它</span>
+    </div>
   </div>
 </template>
 
@@ -30,5 +43,9 @@
  */
 import type { ProbeMatrixRow } from '~/composables/videoPlayer/useReachabilityProbe'
 
-defineProps<{ rows: ProbeMatrixRow[] }>()
+defineProps<{
+  rows: ProbeMatrixRow[]
+  /** 整轮探测的墙钟耗时（ProbeResult.totalMs）。不传就不渲染那一行（老结论没有这个字段） */
+  totalMs?: number
+}>()
 </script>

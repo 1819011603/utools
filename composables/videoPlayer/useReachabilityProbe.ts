@@ -1,4 +1,5 @@
 import { useM3u8 } from './useM3u8'
+import { isDirectDead, markDirectDead, clearDirectDead } from './probeStore'
 
 /**
  * 连接可达性探测：起播前用几个小请求实测出「manifest 轴」与「分片轴」各自能走哪条通道，
@@ -38,6 +39,12 @@ export interface AxisProbe {
 
 export interface ProbeResult {
   at: number
+  /**
+   * 整轮探测的墙钟耗时（ms）。摆在页面上是为了让「慢在哪」可归因——
+   * 各通道的 ms 是并发跑的，加起来跟总耗时没有关系（实测分片轴 946+5637 却只花 5.6s），
+   * 光看单元格根本看不出这一轮到底等了多久。
+   */
+  totalMs?: number
   isHls: boolean
   manifest: AxisProbe
   segment: AxisProbe
@@ -87,6 +94,68 @@ const SOURCE_GONE_STATUS = 451
 
 const DEFAULT_TIMEOUT = 8000     // 单条通道超时
 const OVERALL_TIMEOUT = 12000    // 整轮探测硬上限（探测阻塞起播，不能让多个超时叠加）
+/**
+ * 对冲延迟（**只用于分片轴**）：直连+伪装超过这么久还没结论，就把「代理·防盗链」也并发发出去，
+ * 不干等前两条各自的 8s 超时。
+ *
+ * 清单轴不用它——那边已经改成三路同时发（见发起处的账目），一个等待期都没有。
+ * 分片轴保留「先两路、必要时补第三路」是因为绝大多数源根本不校验防盗链，
+ * 无脑并发探它只会白发一个必然失败的分片请求（实测 sintel 卡在这条上）。
+ */
+const HEDGE_DELAY = 250
+/**
+ * 优先级预算：**从这根轴开始计时**，高优先级通道总共只有这么久的机会。
+ * 预算烧完后，只要手上已经有可达通道，就按已有结论收工，不再等还在跑的那几条。
+ *
+ * 实测截图（分片轴）：`伪装 946ms ✓ / 直连 5637ms ✗`。两路本来就并发，可整根轴仍花了 5.6s
+ * ——946ms 那一刻结论其实已经定了（最终就走伪装），后面 4.7s 全在干等一条注定失败的直连。
+ *
+ * 为什么不干脆「谁先 ok 就立刻收工」：直连慢一点但可用时（首次 TLS 握手、冷 DNS），
+ * 按优先级它才是该选的那条——少一跳、不吃服务器出口流量、不受「代理出口 IP 被 CDN 拒」影响。
+ *
+ * **为什么是「从轴开始算的预算」而不是「从第一个 ok 之后再等一段」**：后者会和对冲窗口叠加，
+ * 等于把机会给了同一条通道两次——`250(对冲) + 26(代理RTT) + 300(再等) = 576ms`，
+ * 而直连实际拿到了 576ms 的窗口。改成总预算后同样这一轮只花 400ms，且语义只有一句话：
+ * 「直连有 400ms，过时不候」。对冲仍然独立存在，它管的是**什么时候发**，不是**什么时候收工**。
+ *
+ * 收工后迟到的答案一律**不采纳**（那条通道留在 `'skip'` = 没等到，不是测过不通）；
+ * 请求本身不去 abort，它自己会在 8s 超时里结束，只是没人要它的结果了。
+ */
+const PRIORITY_BUDGET = 400
+const GRACE_TICK = 50            // 预算的检查粒度
+const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
+
+/**
+ * 一根轴的等待器：带「优先级宽限」的收工判定。清单轴与分片轴共用一份实现——
+ * 两边各写一遍必然漂移，而清单轴恰恰是漏掉它才留下「直连黑洞就白等 8s」那个洞。
+ *
+ * `wait(all, maxWait)` 在三种情况下返回：
+ *  · all 全部落定 → 正常结束
+ *  · 已有通道通 + 宽限烧完（或撞整轮截止）→ **收工**（settled=true，迟到的答案不再采纳）
+ *  · 到了 maxWait（对冲窗口）→ 返回但**不收工**，让调用方去补下一条通道，在跑的照样能写进来
+ */
+function makeAxisWaiter(expired: () => boolean, budgetMs: number) {
+  const st = { settled: false, hasOk: false, since: performance.now() }
+  return {
+    st,
+    noteOk: () => { st.hasOk = true },
+    /** 补测阶段要重新开闸：收工过的等待器直接复用会把补测结果整个丢掉（=> 结论变 degraded）。
+     *  预算也重新起算——那是新的一轮，凭什么用上一轮烧掉的额度 */
+    reopen: () => { st.settled = false; st.hasOk = false; st.since = performance.now() },
+    wait: async (all: Promise<unknown>, maxWait = Infinity) => {
+      const t0 = performance.now()
+      const done = all.then(() => true as const)
+      while (true) {
+        if (await Promise.race([done, sleep(GRACE_TICK).then(() => false as const)])) return
+        if (expired()) { st.settled = true; return }
+        // 已有可达通道 + 高优先级通道的预算烧完 → 收工。预算从本轴开始算（不与对冲窗口叠加），
+        // budgetMs=0 即「首个可达通道就收工」
+        if (st.hasOk && performance.now() - st.since >= budgetMs) { st.settled = true; return }
+        if (performance.now() - t0 >= maxWait) return
+      }
+    },
+  }
+}
 const emptyAxis = (): AxisProbe => ({ direct: 'skip', disguise: 'skip', headers: 'skip', ms: {} })
 
 // 「代理·防盗链」是倒数第二档：只有直连和伪装都没通才值得试。
@@ -180,8 +249,11 @@ export async function probeReachability(
   opts.signal?.addEventListener('abort', onOuter)
   const deadline = overall.signal
   const expired = () => deadline.aborted
+  const startedAt = performance.now()
   try {
-    return await runProbe()
+    const r = await runProbe()
+    r.totalMs = Math.round(performance.now() - startedAt)
+    return r
   } finally {
     clearTimeout(overallTimer)
     opts.signal?.removeEventListener('abort', onOuter)
@@ -189,6 +261,10 @@ export async function probeReachability(
 
   async function runProbe(): Promise<ProbeResult> {
   const isHls = isM3u8Url(url)
+  // 「直连黑洞」按 host 记，而两轴常常不在同一个 host（本模块存在的前提就是这个），
+  // 所以每次进 probeAxis 时按它当时探的那个地址取——分片轴用分片的 host，别拿清单的冒充
+  let probeHost = ''
+  const hostOf = (u: string): string => { try { return new URL(u).host } catch { return '' } }
 
   // 防盗链通道注入什么：用户填了候选值就先试他的（有些站点的 Referer 根本推不出来，
   // 比如视频在 vod1.maowushi.com 而防盗链认的是 aeete.com——那是两个毫不相干的域名）；
@@ -209,20 +285,38 @@ export async function probeReachability(
 
   // 探一根轴：直连 + 伪装并发，两者都没通才追加防盗链
   const probeAxis = async (axis: AxisProbe, urlOf: (c: Channel) => string) => {
+    // 上次在这个 host 上直连是黑洞（超时不返回）→ 这回照样发探测，但**一分钟预算都不给它**，
+    // 结论不等它（见 probeStore 的 isDirectDead：负面记忆 + 自愈，通了就清）
+    const w = makeAxisWaiter(expired, isDirectDead(probeHost) ? 0 : PRIORITY_BUDGET)
     const run = async (c: Channel) => {
       const { reach, ms, status } = await probeUrl(urlOf(c), timeoutMs, deadline)
+      if (w.st.settled) return          // 已收工：这条留在 'skip'（没等到，不是测过不通）
       axis[c] = reach
       axis.ms[c] = ms
+      if (reach === 'ok') w.noteOk()
+      // 直连的实测结果反哺那份「黑洞」记忆：超时才记（fail 是快速失败，不占等待时间，没必要记），
+      // 一旦通了立刻清掉——网络环境变了就该恢复给它预算
+      if (c === 'direct') {
+        if (reach === 'unknown') markDirectDead(probeHost)
+        else if (reach === 'ok') clearDirectDead(probeHost)
+      }
       // 代理认出「源站已被官方下线」→ 记在结论上。这一条比「三条通道全不可达」有用得多：
       // 后者听起来像还能换条路试试，前者说明换源之外没有别的办法
       if (status === SOURCE_GONE_STATUS) result.deadSource = true
     }
-    await Promise.all([run('direct'), run('disguise')])
-    if (needsHeadersChannel(axis) && !expired()) await run('headers')
+    // 直连 + 伪装并发；到点还没结论就对冲补上防盗链，不等它们各自的 8s 超时（见 HEDGE_DELAY）。
+    // 直连在这根轴上**保留优先级预算**（PRIORITY_BUDGET）：分片走直连才可能开双通道，
+    // 而那个判据要求「直连也实测到 ok」——一有代理通了就立刻收工的话，双通道再也开不起来
+    const pair = Promise.all([run('direct'), run('disguise')])
+    await w.wait(pair, HEDGE_DELAY)
+    if (!w.st.settled && needsHeadersChannel(axis) && !expired()) {
+      await w.wait(Promise.all([pair, run('headers')]))
+    }
   }
 
   // ── 非 HLS（MP4 等）：只有一根轴，探文件本身即可，两轴同值 ──
   if (!isHls) {
+    probeHost = hostOf(url)
     await probeAxis(result.manifest, c => buildChannelUrl(url, c, hdrFor(c)))
     result.segment = { ...result.manifest, ms: { ...result.manifest.ms } }
     result.manifestChannel = result.segmentChannel = pickChannel(result.manifest)
@@ -278,20 +372,31 @@ export async function probeReachability(
 
   type ManifestRun = Awaited<ReturnType<typeof loadManifest>>
   const runs: Partial<Record<Channel, ManifestRun>> = {}
+  // 清单轴的等待器，预算 0 = **首个可达通道就收工**，不给直连额外等待期（理由见下面发起处）
+  const mw = makeAxisWaiter(expired, 0)
   const runManifest = async (c: Channel) => {
     const r = await loadManifest(c)
+    if (mw.st.settled) return                 // 已收工：这条留 'skip'，也别覆盖 runs（原文要跟胜出通道对得上）
     runs[c] = r
     result.manifest[c] = r.reach
     result.manifest.ms[c] = r.ms
+    if (r.reach === 'ok') mw.noteOk()
   }
-  // manifest 先只探直连。代理通道慢得多（要绕服务端回源，实测某些源 >10s），
-  // 而它只在两种情况下才用得上：直连不通，或分片得走代理（那时 manifest 也必须过代理）。
-  // 后者要到 Phase 2 才知道，所以放到那之后按需补测——常见的全直连源就完全不用等这一路。
-  await runManifest('direct')
-  if (result.manifest.direct !== 'ok') {
-    // 直连已经不通了，这里再串行等两个超时会把首访拖到二三十秒 → 两路一起上
-    await Promise.all([runManifest('disguise'), runManifest('headers')])
-  }
+  /**
+   * 清单轴：**三路同时发，谁先可达就收工**，不给任何通道额外等待期。
+   *
+   * 这里曾经是「先只发直连 → 对冲 250ms → 再给宽限 300ms」。三级台阶叠出来的账（实测）：
+   * `对冲 250 + 代理 26 + 宽限 300 = 576ms`，其中 550ms 全在等一条**黑洞直连**
+   *（压根不返回，连快速失败都不是）。清单探测本身只要 26ms。
+   *
+   * 代价是每次加载多发两份清单请求（清单探测不是 HEAD，会把整份清单读下来）。这笔钱值得付：
+   * 它换掉的是**每次起播前都要付的几百毫秒**，而清单一般只有几 KB，代理侧还有 1 天缓存。
+   * 分片轴不这么做——那边还要靠「直连也测到 ok」来判双通道，见 PRIORITY_BUDGET。
+   *
+   * **判定仍按优先级**（pickChannel 按 CHANNEL_ORDER 取），只是不再为此付等待时间：
+   * 直连若和代理几乎同时回来，胜出的还是直连。
+   */
+  await mw.wait(Promise.all([runManifest('direct'), runManifest('disguise'), runManifest('headers')]))
   result.manifestChannel = pickChannel(result.manifest)
 
   // 分片地址取自最高优先级的成功通道（各路解析出的绝对地址应当一致）
@@ -321,6 +426,7 @@ export async function probeReachability(
   // ── Phase 2：分片轴 ──
   // AES key 折进分片轴：noseg=1 时服务端只重写 .m3u8，key 会留成直连地址、由浏览器直接取，
   // 所以 key 跟分片走同一条通道。key 这条通道不通 → 整条通道判不可用（自然降级到需要代理的通道）。
+  probeHost = hostOf(result.segmentUrl!)
   await probeAxis(result.segment, c => buildChannelUrl(result.segmentUrl!, c, hdrFor(c)))
   if (result.keyUrl) {
     const keyUrl = result.keyUrl
@@ -335,6 +441,7 @@ export async function probeReachability(
   // 分片得走代理 → manifest 也必须过代理（分片 URL 只能由服务端 rewriteM3u8 改写）。
   // 这时才补测之前跳过的 manifest 代理通道。
   if (result.segmentChannel && result.segmentChannel !== 'direct' && !expired()) {
+    mw.reopen()   // 上面可能已收工；不重新开闸的话补测结果会被当成「迟到」丢掉 → 结论变 degraded
     const pending: Array<Promise<void>> = []
     if (result.manifest.disguise === 'skip') pending.push(runManifest('disguise'))
     if (result.manifest.headers === 'skip' && result.segment.headers === 'ok') pending.push(runManifest('headers'))

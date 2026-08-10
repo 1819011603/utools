@@ -82,7 +82,7 @@
             {{ isProbing ? '探测中…' : '重新探测' }}
           </button>
         </div>
-        <ProbeMatrix :rows="probeRows" />
+        <ProbeMatrix :rows="probeRows" :total-ms="probeResult?.totalMs" />
         <!-- 已实测证伪（如分片四条通道全 403）时把原因摆在矩阵下面：矩阵是给会看的人的，
              这一句是给不想数格子的人的。起播时的 toast 会消失，这里常驻 -->
         <p v-if="probeVerdict.severity === 'fatal'" class="mt-1.5 text-xs text-red-500">
@@ -101,7 +101,7 @@
 const {
   manifestOnly, dualChannel,
   originHint, refererHint, hintStatus, refererHintHelp, onHeaderHintChange,
-  isProbing, probeRows, probeVerdict, dualChannelHint, deadLaneLabel,
+  isProbing, probeRows, probeResult, probeVerdict, dualChannelHint, deadLaneLabel,
   originSuggestions, refererSuggestions, reprobeNow,
 } = useVideoPlayerCtx()
 </script>

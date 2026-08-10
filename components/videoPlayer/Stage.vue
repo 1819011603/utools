@@ -239,6 +239,15 @@
       </UBadge>
       <UBadge :color="isHls ? 'violet' : 'blue'" variant="soft" size="xs">{{ isHls ? 'HLS/M3U8' : 'MP4' }}</UBadge>
       <UBadge v-if="hlsStats" color="green" variant="soft" size="xs">缓冲 {{ hlsStats.buffered.toFixed(1) }}s</UBadge>
+      <!-- 预取线程：并发是自适应的（存货阶梯 / 缺口上限 / 闭环三方钳制），摆在这里才看得出
+           「现在到底开了几条」。颜色跟统计面板同一套阈值：≥5 红、≥3 黄、其余绿 -->
+      <UBadge
+        v-if="isHls && prefetchInfo.threads"
+        :color="prefetchInfo.threads >= 5 ? 'red' : prefetchInfo.threads >= 3 ? 'amber' : 'green'"
+        variant="soft"
+        size="xs"
+        :title="`预取并发（在途 ${prefetchInfo.pending} 片 / 缓存 ${prefetchInfo.cached} 片）`"
+      >{{ prefetchInfo.threads }} 线程</UBadge>
       <!-- 回解析页换线路：播放器手上只有一条线路的列表，换线路只能回去 -->
       <UButton
         v-if="playlistSource"
@@ -273,7 +282,7 @@ const {
   isHls, isPlaying, isBuffering, isResolvingUrl, resolveStage, isProbing, isFullscreen, isVideoLoaded,
   showControls,  showPlayIcon,
   currentTime, duration,
-  hlsStats, playlist, playlistTitle, strategyLabel, showAdvancedProxy,
+  hlsStats, prefetchInfo, playlist, playlistTitle, strategyLabel, showAdvancedProxy,
   playlistSource, backToParseSource,
   // 选集按钮在顶部信息条里（VideoPlayerTopBar），这里只留抽屉本身要用的状态
   currentVideoName, volumeIcon,

@@ -9,6 +9,7 @@
  */
 import type { Ref } from 'vue'
 import type { ProbeResult, ConnConfig } from './useReachabilityProbe'
+import { saveProbe, loadProbe } from './probeStore'
 import type { VideoMediaState } from './useVideoMediaState'
 import type { VideoServerTier } from './useVideoServerTier'
 
@@ -67,6 +68,7 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   const isProbing = ref(false)
   let probeSeq = 0        // 竞态守卫：连点/切集时只认最后一次探测
   let reprobedFor = ''    // 该地址是否已因加载失败重探过（避免无限重探）
+  let probedUrl = ''      // 当前 probeResult 属于哪个地址（见 escalateStrategyAndReload 的「别白重探」）
 
   const autoStrategyStep = ref(0)
   const ladderMode = ref(false)
@@ -245,6 +247,7 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   /** 结论 → 生效（或退回阶梯）。runProbe 与「用预热结果」两处共用 */
   const applyProbeResult = (r: ProbeResult, url: string) => {
     probeResult.value = r
+    probedUrl = url          // 结论属于哪个地址。失败恢复要靠它判「这份结论是不是就是当前这条的」
     // 这一份原文只对紧接着的那一发加载有效（同一个完整 URL）。
     // 结论没结论（degraded → 走阶梯）时也照存：阶梯可能正好落在同一条通道上，命中就赚一次
     seededManifest = r.manifestText && r.manifestRequestUrl
@@ -280,6 +283,7 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   const warmProbes = new Map<string, ProbeResult>()
 
   const rememberWarmProbe = (url: string, r: ProbeResult) => {
+    saveProbe(url, r)                      // 同时落一份到跨页缓存（解析页/新标签页的播放器共用）
     warmProbes.delete(url)                 // 重新插到队尾，维持 LRU 顺序
     warmProbes.set(url, r)
     while (warmProbes.size > WARM_PROBE_MAX) {
@@ -292,7 +296,14 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   /** 取一条还没过期的近期结论；**取用即删**（同一份结论不重复吃第二次） */
   const takeWarmProbe = (url: string): ProbeResult | null => {
     const r = warmProbes.get(url)
-    if (!r) return null
+    if (!r) {
+      // 本实例内存里没有 → 试跨页缓存。**播放器现在开新标签页**，解析页那一轮
+      // 「可达性检测」刚测过的同一条地址，在这个实例里是全冷的（Map 跨不过标签页）。
+      // 按完整 URL 严格匹配 + 取用即删，跟 warmProbes 同规格（见 probeStore）
+      const shared = loadProbe(url)
+      if (shared) console.log('用跨页缓存的探测结论，跳过本轮探测')
+      return shared
+    }
     warmProbes.delete(url)
     return Date.now() - r.at < WARM_PROBE_TTL ? r : null
   }
@@ -376,7 +387,11 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
    */
   const escalateStrategyAndReload = (): boolean => {
     const url = videoUrl.value.trim()
-    if (url && isProbeable(url) && !ladderMode.value && reprobedFor !== url) {
+    // **别白重探**：上一轮就是拿这条地址测的、而且三条通道全被实测证伪（fatal），
+    // 那么同一条地址再测一遍必然是同样的结论，纯粹白等一整轮（单轮硬顶 12s，加起来就是用户
+    // 看到的那「24s 才报错」）。地址真换了的话 url 会变，`reprobedFor !== url` 自然放行重探。
+    const provenDead = probedUrl === url && diagnoseProbe(probeResult.value).severity === 'fatal'
+    if (url && isProbeable(url) && !ladderMode.value && reprobedFor !== url && !provenDead) {
       reprobedFor = url
       console.log('加载失败，重新探测连接方式')
       errorMessage.value = '加载失败，正在重新探测连接方式...'

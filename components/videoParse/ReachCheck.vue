@@ -20,7 +20,7 @@
           <template v-if="verdict.detail">——{{ verdict.detail }}</template>
         </span>
       </div>
-      <ProbeMatrix :rows="rows" />
+      <ProbeMatrix :rows="rows" :total-ms="result.totalMs" />
       <!-- 把实测的那条地址摊开：一条线路里各集可能不同源（实测 4kvm 最新一集走网盘直链），
            不写清测的是哪条，结论就没法归因 -->
       <p class="text-xs text-gray-400 break-all">测的是：{{ url }}</p>
@@ -103,6 +103,9 @@ const run = async () => {
     })
     if (mine !== seq) return
     result.value = r
+    // 存给播放器用：点「播放」会开新标签页，那边的 warmProbes 是全冷的，
+    // 不存的话同一条地址马上又要整轮重测一遍（见 probeStore）
+    saveProbe(props.url, r)
   } catch (e: any) {
     if (mine !== seq) return
     error.value = '检测失败：' + (e?.message || String(e))
