@@ -319,6 +319,14 @@ ddys.ai 当年正是这么发现的。
 
 ### 并发预取与抗卡
 
+- **搭在途预取的便车时，那趟车翻了必须当场自己上**（`fragLoader.hedgedLoad`）：hls.js 要的那一片
+  若已有预取在途，我们让它竞速、不另开连接（省一条连接）。但 `spawnPrefetch` 失败时 resolve 的是
+  **空 ArrayBuffer 而不是 reject**，于是 `byteLength > 0` 不成立、`catch` 也不触发——原来那里没有
+  `else`，整个回调静默地什么都不做，只能等 `setTimeout(race, hedgeMs)`（差档 3s / 中档 5s）。
+  **拖进度恰好批量制造这种失败**：`onSeeked` 先 `abortAllPrefetches()` 把在途预取全中止
+  （各自以空 buffer 收场），紧接着 `primePrefetch()` 重起一批，hls.js 这时来要新位置那一片，
+  搭上任何一趟被中止的车就白等一个 hedgeMs。症状极具误导性：**「预取缓存还有几十秒，拖完进度却转两三秒圈」**
+  ——卡住的是**关键那一片**，它走对冲路径、不读缓存，跟缓存里有多少毫无关系（踩过）
 - `useHlsPrefetch.ts`：自定义 hls.js `fLoader`，命中预取缓存即时返回，按缓冲健康度动态调并发。
   浏览器同 host 只给 6 条连接，所以有**双通道**（同一分片给出直连与代理两个 origin，并发提到 ~12）
 
@@ -436,6 +444,11 @@ ddys.ai 当年正是这么发现的。
 
 - **缓存里只可能有当前视频的分片**：`useCacheForVideo()` 在 URL 一变就整块 `clear()`。
   所以「清掉别的视频的缓存」是不存在的需求，真正堆积的是**当前视频已播过的分片**
+- **「最大缓冲时长」输入框已删（`maxMaxBufferLength`）**：它和「预加载时长」是一回事——
+  两者进 hls.js 前都被 `Math.min` 压到 30/60（`engine/hlsConfig.ts`），**用户填的数字压根到不了
+  hls.js**；而「预加载时长」还兼着真正有用的那个职责（JS 预取深度 `effectivePrefetchTarget`）。
+  留两个框只会让人以为它们各管一段，改第二个什么也不会发生。MSE 天花板现在是 `types.ts` 的
+  `MSE_CEILING_SECS`（60），`hlsConfig` 与统计面板共用它——同一个算式写两遍必然漂移
 - **预读深度与内存上限都不能一味给大**（两项曾都是 3600，是偶发「整个浏览器像卡死」的根因）：
   `maxBufferLength` 是 `effectivePrefetchTarget()` 的直接来源，3600 = 预读到一小时之后，1080p 3Mbps 堆出 1GB+；
   `maxBufferSizeMB` 是 LRU 天花板。现默认 600s / 1024MB。抗卡真正吃紧的是「濒卡 <30s」那段，
@@ -598,7 +611,16 @@ hls.js 再拉一次 manifest。三段全发生在用户点了「下一集」之�
 用户第一次碰播放器（`togglePlay` / 手势层的 `pointerdown`）时 `consumeAutoFullscreen()` 补上。
 用户自己退出全屏要把意图清掉，否则下一次点画面又被拽进去。
 
-**「点中央播放键 = 播放 + 全屏 + 横屏」必须是确定行为**：`togglePlay` 里不看 `pendingAutoFullscreen`
+**这套「点击补兑现」只在触摸端生效**（`isTouchPrimary()` 判 `pointer: coarse`）。
+桌面上单击 = 播放/暂停（鼠标标准），而 `togglePlay` 里那句「开关开着且没全屏就进」会让
+**点画面任何位置都被拽进全屏**（Windows 上踩到）。桌面本来也不需要它：起播那一发
+`requestFullscreen` 多半还在「用户点选集/播放」的激活窗口里、直接就成了；成不了就算了，
+桌面有双击和 F 键，不该靠猜。两处都要挡：`togglePlay`（无指针事件，查 media query）
+与手势层的 `pointerdown`（有 `e.pointerType`，比 media query 更准）。
+配套：`enterAutoFullscreen` 被拒时**桌面端就地作废** `pendingAutoFullscreen`——
+留着它会一直挂到用户某次单击画面时突然全屏。
+
+**「点中央播放键 = 播放 + 全屏 + 横屏」必须是确定行为**（触摸端）：`togglePlay` 里不看 `pendingAutoFullscreen`
 （它只在首个 `canplay` 置位，被别的路径清掉就没了），只要开关开着且还没全屏就直接进。
 中央键那层的 `data-no-gesture` 也要**无条件**写死——写成 `:data-no-gesture="cond ? '' : undefined"`
 时手势层会照样接管那一下，表现是「点播放键结果只把上下两条框弹出来了」。
@@ -921,6 +943,8 @@ FED 模板，**不走 `player_aaaa`**，地址在播放器 iframe 属性上。
 | key | 用途 |
 | --- | --- |
 | `video-player-state` | 播放器全量状态（地址/列表/进度/音量/倍速/HLS 配置/档位覆盖） |
+| `video-probe-cache` | 探测结论，按**完整 URL**、TTL 90s、8 条（解析页 → 播放器新标签页复用） |
+| `video-probe-dead-direct` | 按 host 记「直连是黑洞」，TTL 30 分钟（只影响等多久，不影响用哪条） |
 | `video-player-learned-profiles` | 按 host 学到的服务器档位（可达性**不再缓存**） |
 | `video-player-handoff` | 长播放列表交接槽，TTL 1 天 |
 | `video-player-origin-history` / `-referer-history` | Origin/Referer 输入历史 |

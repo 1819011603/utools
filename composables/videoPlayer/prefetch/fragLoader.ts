@@ -154,9 +154,19 @@ export function createFragLoaderFactory(deps: FragLoaderDeps) {
             })
         }
 
-        // 已有预取在途：先让它竞速（省一条连接），但别无限等——hedgeMs 后照常追加新连接抢
+        // 已有预取在途：先让它竞速（省一条连接），但别无限等——hedgeMs 后照常追加新连接抢。
+        //
+        // **搭的车翻了必须当场自己上**（原来这里没有 else，是「有缓存却卡两三秒」的真凶）：
+        // `spawnPrefetch` 失败时 resolve 的是**空 ArrayBuffer**（不是 reject），于是 `byteLength > 0`
+        // 不成立、`catch` 也不触发，整个回调静默地什么都不做，只能等下面那个 `setTimeout(race, hedgeMs)`
+        // ——差档 3s、中档 5s。而**拖进度恰好会批量制造这种失败**：`onSeeked` 先 `abortAllPrefetches()`
+        // 把在途预取全中止（各自以空 buffer 收场），紧接着 `primePrefetch()` 重起一批，
+        // hls.js 这时来要新位置那一片，搭上任何一趟被中止的车就白等一个 hedgeMs。
+        // 表现是「预取缓存明明还有几十秒，拖完进度却转两三秒圈」——因为卡住的是**关键那一片**，
+        // 它走对冲路径、不读缓存，跟缓存里有多少毫无关系。
         const pf = segPrefetching.get(url)
-        if (pf) pf.then(buf => { if (buf && buf.byteLength > 0) win(buf) }).catch(() => {})
+        const pfFailed = () => { if (!settled && !this.stats.aborted) race() }
+        if (pf) pf.then(buf => { if (buf && buf.byteLength > 0) win(buf); else pfFailed() }).catch(pfFailed)
         else race()
 
         timers.push(setTimeout(race, tp.hedgeMs))         // 还没赢 → 加一条并行（对冲死连接）

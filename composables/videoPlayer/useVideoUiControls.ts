@@ -49,11 +49,17 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     if (isPlaying.value) {
       videoEl.value.pause()
     } else {
-      // 开播这一下就是浏览器要的「用户激活」，自动全屏在这里兑现最稳：
-      // 不看 pendingAutoFullscreen（它只在首个 canplay 置位，错过就没了），
-      // 只要开关开着且还没全屏就进——「点中央播放键 = 播放 + 全屏 + 横屏」必须是确定行为。
-      if (autoFullscreen.value && !document.fullscreenElement) void enterAutoFullscreen()
-      else consumeAutoFullscreen()
+      // 「开播这一下顺便进全屏」**只在触摸端做**（见 isTouchPrimary）。
+      // 手机上它是必需的：浏览器不给用户激活就不准全屏，页面加载时那一发必被拒，
+      // 所以要挂起、等用户第一次碰播放器再补兑现，而「点中央播放键 = 播放 + 全屏 + 横屏」
+      // 也得是确定行为。但桌面上单击 = 播放/暂停（鼠标标准），于是同一段代码变成了
+      // **「点画面任何位置都会被拽进全屏」**（Windows 上踩到）。桌面本来也不需要它：
+      // 起播那一发 requestFullscreen 在用户点「选集/播放」的激活窗口内多半直接就成了，
+      // 成不了就算了——桌面进全屏有双击和 F 键，不该靠猜。
+      if (isTouchPrimary()) {
+        if (autoFullscreen.value && !document.fullscreenElement) void enterAutoFullscreen()
+        else consumeAutoFullscreen()
+      }
       void videoEl.value.play()
     }
 
@@ -160,6 +166,13 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   }
 
   /**
+   * 触摸为主的设备（手机/平板）。用 `pointer: coarse` 判：Windows 上插着鼠标就是 fine，
+   * 触摸屏笔记本也按鼠标算——这正是我们要的，因为要治的就是「桌面单击被拽进全屏」。
+   */
+  const isTouchPrimary = (): boolean =>
+    typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches === true
+
+  /**
    * 兑现「加载后自动全屏」。
    *
    * 手机浏览器要求**用户激活**才准进全屏，页面加载完自动调必被拒——安卓上这个开关从来没生效过，
@@ -173,7 +186,11 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
       isFullscreen.value = true
       pendingAutoFullscreen.value = false
       await lockLandscape()
-    } catch { /* 没有用户激活，留着意图等下一次交互 */ }
+    } catch {
+      // 没有用户激活。触摸端留着意图等下一次碰画面补兑现；
+      // **桌面端就地作废**——否则它会一直挂着，等用户某次单击画面时突然全屏（踩过）
+      if (!isTouchPrimary()) pendingAutoFullscreen.value = false
+    }
   }
 
   watch(pendingAutoFullscreen, (v) => { if (v) void enterAutoFullscreen() })

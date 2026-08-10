@@ -156,8 +156,10 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
     if (fromControls(e)) return
     if (e.pointerType === 'mouse' && e.button !== 0) return
     if (isLocked.value) { revealLockBtn(); return }
-    // 这一下就是「用户激活」：自动全屏被浏览器拒过的话趁现在补上（安卓上必然走这条路）
-    controls.consumeAutoFullscreen()
+    // 这一下就是「用户激活」：自动全屏被浏览器拒过的话趁现在补上（安卓上必然走这条路）。
+    // **鼠标不参与**：桌面单击 = 播放/暂停，顺手把人拽进全屏是纯粹的惊吓（Windows 上踩到）。
+    // 这里能拿到 pointerType，比查 media query 更准
+    if (e.pointerType !== 'mouse') controls.consumeAutoFullscreen()
     controls.restoreSound()   // 静音兜底起播过的话，这一下把声音还回来
 
     activePointer = e.pointerId

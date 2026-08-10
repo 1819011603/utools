@@ -1,20 +1,17 @@
 <template>
   <div class="space-y-4">
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-      <!-- 这两项管的是 JS 预取缓存的深度，不是 MSE。给 hls.js 的 MSE 上限被写死在 30/60s
-           （见 useVideoEngine：append 几百 MB 会触发浏览器配额/驱逐），所以这里填 600 也不会让 MSE 窗口变深 -->
+      <!-- 「预加载时长」管的是 JS 预取缓存的深度，不是 MSE。给 hls.js 的 MSE 上限被写死在 30/60s
+           （见 engine/hlsConfig.ts：append 几百 MB 会触发浏览器配额/驱逐），所以填 600 也不会让 MSE 窗口变深 -->
       <UFormGroup label="预加载时长" help="预取缓存提前下多少秒（JS 侧；MSE 窗口固定 ≤60s）。缓存越接近它，预取线程越少">
         <div class="flex items-center gap-2">
           <UInput v-model.number="hlsConfig.maxBufferLength" type="number" :min="10" :max="7200" class="flex-1" />
           <span class="text-sm text-gray-500">秒</span>
         </div>
       </UFormGroup>
-      <UFormGroup label="最大缓冲时长" help="缓冲区最大存储时长">
-        <div class="flex items-center gap-2">
-          <UInput v-model.number="hlsConfig.maxMaxBufferLength" type="number" :min="30" :max="300" class="flex-1" />
-          <span class="text-sm text-gray-500">秒</span>
-        </div>
-      </UFormGroup>
+      <!-- 这里曾有「最大缓冲时长」(maxMaxBufferLength)，已删：它和「预加载时长」是一回事
+           （两者进 hls.js 前都被压到 30/60，用户填的数字到不了 hls.js），而后者还兼着
+           JS 预取深度。留两个框只会让人以为各管一段，改第二个什么也不会发生。见 MSE_CEILING_SECS -->
       <UFormGroup label="缓冲内存" help="预取缓存内存上限（JS 侧，非 MSE）">
         <div class="flex items-center gap-2">
           <UInput v-model.number="hlsConfig.maxBufferSizeMB" type="number" :min="30" :max="8000" class="flex-1" />

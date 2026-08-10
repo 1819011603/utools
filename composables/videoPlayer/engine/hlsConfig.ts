@@ -5,7 +5,7 @@
  * 挤在 useVideoEngine 里会把加载流程冲得看不见（那边超了 500 行）。
  * 内部实现模块，走显式相对 import。
  */
-import type { HlsTuning } from '../types'
+import { MSE_CEILING_SECS, type HlsTuning } from '../types'
 
 export interface HlsConfigInput {
   tuning: HlsTuning
@@ -25,7 +25,8 @@ export function buildHlsConfig(input: HlsConfigInput): Record<string, any> {
     //（容量 = maxBufferSizeMB），hls.js 只在 MSE 里留 ~30s，随播随取。
     // Math.min 兼容并迁移旧的超大配置。
     maxBufferLength: Math.min(30, hlsConfigValue.maxBufferLength),
-    maxMaxBufferLength: Math.min(60, hlsConfigValue.maxMaxBufferLength),
+    // 上界同样从「预加载时长」推：它们本来就是一回事，独立的「最大缓冲时长」已删（见 MSE_CEILING_SECS）
+    maxMaxBufferLength: Math.min(MSE_CEILING_SECS, hlsConfigValue.maxBufferLength),
     backBufferLength: Math.min(30, hlsConfigValue.backBufferLength),
     maxBufferSize: 60 * 1000 * 1000,   // MSE 最多 ~60MB，其余交给 JS 预取缓存
     // 缓冲空洞 / 卡顿自动跳跃恢复

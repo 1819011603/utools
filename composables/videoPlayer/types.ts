@@ -18,10 +18,21 @@ export interface PlaylistSource {
   lineName?: string
 }
 
+/**
+ * 交给 hls.js 的 MSE 窗口硬上限（秒）。
+ *
+ * 曾经有个独立的「最大缓冲时长」（`maxMaxBufferLength`）输入框，已删——它和「预加载时长」
+ * **是一回事**：两者进 hls.js 前都被 `Math.min` 压到 30/60，用户填的数字压根到不了 hls.js；
+ * 而「预加载时长」还兼着真正有用的那个职责（JS 预取深度 `effectivePrefetchTarget`）。
+ * 留两个输入框只会让人以为它们各管一段，实际改第二个什么也不会发生。
+ *
+ * 统计面板显示 MSE 天花板也用这个常量——同一个算式写两遍必然漂移。
+ */
+export const MSE_CEILING_SECS = 60
+
 /** HLS 可调配置（「HLS 配置」卡片直接绑定，随 SavedState 持久化） */
 export interface HlsTuning {
-  maxBufferLength: number      // 预加载时长（秒）
-  maxMaxBufferLength: number   // 最大缓冲时长（秒）
+  maxBufferLength: number      // 预加载时长（秒）——JS 预取深度，同时也是给 hls.js 的 MSE 窗口上界
   backBufferLength: number     // 后台缓冲（秒）
   maxBufferSizeMB: number      // 预取缓存内存上限（MB）——JS 侧缓存，非 MSE
   fragLoadingTimeOut: number   // 单个分片下载超时上限（ms）
@@ -51,9 +62,7 @@ export interface HlsTuning {
  */
 export const DEFAULT_HLS_TUNING: HlsTuning = {
   maxBufferLength: 600,        // 预读深度：10 分钟（~200MB @1080p 3Mbps）。只有这一项决定内存
-  // 下面两项进 hls.js 前都会被 Math.min 压到 60/30（见 useVideoEngine），填多大都只是个上界；
-  // 取 300 是为了跟「最大缓冲时长」输入框的 max 对齐，免得设置面板显示一个自己都填不进去的值
-  maxMaxBufferLength: 300,
+  // 进 hls.js 前会被 Math.min 压到 30（见 engine/hlsConfig.ts），填多大都只是个上界
   backBufferLength: 300,
   maxBufferSizeMB: 1024,       // LRU 天花板，兜住高码率源；正常由上面的预读深度先到顶
   fragLoadingTimeOut: 300000,
@@ -78,7 +87,6 @@ export function migrateHlsTuning(saved: Partial<HlsTuning>): Partial<HlsTuning> 
   const out = { ...saved }
   const OLD_DEFAULT = 3600
   if (out.maxBufferLength === OLD_DEFAULT) out.maxBufferLength = DEFAULT_HLS_TUNING.maxBufferLength
-  if (out.maxMaxBufferLength === OLD_DEFAULT) out.maxMaxBufferLength = DEFAULT_HLS_TUNING.maxMaxBufferLength
   if (out.backBufferLength === OLD_DEFAULT) out.backBufferLength = DEFAULT_HLS_TUNING.backBufferLength
   if (out.maxBufferSizeMB === OLD_DEFAULT) out.maxBufferSizeMB = DEFAULT_HLS_TUNING.maxBufferSizeMB
   return out
@@ -88,7 +96,6 @@ export function migrateHlsTuning(saved: Partial<HlsTuning>): Partial<HlsTuning> 
 export const FACTORY_HLS_TUNING: HlsTuning = {
   ...DEFAULT_HLS_TUNING,
   maxBufferLength: 30,
-  maxMaxBufferLength: 60,
   backBufferLength: 30,
 }
 

@@ -105,6 +105,7 @@
 </template>
 
 <script setup lang="ts">
+import { MSE_CEILING_SECS } from '~/composables/videoPlayer/types'
 const {
   hlsConfig, hlsStats, bufferedPercent, progressPercent, playbackRate, playbackDiag,
   tierLabel, tierBadgeColor, tierIsAuto, guardRateCeiling, effectiveTierParams,
@@ -112,8 +113,8 @@ const {
   dualChannel, dualChannelUnavailable, purgePlayedSegments,
 } = useVideoPlayerCtx()
 
-// MSE 窗口上限：与 useVideoEngine 里给 hls.js 的 maxMaxBufferLength 同一个算式（那边是 append 的硬闸）
-const mseCeilingSecs = computed(() => Math.min(60, hlsConfig.value.maxMaxBufferLength))
+// MSE 窗口上限：与 engine/hlsConfig.ts 给 hls.js 的 maxMaxBufferLength 同一个算式（那边是 append 的硬闸）
+const mseCeilingSecs = computed(() => Math.min(MSE_CEILING_SECS, hlsConfig.value.maxBufferLength))
 
 const cacheMB = computed(() => (prefetchInfo.value.bytes / 1024 / 1024).toFixed(0))
 
