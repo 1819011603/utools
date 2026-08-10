@@ -46,20 +46,21 @@
         留空 = 用档位预设（灰字）；改动即覆盖当前档位。档位由引擎按实测自动分档，并按 host 记忆。
       </p>
       <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-        <UFormGroup label="濒卡阈值(秒)" help="MSE 前向低于此=濒卡→降速/跳片">
+        <!-- 阈值判的是「有效可播」(MSE + 预取缓存)，不是 MSE 前向：后者有天花板，深缓存时
+             长期停在几十秒平台，按它分档会把稳态误判成吃紧（见 CLAUDE.md 那条踩坑） -->
+        <UFormGroup label="濒卡阈值(秒)" help="有效可播低于此=濒卡→降速/跳片">
           <UInput v-model.number="tierOverrides.panicSecs" type="number" :min="2" :max="30" size="xs" :placeholder="String(tierDefaults.panicSecs)" />
         </UFormGroup>
-        <UFormGroup label="吃紧阈值(秒)" help="MSE 前向低于此=吃紧→并发爬坡">
+        <UFormGroup label="吃紧阈值(秒)" help="有效可播低于此=吃紧→并发爬坡">
           <UInput v-model.number="tierOverrides.lowSecs" type="number" :min="5" :max="90" size="xs" :placeholder="String(tierDefaults.lowSecs)" />
         </UFormGroup>
-        <UFormGroup label="安全系数" help="供给带宽相对消耗的冗余倍数">
+        <UFormGroup label="安全系数" help="供给带宽相对消耗的冗余倍数（并发与最高流畅倍速都按它算）">
           <UInput v-model.number="tierOverrides.safety" type="number" :min="1" :max="3" :step="0.1" size="xs" :placeholder="String(tierDefaults.safety)" />
         </UFormGroup>
-        <UFormGroup label="并发下限" help="起播即保证的最小并行连接数">
-          <UInput v-model.number="tierOverrides.concurrencyFloor" type="number" :min="1" :max="6" size="xs" :placeholder="String(tierDefaults.concurrencyFloor)" />
-        </UFormGroup>
-        <!-- 对冲延迟(hedgeMs)/竞速上限(maxRacers) 不开放覆盖：调它们只是在换「多快开始浪费连接」，
-             实际抗卡效果由档位预设 + 并发爬坡决定，逐项手调帮不上忙，反倒占满这一屏。 -->
+        <!-- 这里曾有「并发下限」(concurrencyFloor)，已随档位参数一起删除：起播那一刻缓存为 0，
+             必然先被「存货不够就少开线程」压到 2 条，它想保证的事做不到；剩下的效果只是在缓存
+             已经很足时把线程数硬抬上去（缓存 98/100 还跑 6 条）。慢源该开几条由实测算，不用预设猜。
+             对冲延迟(hedgeMs)/竞速上限(maxRacers) 同样不开放覆盖：调它们只是在换「多快开始浪费连接」。 -->
         <UFormGroup label="跳片超时(ms)" help="关键分片超此→跳过（先降速后才跳）">
           <UInput v-model.number="tierOverrides.skipMs" type="number" :min="5000" :max="60000" :step="1000" size="xs" :placeholder="String(tierDefaults.skipMs)" />
         </UFormGroup>

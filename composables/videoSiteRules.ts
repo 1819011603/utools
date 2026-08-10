@@ -14,12 +14,17 @@
 // 一处集中管理（取代 useHlsPrefetch 里散落的模块常量），供引擎按档位读取。
 export type ServerTier = 'good' | 'medium' | 'bad'
 
+/**
+ * 曾经有过 `concurrencyFloor`（起播并发下限），已删除：它想保证的「起播就开 N 条」做不到了——
+ * 起播那一刻缓存为 0，必然先撞上「存货不够就少开线程」把并发压到 2（见 useHlsPrefetch 的
+ * SAFE_WALL_SECS）。剩下的唯一效果就是在缓存已经很足时把线程数硬抬上去，正好是要治的毛病
+ * （缓存 98/100 还跑 6 条）。慢源需要几条连接由实测算（requiredConn），不用预设猜。
+ */
 export interface TierParams {
   maxConn: number            // 单 origin 并发上限（仍受浏览器 per-host 6 硬顶）
-  concurrencyFloor: number   // 起播并发下限
   safety: number             // 带宽安全系数
-  panicSecs: number          // MSE 前向缓冲低于此 = 濒卡（触发抗卡阶梯）
-  lowSecs: number            // MSE 前向缓冲低于此 = 吃紧（并发爬坡）
+  panicSecs: number          // 有效可播（MSE + 预取缓存）低于此 = 濒卡（触发抗卡阶梯）
+  lowSecs: number            // 有效可播低于此 = 吃紧（并发爬坡）
   hedgeMs: number            // 关键分片超此时间 → 追加竞速连接（对冲死连接）
   skipMs: number             // 关键分片超此时间 → 跳过该片（保实时）
   maxRacers: number          // 单个关键分片最多并行竞速连接数
@@ -28,11 +33,11 @@ export interface TierParams {
 
 export const SERVER_TIERS: Record<ServerTier, TierParams> = {
   // 好：单连接就够，低并发 + 长超时，不折腾
-  good:   { maxConn: 4, concurrencyFloor: 1, safety: 1.2, panicSecs: 5,  lowSecs: 15, hedgeMs: 8000, skipMs: 30000, maxRacers: 3, dualChannelAuto: false },
+  good:   { maxConn: 4, safety: 1.2, panicSecs: 5,  lowSecs: 15, hedgeMs: 8000, skipMs: 30000, maxRacers: 3, dualChannelAuto: false },
   // 中：单连接慢但可并行，靠加线程补齐
-  medium: { maxConn: 6, concurrencyFloor: 3, safety: 1.4, panicSecs: 8,  lowSecs: 25, hedgeMs: 5000, skipMs: 18000, maxRacers: 5, dualChannelAuto: false },
+  medium: { maxConn: 6, safety: 1.4, panicSecs: 8,  lowSecs: 25, hedgeMs: 5000, skipMs: 18000, maxRacers: 5, dualChannelAuto: false },
   // 差：源站带宽硬顶，激进——满并发 + 双通道 + 短超时快跳
-  bad:    { maxConn: 6, concurrencyFloor: 6, safety: 1.7, panicSecs: 12, lowSecs: 40, hedgeMs: 3000, skipMs: 10000, maxRacers: 6, dualChannelAuto: true },
+  bad:    { maxConn: 6, safety: 1.7, panicSecs: 12, lowSecs: 40, hedgeMs: 3000, skipMs: 10000, maxRacers: 6, dualChannelAuto: true },
 }
 
 // 冷启动/未测出时的兜底档（中档：既不误判快源浪费、也给慢源留余量）

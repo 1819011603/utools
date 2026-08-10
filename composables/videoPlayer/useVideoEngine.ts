@@ -84,9 +84,6 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     getVideoEl: () => videoEl.value,
     getProxyUrl: conn.getProxyUrl,
     cache: segmentCache,
-    // 并发下限恒为 1：站点规则已删除，实际下限由档位的 concurrencyFloor 给，
-    // 引擎再按实测带宽 + 倍速动态往上爬（见 useHlsPrefetch 的 floorConn/stepControl）
-    getConcurrencyCap: () => 1,
     getPlaybackRate: () => playbackRate.value,
     // 「预加载时长」= 往后预取多少秒就够了，到量即停（0/负数视为不限）
     getPrefetchTargetSecs: () => {
