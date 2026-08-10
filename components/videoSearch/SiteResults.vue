@@ -80,13 +80,18 @@
 
     <!-- 失败：说清是哪一步坏的，并且只重试这一站 -->
     <div v-else-if="state.status === 'error'" class="space-y-3 wf-fade-in">
+      <!-- 错误文案走 slot 而不是 description 属性：报错里常是一长串没有空格的东西
+           （域名 + UND_ERR_CONNECT_TIMEOUT 这类），默认不折行，在手机上直接横着捅出卡片外（踩过） -->
       <UAlert
         color="red"
         variant="soft"
         icon="i-heroicons-exclamation-triangle"
         :title="`「${state.name}」搜索失败`"
-        :description="state.error"
-      />
+      >
+        <template #description>
+          <p class="break-words">{{ state.error }}</p>
+        </template>
+      </UAlert>
       <div class="flex gap-2">
         <UButton size="sm" icon="i-heroicons-arrow-path" @click="$emit('retry')">重试本站</UButton>
         <UButton
