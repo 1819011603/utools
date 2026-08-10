@@ -82,6 +82,11 @@ const SAFE_WALL_SECS = 5
 const PANIC_WALL_RATIO = 0.4
 const PANIC_MAX_CONN = 2
 const LOW_BUFFER_MAX_CONN = 3
+/**
+ * 量不到分片时长时的兜底值（秒）。只在冷启动那一两拍生效——那时缓存≈0、下面的
+ * 「还差多少」远大于一片，这条上限压根不咬人，取多少都无所谓。
+ */
+const FALLBACK_SEG_SECS = 10
 
 export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   const { getProxyUrl, cache, getConcurrencyCap } = opts
@@ -161,6 +166,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   let lastAhead = -1                      // 上次的前向缓冲秒数
   let lastHealthZone: HealthZone = 'healthy'  // 健康区（驱动 UI 与降速守卫）
   let lastPlayable = 0                    // 上次量到的有效可播秒数（MSE + 预取缓存）
+  let segDurSecs = 0                      // 实测分片时长（秒，0=还没量到）：一条线程下一片就补这么多缓存
 
   // 切换视频/CDN 时重置实测与控制器，避免用上个流的数据误判新流
   const resetStrategy = () => {
@@ -170,6 +176,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     lastAhead = -1
     lastHealthZone = 'healthy'
     lastPlayable = 0
+    segDurSecs = 0
     resetLanes()
     segInflightStart.clear()
     strategy.value = { perConnKBps: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0, aggregateScales: true, healthZone: 'healthy', playableSecs: 0 }
@@ -232,6 +239,30 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     // 中间且未在掉：维持
   }
 
+  /**
+   * 「还差多少就到预加载时长」换算出的并发上限：**同时在下的分片数不超过缺口装得下的片数**。
+   *
+   * 缺口 20s、每片 10s → 2 条就填满了，开 6 条里有 4 条是在下超出目标的部分（下完还要被
+   * `cachedAhead >= target` 那条停取、或被 LRU 淘汰），纯属白占连接和带宽。
+   * 实测就是用户看到的样子：预加载时长 100s、已有 98s，缺口只剩一片都不到，线程数却还钉在 6/12
+   * ——因为 `floorConn()`（「差」档 concurrencyFloor=6）和 `paused → 顶格` 把闭环那句
+   * 「接近目标就 −1」整个压回去了。所以这条上限**必须排在它们之后**。
+   *
+   * 它同时把并发做成了一条随缺口线性收敛的斜坡（缺口 120s→12 条、60s→6、30s→3、10s→1），
+   * 缓存于是稳稳停在预加载时长附近：不会冲过头（多下的迟早被淘汰），也不会喂不饱
+   * （缺口一张开线程立刻跟着张开）。**没有一个「充足」阈值可调**——目标就是用户填的预加载时长。
+   *
+   * 用视频秒数而非墙钟秒数算：缺口和分片时长都是视频时间轴上的量，除以倍速会两头都缩、白折腾。
+   * 抗卡那两档（存货不够播 5 秒）走的才是墙钟，两者管的是相反方向，各用各的尺子。
+   */
+  const headroomConnCap = (cachedAhead: number): number => {
+    const target = effectivePrefetchTarget()
+    if (!Number.isFinite(target)) return hostConcurrencyCap   // 没设预加载时长 → 这条不参与
+    const gap = target - cachedAhead
+    if (gap <= 0) return 0                                     // 已到目标（上层还会再判一次停取）
+    return Math.max(1, Math.ceil(gap / (segDurSecs || FALLBACK_SEG_SECS)))
+  }
+
   // 返回当前目标并发（受控值，双重钳制在 [2, hostCap]）。只读，供两个预取入口共用。
   // 注意：永远保持并行预取后续分片，绝不因当前分片慢而停掉后面的（否则退化成串行/卡死）。
   const getAdaptivePrefetchCount = (cachedAhead?: number): number => {
@@ -241,14 +272,16 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     //
     const paused = opts.getVideoEl()?.paused ?? false
     let target = paused ? hostConcurrencyCap : Math.min(hostConcurrencyCap, Math.max(floorConn(), ctrlConn))
-    // 存货不够播 5 秒就收敛到 2~3 条，把连接和带宽让给紧邻播放头那一片（理由见 SAFE_WALL_SECS）。
-    // 放在最后，好压过 `paused → 顶格` 和档位的 concurrencyFloor（「差」档给的是 6）——
-    // 起播那一刻正是「还没 play() 所以 paused 为真」+「缓存为 0」同时成立，两条都得压住。
+    // 下面两条都排在 floorConn / paused 之后，好压过它们（「差」档 concurrencyFloor 给的是 6）：
+    //   · 存货不够播 5 秒 → 收到 2~3 条，把连接让给紧邻播放头那一片（见 SAFE_WALL_SECS）。
+    //     起播那一刻正是「还没 play() 所以 paused 为真」+「缓存为 0」同时成立，两条都得压住。
+    //   · 快到预加载时长 → 按剩余缺口收（见 headroomConnCap）。
     if (cachedAhead !== undefined) {
       const wall = cachedAhead / Math.max(1, getPlaybackRate())
       const safe = getSafeWallSecs()
       if (wall < safe * PANIC_WALL_RATIO) target = Math.min(target, PANIC_MAX_CONN)
       else if (wall < safe) target = Math.min(target, LOW_BUFFER_MAX_CONN)
+      target = Math.min(target, headroomConnCap(cachedAhead))
     }
     refreshStrategy(target)
     return target
@@ -333,6 +366,10 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     const frags: any[] = levelDetails.fragments
     const startIdx = frags.findIndex((f: any) => f.sn === lastFragSn) + 1
     if (startIdx <= 0) return
+
+    // 分片时长：headroomConnCap 用它算「缺口还装得下几片」。取清单的 targetduration
+    // （它就是「最长的一片」，用来算上限正合适），拿不到就退回真实分片的 duration
+    segDurSecs = levelDetails.targetduration || frags[startIdx]?.duration || segDurSecs
 
     // 探测未来分片的 host 分布：多 CDN 时放宽并发上限（每 host 6 连接，封顶 12）
     const lookahead = frags.slice(startIdx, startIdx + 24)

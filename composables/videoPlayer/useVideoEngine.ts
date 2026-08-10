@@ -62,7 +62,8 @@ export function useVideoEngine(deps: VideoEngineDeps) {
 
   /**
    * 本次起播是不是「定位类」（切集 / 重载 / 拖进度），供 useVideoEvents 选起播门槛：
-   * 定位类只等 2.5s 缓冲就出画面，首次冷启动仍等 6s。
+   * 定位类只要「够播 2 秒」就出画面，首次冷启动仍要攒够 6 秒（两档都 × 倍速，
+   * 见 useVideoEvents.autoPlayTarget）。
    *
    * 区别在于用户的预期：冷启动时他刚点开、还在看页面，多等两秒攒厚一点划算；
    * 而切集/拖进度时画面是停着的，每多一秒都在盯着转圈——那时「先出画面、边播边补」明显更好。

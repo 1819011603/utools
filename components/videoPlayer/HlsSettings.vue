@@ -3,7 +3,7 @@
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
       <!-- 这两项管的是 JS 预取缓存的深度，不是 MSE。给 hls.js 的 MSE 上限被写死在 30/60s
            （见 useVideoEngine：append 几百 MB 会触发浏览器配额/驱逐），所以这里填 600 也不会让 MSE 窗口变深 -->
-      <UFormGroup label="预加载时长" help="预取缓存提前下多少秒（JS 侧；MSE 窗口固定 ≤60s）">
+      <UFormGroup label="预加载时长" help="预取缓存提前下多少秒（JS 侧；MSE 窗口固定 ≤60s）。缓存越接近它，预取线程越少">
         <div class="flex items-center gap-2">
           <UInput v-model.number="hlsConfig.maxBufferLength" type="number" :min="10" :max="7200" class="flex-1" />
           <span class="text-sm text-gray-500">秒</span>
