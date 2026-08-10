@@ -1,6 +1,9 @@
 import type HlsType from 'hls.js'
 import type { useSegmentCache } from './useSegmentCache'
 import { SERVER_TIERS, DEFAULT_TIER, type ServerTier, type TierParams } from '../videoSiteRules'
+import { useLaneControl } from './prefetch/lanes'
+import { useBandwidthModel } from './prefetch/bandwidth'
+import { createFragLoaderFactory } from './prefetch/fragLoader'
 
 export type HealthZone = 'panic' | 'low' | 'healthy'
 
@@ -101,63 +104,10 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   // 预取锚点：起播定位未到位时用 pendingStartPos，否则用真实播放头。所有「从哪往后预取」的判断都基于它。
   const anchorTime = (video: HTMLVideoElement): number => Math.max(video.currentTime, getStartPosition())
 
-  // ── 连接 lane 负载均衡（直连+代理双通道）──
-  // 每条新连接分到「在途最少」的 lane，使各 origin 都不超过浏览器 6 条上限，聚合达到 lane 数 × 6。
+  // ── 连接 lane：负载均衡 + 熔断（实现见 ./prefetch/lanes.ts）──
   // fLoader（hls.js 自身分片）与预取共用同一个均衡器，避免两者各自打满同一个 origin。
-  const laneInflight: number[] = []
-
-  // ── lane 熔断 ──
-  // 起播前的可达性探测未必覆盖得到分片轴（清单通了但没解析出分片时它整轮跳过），
-  // 而探测本身也可能因为源站返回怪东西而给出假阳性。所以真实请求本身就是最后一道探测：
-  // 某条 lane 连续失败而别的 lane 还在成功，就把它熔断，双通道自动退回单通道。
-  // 不这么做的表现是「视频能播，但一半请求 403」——白扔一半连接，控制台刷屏（实测 maowushi 源，
-  // 分片要 Referer，直连 lane 每发必 403，代理 lane 正常 200）。
-  const LANE_TRIP_FAILS = 3          // 连续失败到这个数就熔断（首片偶发失败不算数）
-  const laneFails: number[] = []     // 各 lane 的连续失败数（成功即清零）
-  const laneOks: number[] = []       // 各 lane 的累计成功数
-  const laneDead = ref<boolean[]>([])  // 已熔断的 lane（响应式，供 UI 显示「已降为单通道」）
-
-  const laneAlive = (i: number) => !laneDead.value[i]
-
-  const markLaneOk = (lane: number) => {
-    laneFails[lane] = 0
-    laneOks[lane] = (laneOks[lane] ?? 0) + 1
-  }
-  /** 记一次 lane 失败；连续失败超阈值且还有别的 lane 活着就熔断它 */
-  const markLaneFail = (lane: number, laneCount: number) => {
-    laneFails[lane] = (laneFails[lane] ?? 0) + 1
-    if (laneFails[lane] < LANE_TRIP_FAILS || laneDead.value[lane]) return
-    // 只剩一条活 lane 时绝不熔断——那不是「换一条路」，是把下载彻底掐死
-    const aliveCount = Array.from({ length: laneCount }, (_, i) => i).filter(laneAlive).length
-    if (aliveCount <= 1) return
-    const next = laneDead.value.slice()
-    next[lane] = true
-    laneDead.value = next
-    console.warn(`[lane] 第 ${lane} 条通道连续失败 ${laneFails[lane]} 次，已熔断（双通道降为单通道）`)
-  }
-  /** 换视频/换策略时清空熔断记录：新源的可达性与上一个源无关 */
-  const resetLanes = () => {
-    laneFails.length = 0
-    laneOks.length = 0
-    laneInflight.length = 0
-    laneDead.value = []
-  }
-
-  const acquireLane = (url: string): { lane: number; laneUrl: string; laneCount: number } => {
-    const urls = getLaneUrls(url)
-    // 熔断过的 lane 直接排除；万一全被熔断（不该发生，markLaneFail 保底留一条）就退回全体
-    let pool = urls.map((_, i) => i).filter(laneAlive)
-    if (!pool.length) pool = urls.map((_, i) => i)
-    let lane = pool[0]
-    for (const i of pool) {
-      if ((laneInflight[i] ?? 0) < (laneInflight[lane] ?? 0)) lane = i
-    }
-    laneInflight[lane] = (laneInflight[lane] ?? 0) + 1
-    return { lane, laneUrl: urls[lane], laneCount: urls.length }
-  }
-  const releaseLane = (lane: number) => {
-    if ((laneInflight[lane] ?? 0) > 0) laneInflight[lane]--
-  }
+  const laneControl = useLaneControl(getLaneUrls)
+  const { laneDead, acquireLane, releaseLane, markLaneOk, markLaneFail, resetLanes, getLaneCount } = laneControl
 
   // ── 在途下载计时（诊断「哪个分片卡住、下了多久」）──
   // url → 该分片本次下载的起始 performance.now()。发起时登记，成功/失败/中止时删除。
@@ -173,12 +123,6 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     for (const [u, t] of segInflightStart) { const el = now - t; if (el > worst) { worst = el; worstUrl = u } }
     return { name: shortName(worstUrl), elapsedMs: worst, count: segInflightStart.size }
   }
-  // 当前流的**可用** lane 数（用一个代表性 URL 探测），用于放宽并发上限。
-  // 必须排除熔断掉的 lane：否则直连 lane 已经每发必 403，并发上限还按两个 origin 放到 12，
-  // 等于让 6 条连接去挤同一个 origin，浏览器排队反而更慢。
-  const getLaneCount = (sampleUrl?: string): number =>
-    sampleUrl ? Math.max(1, getLaneUrls(sampleUrl).filter((_, i) => laneAlive(i)).length) : 1
-
   // 跳过卡死的分片：把播放头挪到该分片之后，让 hls.js 从下一片重新加载（下一片多半已预取，秒恢复）。
   // 只在「确实卡在播放头附近」时跳，避免把提前缓冲的远处分片误当卡点跳掉。返回是否真的跳了。
   const skipSegment = (frag: any): boolean => {
@@ -202,36 +146,9 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     prefetchInfo, getPrefetchedBuf, evictPrefetchCache, purgeCache,
   } = cache
 
-  // ── 实测采样（EWMA）：每连接速度 + 视频码率，驱动动态并发 ──
-  let perConnBps = 0   // 实测每连接速度（bps）
-  let segBitrate = 0   // 实测视频码率（bps）
-  // 聚合可并行探针：分别记「低并发时」与「高并发时」的每连接速度。
-  // 若高并发下每连接速度基本持平 → 每连接限速、加线程聚合线性增长（可并行）；
-  // 若高并发下每连接速度骤降 → 每 IP 总量硬顶、加线程只是分摊（不可并行）。
-  let perConnLow = 0   // 并发 ≤2 时的每连接速度
-  let perConnHigh = 0  // 并发 ≥5 时的每连接速度
-  const ewma = (prev: number, cur: number) => (prev ? prev * 0.7 + cur * 0.3 : cur)
-  const sampleSpeed = (bytes: number, ms: number, concurrency = 0) => {
-    // 只采样真实网络传输：过滤缓存命中（极快）、过小分片、离谱值，避免污染实测
-    if (bytes < 100_000 || ms < 50) return
-    const bps = (bytes * 8) / (ms / 1000)
-    if (bps > 500_000_000) return   // >500Mbps 基本是缓存/异常，丢弃
-    perConnBps = ewma(perConnBps, bps)
-    if (concurrency > 0 && concurrency <= 2) perConnLow = ewma(perConnLow, bps)
-    else if (concurrency >= 5) perConnHigh = ewma(perConnHigh, bps)
-  }
-  // 聚合是否随线程增长：两档都有数据时比较，否则乐观按「可并行」（多数 CDN 如此）
-  const getAggregateScales = (): boolean => {
-    if (perConnLow > 0 && perConnHigh > 0) return perConnHigh >= perConnLow * 0.55
-    return true
-  }
-  const sampleBitrate = (bytes: number, sec: number) => {
-    if (bytes > 0 && sec > 0) segBitrate = ewma(segBitrate, (bytes * 8) / sec)
-  }
-
-  // ── 最高流畅倍速：用实测带宽 ÷ 码率直接算（见 refreshStrategy）──
-  // 早期靠「缓冲增长率」反推，但预取到「预加载时长」封顶后缓冲不再增长、增长率≈0，
-  // 会把可持续倍速误判成 1x。改为纯带宽模型：满并发聚合带宽能喂几倍码率就是几倍。
+  // ── 实测采样：每连接速度 / 码率 / 聚合能否并行 / 最高流畅倍速（实现见 ./prefetch/bandwidth.ts）──
+  const bw = useBandwidthModel()
+  const { sampleSpeed, sampleBitrate, getAggregateScales } = bw
 
   const strategy = ref<StrategySnapshot>({ perConnKBps: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0, aggregateScales: true, healthZone: 'healthy', playableSecs: 0 })
 
@@ -246,10 +163,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
 
   // 切换视频/CDN 时重置实测与控制器，避免用上个流的数据误判新流
   const resetStrategy = () => {
-    perConnBps = 0
-    segBitrate = 0
-    perConnLow = 0
-    perConnHigh = 0
+    bw.resetSamples()
     hostConcurrencyCap = MAX_CONN
     ctrlConn = 0
     lastAhead = -1
@@ -263,23 +177,17 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   // 实测驱动的目标并发：需要带宽 = 码率 × 倍速 × 安全系数；并发 = ⌈需要 / 每连接速度⌉
   const computeTargetConcurrency = (): number => {
     const floor = floorConn()
-    if (!perConnBps || !segBitrate) return Math.min(hostConcurrencyCap, Math.max(floor, 4))  // 冷启动：乐观
-    const required = segBitrate * getPlaybackRate() * tier().safety
-    const need = Math.ceil(required / perConnBps)
+    if (!bw.hasSamples()) return Math.min(hostConcurrencyCap, Math.max(floor, 4))  // 冷启动：乐观
+    const need = bw.requiredConn(getPlaybackRate(), tier().safety)
     return Math.min(hostConcurrencyCap, Math.max(2, need, floor))
   }
 
   // 刷新对外策略快照（供 UI 展示与倍速可行性判断）
   const refreshStrategy = (targetConn: number) => {
-    // 最高流畅倍速 = 满并发聚合带宽 ÷ (码率 × 安全系数)，向下对齐 0.25 档（保守，不过度承诺）。
-    // 与并发模型（computeTargetConcurrency）一致：满并发时能喂几倍码率就是几倍。
-    // 冷启动（还没测出每连接带宽或码率）先按「当前倍速」展示，而非 0。
-    const sustainable = (!perConnBps || !segBitrate)
-      ? Math.max(1, Math.round(getPlaybackRate() / 0.25) * 0.25)
-      : Math.max(1, Math.floor((perConnBps * hostConcurrencyCap) / (segBitrate * tier().safety) / 0.25) * 0.25)
+    const sustainable = bw.maxFluentRate(hostConcurrencyCap, tier().safety, getPlaybackRate())
     strategy.value = {
-      perConnKBps: Math.round(perConnBps / 8 / 1024),
-      segMbps: Math.round((segBitrate / 1e6) * 10) / 10,
+      perConnKBps: bw.perConnKBps(),
+      segMbps: bw.segMbps(),
       targetConn,
       maxFluentRate: sustainable,
       aggregateScales: getAggregateScales(),
@@ -382,155 +290,16 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   // 不限制预取"触达距离"：始终让 count 个连接并行下载最近的 count 个未缓存分片。
   // （近处慢时远处也照下，保持并行聚合吞吐；否则退化成串行，太慢。）
 
-  // 创建自定义 HLS 分片加载器（fLoader）
-  // 优先从预取缓存返回数据，cache miss 时走 fetch 正常加载
-  const createHlsFragLoader = () => {
-    return class PrefetchFragLoader {
-      context: any
-      // hls.js 在创建 loader 实例后立刻执行 frag.stats = loader.stats，
-      // 时机早于 load() 调用。若此处不提前初始化，frag.stats 会是 undefined，
-      // AbrController 的 setInterval 轮询时读 frag.stats.loading 直接崩溃。
-      stats: any = {
-        aborted: false, loaded: 0, total: 0,
-        retry: 0, chunkCount: 0, bwEstimate: 0,
-        loading:   { start: 0, first: 0, end: 0 },
-        parsing:   { start: 0, end: 0 },
-        buffering: { start: 0, first: 0, end: 0 },
-      }
-      private ctrl: AbortController | null = null
-
-      load(context: any, config: any, callbacks: any): void {
-        this.context = context
-        const url: string = context.url
-        const t0 = performance.now()
-
-        // 重置 stats 字段（必须原地修改，不能替换整个对象）
-        // frag.stats 持有的是同一个对象引用，替换会导致 frag.stats 仍指向旧的 undefined
-        this.stats.aborted = false
-        this.stats.loaded = 0
-        this.stats.total = 0
-        this.stats.retry = 0
-        this.stats.chunkCount = 0
-        this.stats.bwEstimate = 0
-        this.stats.loading.start = t0
-        this.stats.loading.first = 0
-        this.stats.loading.end   = 0
-        this.stats.parsing.start = 0
-        this.stats.parsing.end   = 0
-        this.stats.buffering.start = 0
-        this.stats.buffering.first = 0
-        this.stats.buffering.end   = 0
-
-        const succeed = (data: ArrayBuffer) => {
-          // seek/换源后 hls.js 会 abort 旧 loader；此时再回调 onSuccess
-          // 会污染 hls.js 的内部状态，让播放卡住几十秒。必须在这里短路。
-          if (this.stats.aborted) return
-          const t1 = performance.now()
-          this.stats.loaded = data.byteLength
-          this.stats.total  = data.byteLength
-          this.stats.chunkCount = 1
-          if (!this.stats.loading.first) this.stats.loading.first = t0 + 1
-          this.stats.loading.end = t1
-          callbacks.onSuccess({ data, url }, this.stats, context)
-        }
-
-        const fail = (e: Error) => {
-          if (this.stats.aborted) return
-          this.stats.loading.end = performance.now()
-          callbacks.onError({ code: 0, text: e.message }, context, null, this.stats)
-        }
-
-        // 1. 命中预取缓存（且未过期）→ 即时返回，并刷新 LRU 顺序与访问时间
-        const cachedBuf = getPrefetchedBuf(url)
-        if (cachedBuf) {
-          segPrefetchCache.delete(url)
-          segPrefetchCache.set(url, { buf: cachedBuf, ts: Date.now() })
-          prefetchInfo.value.cached = segPrefetchCache.size
-          succeed(cachedBuf)
-          return
-        }
-
-        // 2 & 3. 关键分片（hls.js 正在等的这片，直接决定能不能播）→ 限时保障加载：
-        //   对冲竞速（换连接绕开死连接）+ 硬超时跳过（绝不整段冻结）。见 hedgedLoad。
-        this.hedgedLoad(url, context, succeed, fail)
-      }
-
-      // 关键分片加载：一条不行就再起一条并行抢，谁先回用谁；久拿不到就跳过。
-      //   · 已有预取在途 → 先让它参与竞速（不新开连接），但只等 hedgeMs，不无限等死连接；
-      //   · 每 hedgeMs 追加一条新连接并行竞速（对冲单条死连接）；单条失败立刻换一条重试；
-      //   · skipMs 仍拿不到 → 跳过该片（挪播放头到下一片），避免多分钟冻结。（超时值取自当前档位）
-      private hedgedLoad(url: string, context: any, succeed: (b: ArrayBuffer) => void, fail: (e: Error) => void) {
-        if (this.stats.aborted) return
-        let settled = false
-        let racers = 0
-        const ctrls: AbortController[] = []
-        const timers: ReturnType<typeof setTimeout>[] = []
-        const cleanup = () => {
-          timers.forEach(clearTimeout)
-          ctrls.forEach(c => { try { c.abort() } catch {} })
-          segInflightStart.delete(url)
-        }
-        this._cancelHedge = () => { if (!settled) { settled = true; cleanup() } }
-
-        const win = (buf: ArrayBuffer) => {
-          if (settled || this.stats.aborted) return
-          settled = true
-          cleanup()
-          segPrefetchCache.set(url, { buf, ts: Date.now() })   // 存缓存，后续命中不再下载
-          segPrefetching.delete(url)
-          prefetchInfo.value.cached = segPrefetchCache.size
-          prefetchInfo.value.pending = segPrefetching.size
-          evictPrefetchCache()
-          if (!this.stats.loading.first) this.stats.loading.first = performance.now()
-          succeed(buf)
-        }
-
-        const tp = tier()   // 本次加载用当前档位的对冲/跳片超时（hedgeMs/skipMs/maxRacers）
-        // 起一条新竞速连接（换 lane、换连接，绕开卡死的那条）
-        const race = () => {
-          if (settled || this.stats.aborted || racers >= tp.maxRacers) return
-          racers++
-          const ctrl = new AbortController(); ctrls.push(ctrl)
-          const { lane, laneUrl, laneCount } = acquireLane(url)
-          const t = performance.now()
-          if (!segInflightStart.has(url)) segInflightStart.set(url, t)   // 计时：登记在途（诊断用）
-          const conc = racers   // 采样时的并发（竞速条数），供聚合可并行探针分档
-          fetch(laneUrl, { signal: ctrl.signal, referrerPolicy: 'no-referrer' })
-            .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); if (!this.stats.loading.first) this.stats.loading.first = performance.now(); return r.arrayBuffer() })
-            .then(buf => { releaseLane(lane); markLaneOk(lane); sampleSpeed(buf.byteLength, performance.now() - t, conc); win(buf) })
-            .catch(() => {
-              releaseLane(lane)
-              // 主动取消（竞速已有赢家 / seek）不算这条 lane 的账
-              if (!ctrl.signal.aborted) markLaneFail(lane, laneCount)
-              if (!settled && !this.stats.aborted) timers.push(setTimeout(race, 500))   // 这条失败 → 快速换一条
-            })
-        }
-
-        // 已有预取在途：先让它竞速（省一条连接），但别无限等——hedgeMs 后照常追加新连接抢
-        const pf = segPrefetching.get(url)
-        if (pf) pf.then(buf => { if (buf && buf.byteLength > 0) win(buf) }).catch(() => {})
-        else race()
-
-        timers.push(setTimeout(race, tp.hedgeMs))         // 还没赢 → 加一条并行（对冲死连接）
-        timers.push(setTimeout(race, tp.hedgeMs * 2))     // 再加一条
-        timers.push(setTimeout(() => {                    // 硬超时 → 跳过，别冻结
-          if (settled || this.stats.aborted) return
-          settled = true
-          cleanup()
-          const skipped = skipSegment(context?.frag)
-          fail(new Error(skipped ? 'segment skipped (too slow)' : 'segment fetch timeout'))
-        }, tp.skipMs))
-      }
-
-      private _cancelHedge: (() => void) | null = null
-      abort(): void {
-        this.ctrl?.abort()
-        this._cancelHedge?.()
-        if (this.stats) this.stats.aborted = true
-      }
-      destroy(): void { this.abort() }
-    }
-  }
+  // hls.js 正在等的那一片：命中预取缓存即时返回，miss 走对冲竞速 + 硬超时跳片。
+  // 实现见 ./prefetch/fragLoader.ts（它可以抢连接，不受下面「存货不够就少开线程」的预取上限约束）
+  const { createHlsFragLoader } = createFragLoaderFactory({
+    cache,
+    lanes: laneControl,
+    tier,
+    sampleSpeed,
+    segInflightStart,
+    skipSegment,
+  })
 
   // 发起一个分片预取请求（带 1 次轻量重试，减少「空洞」导致的临播卡顿）
   // durationSec = 该分片代表的视频秒数，用于实测码率

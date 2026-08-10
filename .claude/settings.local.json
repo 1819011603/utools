@@ -50,7 +50,8 @@
       "Bash('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --remote-debugging-port=9333 --user-data-dir=/tmp/cdp-profile --headless=new --no-first-run --no-default-browser-check --autoplay-policy=no-user-gesture-required --mute-audio about:blank)",
       "Bash(\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --remote-debugging-port=9333 --user-data-dir=/tmp/cdp-profile --headless=new --no-first-run --no-default-browser-check --autoplay-policy=no-user-gesture-required --mute-audio about:blank)",
       "Bash(export HTTPS_PROXY=http://127.0.0.1:7897)",
-      "Bash(cp /tmp/tsconfig.check.json ./tsconfig.check.json && node_modules/.bin/tsc -p tsconfig.check.json 2>&1 | grep -E \"^\\(composables|server|utils\\)\" | grep -vE \"useMediaProcess|m3u8-parser|useM3u8.ts\\\\\\(2[0-9][0-9],|proxy.ts\\\\\\(201\"; rm -f tsconfig.check.json; echo \"--- ts ok ---\")"
+      "Bash(cp /tmp/tsconfig.check.json ./tsconfig.check.json && node_modules/.bin/tsc -p tsconfig.check.json 2>&1 | grep -E \"^\\(composables|server|utils\\)\" | grep -vE \"useMediaProcess|m3u8-parser|useM3u8.ts\\\\\\(2[0-9][0-9],|proxy.ts\\\\\\(201\"; rm -f tsconfig.check.json; echo \"--- ts ok ---\")",
+      "Bash(python3 -)"
     ],
     "ask": [
       "Bash(rm *)",

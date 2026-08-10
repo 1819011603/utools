@@ -45,10 +45,13 @@ const {
   copyDeepLink, deepLinkCopied,
 } = useVideoPlayerCtx()
 
-// 只有这一处用到，就近放着
+// 只有这一处用到，就近放着。
+// 换掉过一次 Sintel：原来那条 `bitdash-a.akamaihd.net/...` 的 CDN 已经退役，实测恒 403——
+// 而「示例」是新用户唯一「不用自己找地址就能试」的入口，点开就播不了比没有还糟。
+// 换成同域下另一条 mux 测试流（fMP4/ISMC），顺带覆盖了跟 x36xhzz 不同的封装格式。
 const EXAMPLE_URLS = [
   { name: 'Big Buck Bunny (HLS)', url: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8' },
-  { name: 'Sintel (HLS)', url: 'https://bitdash-a.akamaihd.net/content/sintel/hls/playlist.m3u8' },
+  { name: 'Tears of Steel (HLS)', url: 'https://test-streams.mux.dev/tos_ismc/main.m3u8' },
   { name: 'Tears of Steel (MP4)', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4' },
 ]
 </script>
