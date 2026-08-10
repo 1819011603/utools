@@ -146,8 +146,14 @@
             那行「在源站看全部」——想看列表和想看第一张片的手势是同一个，等于用一个功能挡了另一个。
             推开的代价只是海报横向挪一下，而且有过渡，比被盖住舒服得多
           -->
+          <!--
+            **`min-w-0` 不能省**：grid 子项默认 `min-width: auto`，会被里面那条 flex 行的
+            内容宽度顶开。手机上这一列是横排的五个站，于是列被撑到比屏幕还宽——
+            `overflow-x-auto` 挂在里层却永远不触发（撑开的是外层），表现是
+            **横向划不动、右边那两个站永远够不着**（安卓上踩到）
+          -->
           <div
-            class="md:border-r md:border-gray-200/70 md:dark:border-white/10 transition-all duration-300"
+            class="min-w-0 md:border-r md:border-gray-200/70 md:dark:border-white/10 transition-all duration-300"
             :class="railOpen ? 'md:pr-4' : 'md:pr-2'"
             @mouseenter="railHovered = true"
             @mouseleave="railHovered = false"
@@ -161,9 +167,11 @@
             />
           </div>
 
+          <!-- 同上：结果那一列也要 min-w-0，否则长片名/长地址一样能把整格顶宽 -->
           <VideoSearchSiteResults
             v-if="activeState"
             :key="activeState.siteId"
+            class="min-w-0"
             :state="activeState"
             :keyword="keyword"
             @retry="retrySite(activeState.siteId)"
