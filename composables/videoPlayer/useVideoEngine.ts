@@ -10,6 +10,9 @@ import type { VideoConnStrategy } from './useVideoConnStrategy'
 import type { VideoServerTier } from './useVideoServerTier'
 import { createPlaylistLoaderFactory } from './engine/playlistLoader'
 import { useRecomposite } from './engine/recomposite'
+import { buildHlsConfig } from './engine/hlsConfig'
+import { useLoadTimeout } from './engine/loadTimeout'
+import { useHlsErrorHandler, failMessageOf } from './engine/hlsErrors'
 
 export interface VideoEngineDeps {
   media: VideoMediaState
@@ -25,22 +28,6 @@ export interface VideoEngineDeps {
   refetchUrl: (silent?: boolean) => Promise<boolean>
 }
 
-// 加载超时：走服务端代理时需要更长，统一 15s
-//（代理要先请求远端再返回，3s 往往不够，会误触 destroyHls 取消所有请求）
-const LOAD_TIMEOUT = 15000
-// 到这个点还没收到任何数据，先怀疑「地址本身死了」而不是通道选错了：
-// 预热/交接槽里的签名地址会过期，过期后换哪条通道都是 403。比 LOAD_TIMEOUT 早，
-// 这样重新取址那一次还能落在用户耐心之内（重取成功会把两个计时器一起重置）。
-const STALE_URL_TIMEOUT = 10000
-const MAX_HLS_RETRY = 3
-/**
- * `recoverMediaError()` 的次数上限。**必须有上限**：它重建 MediaSource 再从当前位置续拉，
- * 前提是「数据本身没问题、只是解码器状态坏了」。可如果取回来的字节压根不是视频
- *（实测被 Cloudflare 下线的源，每个分片都是同一张 20KB 诱饵图，见 server/api/proxy.ts 的
- * DEAD_SOURCE_LANDINGS），那就是「恢复 → 立刻再失败 → 再恢复」的死循环，
- * 屏幕上是**一直在闪**、永远出不来画面，而错误提示每次 2s 后自己清掉，用户连原因都看不到（踩过）。
- */
-const MAX_MEDIA_ERROR_RECOVER = 3
 
 // 动态导入 hls.js（避免 SSR 问题），模块级缓存一次
 let Hls: typeof HlsType | null = null
@@ -54,12 +41,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   } = media
 
   let hls: HlsType | null = null
-  const hlsRetryCount = ref(0)
-  let mediaErrorRecovered = 0   // 本次加载已恢复几次媒体错误（见 MAX_MEDIA_ERROR_RECOVER）
 
-  let loadTimeoutTimer: ReturnType<typeof setTimeout> | null = null
-  let staleUrlTimer: ReturnType<typeof setTimeout> | null = null
-  let hasReceivedData = false
 
   /**
    * 起播锚点：刷新/恢复进度起播时，播放头还停在 0、但要起播的位置在 pendingStartPos。
@@ -149,51 +131,21 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   const aggregateKBps = computed(() => Math.round(strategy.value.perConnKBps * strategy.value.targetConn))
   const aggregateMbps = computed(() => Math.round((aggregateKBps.value * 8 / 1024) * 10) / 10)
 
-  /**
-   * 报错文案：探测已经实测证伪时，一律用它的结论顶掉笼统的兜底话术。
-   *
-   * 「加载超时」「链接无效或已过期」这些兜底只是猜，而 `diagnoseProbe` 手上有实测证据
-   *（典型：源站已被 Cloudflare 下线，换哪条通道都一样）。更要紧的是**它得留在页面上**——
-   * toast 会自己消失，用户回过神来想看原因时只剩一句猜的（踩过：「提醒一下就没了」）。
-   */
-  const failMessage = (fallback: string): string => {
-    const v = conn.probeVerdict.value
-    return v.severity === 'fatal' ? `${v.title}——${v.detail}` : fallback
-  }
+  const failMessage = (fallback: string) => failMessageOf(conn.probeVerdict.value, fallback)
 
-  // ── 加载超时 ──
-  const clearLoadTimeout = () => {
-    if (loadTimeoutTimer) { clearTimeout(loadTimeoutTimer); loadTimeoutTimer = null }
-    if (staleUrlTimer) { clearTimeout(staleUrlTimer); staleUrlTimer = null }
-  }
-  const startLoadTimeout = () => {
-    clearLoadTimeout()
-    hasReceivedData = false
-    // 第一档：10s 一个字节都没来，可能是地址过期 → **静默**后台重新取址（每集一次额度，
-    // 不是按需取址的列表直接返回 false）；取到不一样的地址才重载，那时 loadVideo 会把这两个
-    // 计时器重新起一遍。
-    //
-    // 静默是硬要求：这一档**必然会误伤**——慢源的 manifest 本身就要十几秒，它没死。
-    // 早先在这里写了句「正在重新获取播放地址」并拉起 isResolvingUrl，于是正常的慢加载
-    // 也会盖上转圈遮罩，表现成「视频刚开始点下一集，一直显示获取中」（踩过）。
-    staleUrlTimer = setTimeout(() => {
-      if (hasReceivedData || !isLoading.value) return
-      void deps.refetchUrl(true)
-    }, STALE_URL_TIMEOUT)
-    loadTimeoutTimer = setTimeout(() => {
-      if (!hasReceivedData && isLoading.value) {
-        errorMessage.value = failMessage('加载超时，视频链接可能已过期或无法访问（403/404）')
-        isLoading.value = false
-        isBuffering.value = false
-        isVideoLoaded.value = false
-        destroyHls()
-      }
-    }, LOAD_TIMEOUT)
-  }
-  const markDataReceived = () => {
-    hasReceivedData = true
-    clearLoadTimeout()
-  }
+  // ── 加载超时（实现见 ./engine/loadTimeout.ts）──
+  // 10s 没数据 → 静默重新取址（地址过期比通道判断错常见得多）；15s 还没有 → 报错收场
+  const { clearLoadTimeout, startLoadTimeout, markDataReceived } = useLoadTimeout({
+    isLoading: () => isLoading.value,
+    refetchUrl: () => { void deps.refetchUrl(true) },
+    onTimeout: () => {
+      errorMessage.value = failMessage('加载超时，视频链接可能已过期或无法访问（403/404）')
+      isLoading.value = false
+      isBuffering.value = false
+      isVideoLoaded.value = false
+      destroyHls()
+    },
+  })
 
   // ── 实时心跳的外挂钩子 ──
   // 自愈调参环（useVideoAutoTune.selfHeal）、下一集预热（useVideoPrewarm.tick）都挂在这儿，
@@ -287,8 +239,6 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     currentTime.value = 0
     duration.value = 0
     bufferedPercent.value = 0
-    hlsRetryCount.value = 0
-    mediaErrorRecovered = 0
     appliedStartPos = 0   // 非 HLS 那条路不设 startPosition，别留上一次的值
     /**
      * 「定位类起播」= 页面上已经有播放器了（切集 / 重载 / 改配置），起播门槛走「够播 2 秒」那一档。
@@ -349,26 +299,6 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     }
   }
 
-  /**
-   * 网络错误重试用尽后的恢复顺序：**重新取址 → 重探连接方式 → 才报错**。
-   *
-   * 顺序不能反。按需取址的站点给的是带时效签名的地址，过期之后无论走哪条通道都是 403，
-   * 而重探一轮好几秒、探不出结论还会连着走完线性阶梯 5 级，全程是白等——
-   * 用户看到的是「自动跳到下一集然后卡死在转圈上」。地址过期比通道判断错常见得多。
-   */
-  const recoverFromNetworkFailure = async (details: string) => {
-    errorMessage.value = '链接可能已过期，正在重新获取播放地址...'
-    if (await deps.refetchUrl()) return
-    if (conn.escalateStrategyAndReload()) return
-    errorMessage.value = failMessage(details === 'manifestLoadError'
-      ? '视频链接无效或已过期，请检查链接是否正确'
-      : `网络错误: ${details}，链接可能已过期`)
-    isLoading.value = false
-    isBuffering.value = false
-    isVideoLoaded.value = false
-    destroyHls()
-  }
-
   const loadHlsVideo = async (url: string, reuseEl = false) => {
     if (!Hls) Hls = (await import('hls.js')).default
     const HlsLib = Hls   // 取成局部常量，闭包里就不用到处写 Hls!
@@ -417,38 +347,13 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     appliedStartPos = startPos
     startAnchorActive = startPos > 0
 
-    hls = new HlsLib({
-      // MSE 缓冲要「小而健康」——append 太多（几百 MB）会触发浏览器 MSE 配额/驱逐，
-      // 产生缓冲空洞导致明明缓冲很多却卡在原地。真正的大量预读放在 JS 预取缓存里
-      //（容量 = maxBufferSizeMB），hls.js 只在 MSE 里留 ~30s，随播随取。
-      // Math.min 兼容并迁移旧的超大配置。
-      maxBufferLength: Math.min(30, hlsConfig.value.maxBufferLength),
-      maxMaxBufferLength: Math.min(60, hlsConfig.value.maxMaxBufferLength),
-      backBufferLength: Math.min(30, hlsConfig.value.backBufferLength),
-      maxBufferSize: 60 * 1000 * 1000,   // MSE 最多 ~60MB，其余交给 JS 预取缓存
-      // 缓冲空洞 / 卡顿自动跳跃恢复
-      maxBufferHole: 0.5,
-      highBufferWatchdogPeriod: 1,
-      nudgeOffset: 0.2,
-      nudgeMaxRetry: 8,
-      fragLoadingTimeOut: hlsConfig.value.fragLoadingTimeOut,
-      fragLoadingMaxRetry: hlsConfig.value.fragLoadingMaxRetry,
-      manifestLoadingTimeOut: 20000,
-      manifestLoadingMaxRetry: 3,
-      levelLoadingTimeOut: 20000,
-      levelLoadingMaxRetry: 3,
-      enableWorker: hlsConfig.value.enableWorker,
-      lowLatencyMode: hlsConfig.value.lowLatencyMode,
-      startLevel: -1,
-      startPosition: startPos > 0 ? startPos : -1,
-      // 自定义分片加载器：接管分片请求，命中预取缓存直接返回
+    hls = new HlsLib(buildHlsConfig({
+      tuning: hlsConfig.value,
+      startPos,
       fLoader: createHlsFragLoader() as any,
-      // 自定义清单加载器：命中「探测刚下载过的同一份 m3u8」就同步返回，省一次 RTT。
-      // 必须包在 hls.js 默认 loader 之上（miss 时要走它原来的那套重试/超时）
+      // 清单加载器必须包在 hls.js 默认 loader 之上（miss 时要走它原来的那套重试/超时）
       pLoader: createHlsPlaylistLoader((HlsLib as any).DefaultConfig.loader) as any,
-      // Origin/Referer 由 /api/proxy 服务端注入，XHR 层只需关闭 credentials
-      xhrSetup: (xhr: XMLHttpRequest) => { xhr.withCredentials = false },
-    })
+    }))
 
     /**
      * 字幕默认不出。hls.js 的 `subtitleDisplay` 默认为真，清单里带字幕轨时它会自动选一条并渲染，
@@ -486,48 +391,24 @@ export function useVideoEngine(deps: VideoEngineDeps) {
       startHlsTick()
     })
 
-    hls.on(HlsLib.Events.ERROR, (_, data) => {
-      console.warn('HLS 错误:', data.type, data.details, 'fatal:', data.fatal)
-      if (!data.fatal) return
-      switch (data.type) {
-        case HlsLib.ErrorTypes.NETWORK_ERROR:
-          hlsRetryCount.value++
-          if (hlsRetryCount.value <= MAX_HLS_RETRY) {
-            errorMessage.value = `网络错误，正在重试 (${hlsRetryCount.value}/${MAX_HLS_RETRY})...`
-            setTimeout(() => { hls?.startLoad() }, 1000)
-          } else {
-            void recoverFromNetworkFailure(data.details)
-          }
-          break
-        case HlsLib.ErrorTypes.MEDIA_ERROR:
-          mediaErrorRecovered++
-          if (mediaErrorRecovered > MAX_MEDIA_ERROR_RECOVER) {
-            // 恢复了几次还在同一个地方倒下 → 不是解码器状态坏了，是数据不对。
-            // 继续恢复只会无限闪屏，停下来把原因说清楚才是有用的
-            errorMessage.value = failMessage('媒体解码持续失败：取回的数据不是可播的视频（源站可能已下线或返回了占位内容），换一条线路试试')
-            isLoading.value = false
-            isBuffering.value = false
-            isVideoLoaded.value = false
-            destroyHls()
-            break
-          }
-          {
-            const msg = `媒体错误，正在恢复 (${mediaErrorRecovered}/${MAX_MEDIA_ERROR_RECOVER})...`
-            errorMessage.value = msg
-            hls?.recoverMediaError()
-            // **只在这条提示还没被别人改过时才清掉**。不加这道判断，恢复失败得快的时候
-            // 上一次的定时器会把刚写上去的「放弃原因」一起擦掉——表现正是「报了一下就没了」
-            setTimeout(() => { if (errorMessage.value === msg) errorMessage.value = '' }, 2000)
-          }
-          break
-        default:
-          errorMessage.value = '播放失败: ' + data.details
-          isLoading.value = false
-          isBuffering.value = false
-          isVideoLoaded.value = false
-          destroyHls()
-      }
+    // 致命错误处理（实现见 ./engine/hlsErrors.ts）：网络重试 → 重新取址 → 重探；媒体错误恢复带上限
+    const { onHlsError, resetErrorCounters } = useHlsErrorHandler({
+      HlsLib,
+      getHls: () => hls,
+      setError: (msg: string) => { errorMessage.value = msg; return msg },
+      clearIfUnchanged: (msg: string) => { if (errorMessage.value === msg) errorMessage.value = '' },
+      failMessage,
+      giveUp: () => {
+        isLoading.value = false
+        isBuffering.value = false
+        isVideoLoaded.value = false
+        destroyHls()
+      },
+      refetchUrl: () => deps.refetchUrl(),
+      escalateStrategy: () => conn.escalateStrategyAndReload(),
     })
+    resetErrorCounters()
+    hls.on(HlsLib.Events.ERROR, (_, data) => onHlsError(data))
 
     // 分片加载完成 → 更新统计 + 触发自适应预取
     hls.on(HlsLib.Events.FRAG_BUFFERED, (_, data) => {

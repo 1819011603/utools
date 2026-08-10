@@ -44,10 +44,10 @@ export function buildHlsConfig(input: HlsConfigInput): Record<string, any> {
     startLevel: -1,
     startPosition: startPos > 0 ? startPos : -1,
     // 自定义分片加载器：接管分片请求，命中预取缓存直接返回
-    fLoader: createHlsFragLoader() as any,
+    fLoader: input.fLoader,
     // 自定义清单加载器：命中「探测刚下载过的同一份 m3u8」就同步返回，省一次 RTT。
     // 必须包在 hls.js 默认 loader 之上（miss 时要走它原来的那套重试/超时）
-    pLoader: createHlsPlaylistLoader((HlsLib as any).DefaultConfig.loader) as any,
+    pLoader: input.pLoader,
     // Origin/Referer 由 /api/proxy 服务端注入，XHR 层只需关闭 credentials
     xhrSetup: (xhr: XMLHttpRequest) => { xhr.withCredentials = false },
   }

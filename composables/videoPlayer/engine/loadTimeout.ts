@@ -1,0 +1,60 @@
+/**
+ * 加载超时的两档闹钟。
+ *
+ * 第一档 10s：一个字节都没来 → **静默**后台重新取址（签名地址过期时换哪条通道都是 403）。
+ * 第二档 15s：还是没来 → 认定加载超时，报错并销毁。
+ *
+ * 从 useVideoEngine 拆出来（那边超了 500 行）。内部实现模块，走显式相对 import。
+ */
+
+// 加载超时：走服务端代理时需要更长，统一 15s
+//（代理要先请求远端再返回，3s 往往不够，会误触 destroyHls 取消所有请求）
+const LOAD_TIMEOUT = 15000
+// 到这个点还没收到任何数据，先怀疑「地址本身死了」而不是通道选错了：
+// 预热/交接槽里的签名地址会过期，过期后换哪条通道都是 403。比 LOAD_TIMEOUT 早，
+// 这样重新取址那一次还能落在用户耐心之内（重取成功会把两个计时器一起重置）。
+const STALE_URL_TIMEOUT = 10000
+
+export interface LoadTimeoutDeps {
+  /** 还在加载中吗（不在就别打扰） */
+  isLoading: () => boolean
+  /** 第一档：静默重新取址 */
+  refetchUrl: () => void
+  /** 第二档：报错收场 */
+  onTimeout: () => void
+}
+
+export function useLoadTimeout(deps: LoadTimeoutDeps) {
+  let loadTimeoutTimer: ReturnType<typeof setTimeout> | null = null
+  let staleUrlTimer: ReturnType<typeof setTimeout> | null = null
+  let hasReceivedData = false
+
+  const clearLoadTimeout = () => {
+    if (loadTimeoutTimer) { clearTimeout(loadTimeoutTimer); loadTimeoutTimer = null }
+    if (staleUrlTimer) { clearTimeout(staleUrlTimer); staleUrlTimer = null }
+  }
+  const startLoadTimeout = () => {
+    clearLoadTimeout()
+    hasReceivedData = false
+    // 第一档：10s 一个字节都没来，可能是地址过期 → **静默**后台重新取址（每集一次额度，
+    // 不是按需取址的列表直接返回 false）；取到不一样的地址才重载，那时 loadVideo 会把这两个
+    // 计时器重新起一遍。
+    //
+    // 静默是硬要求：这一档**必然会误伤**——慢源的 manifest 本身就要十几秒，它没死。
+    // 早先在这里写了句「正在重新获取播放地址」并拉起 isResolvingUrl，于是正常的慢加载
+    // 也会盖上转圈遮罩，表现成「视频刚开始点下一集，一直显示获取中」（踩过）。
+    staleUrlTimer = setTimeout(() => {
+      if (hasReceivedData || !deps.isLoading()) return
+      deps.refetchUrl()
+    }, STALE_URL_TIMEOUT)
+    loadTimeoutTimer = setTimeout(() => {
+      if (!hasReceivedData && deps.isLoading()) deps.onTimeout()
+    }, LOAD_TIMEOUT)
+  }
+  const markDataReceived = () => {
+    hasReceivedData = true
+    clearLoadTimeout()
+  }
+
+  return { clearLoadTimeout, startLoadTimeout, markDataReceived }
+}
