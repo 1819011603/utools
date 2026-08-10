@@ -81,6 +81,15 @@ export interface SearchRule {
    */
   manual?: { reason: string; searchUrl: string }
 
+  /**
+   * 「去源站搜」按钮的落点模板（`%KW%`）。**只在 `url` 不是给人看的页面时才需要写**。
+   *
+   * 多数站点的 `url` 本身就是搜索页，按钮直接用它即可；但 kpkuang 的 `url` 指向
+   * 另一个域名上的 JSONP 接口，点过去是一坨 JSON 而不是搜索结果页。
+   * 早先这种情况退回站点首页，等于把用户辛苦打的关键词丢了——他得在源站再输一遍。
+   */
+  humanSearchUrl?: string
+
   /** 抓搜索页也要过的反爬握手，与解析共用同一套（ncat = cdndefend 工作量证明） */
   challenge?: ChallengeKind
 
@@ -138,7 +147,7 @@ export interface SearchRule {
 export const SEARCH_RULES: SearchRule[] = [
   {
     siteId: 'nbmovie',
-    name: '4k影视 (4kvm)',
+    name: '4k影视',
     homepage: 'https://4kvm.org',
     url: '/search?q=%KW%',
     // 卡片直接给 /play/<slug>，没有详情页这一层
@@ -154,7 +163,7 @@ export const SEARCH_RULES: SearchRule[] = [
   },
   {
     siteId: 'ylsp',
-    name: '永乐视频 (ylsp)',
+    name: '永乐视频',
     homepage: 'https://www.ylsp.lv',
     // 关键词直接嵌在路径里，后面那串短横是 MacCMS 的空筛选位
     url: '/vodsearch/%KW%-------------/',
@@ -170,7 +179,7 @@ export const SEARCH_RULES: SearchRule[] = [
   },
   {
     siteId: 'netflixgc',
-    name: '奈飞工厂 (netflixgc)',
+    name: '奈飞工厂',
     homepage: 'https://netflixgc.net',
     url: '/vodsearch/-------------.html?wd=%KW%',
     // 尾锚是卡片右下角那颗「播放」按钮（class="button"）
@@ -183,7 +192,7 @@ export const SEARCH_RULES: SearchRule[] = [
   },
   {
     siteId: 'ncat',
-    name: '网飞猫 (ncat)',
+    name: '网飞猫',
     homepage: 'https://www.ncat22.com',
     url: '/search?t=%TOKEN%&k=%KW%',
     challenge: 'cdndefend',
@@ -209,7 +218,7 @@ export const SEARCH_RULES: SearchRule[] = [
   },
   {
     siteId: 'kpkuang',
-    name: '看片狂人 (kpkuang)',
+    name: '看片狂人',
     homepage: 'https://www.kpkuang.org',
     /*
      * 不走它的 /vodsearch/ 页面 —— 那条路径挂着 Cloudflare 人机校验（实测 .org/.com 全是
@@ -220,6 +229,9 @@ export const SEARCH_RULES: SearchRule[] = [
      * 拿到的是 vod id，拼成 /voddetail/<id>/ 交给解析侧的「详情页 → 第 1 集」那一跳。
      */
     url: 'https://kpdata.flixfiend.top/esearch/index?kw=%KW%&ts=%TS%&callback=%CB%&_=%TS%',
+    // 「去源站搜」要落在给人看的那张页上。它挂着 CF 校验（所以我们服务端不走它），
+    // 但用户自己的浏览器过得去——这正是这颗按钮存在的意义
+    humanSearchUrl: '/vodsearch/-------------.html?wd=%KW%',
     // 不带 Referer 这个接口恒回空结果（它靠这个认「请求来自站点页面」）
     referer: 'https://www.kpkuang.org/',
     json: {
@@ -248,6 +260,31 @@ export function findSearchRule(siteId: string): SearchRule | null {
  * 把模板里的占位符填上。关键词一律 percent 编码（路径与 query 两种位置都安全）。
  * `%TS%`/`%CB%` 每次现生成：有的接口校验时间戳新鲜度，复用旧值会被判为重放而回空。
  */
+/**
+ * 「去源站搜」「在源站看全部」这两颗按钮的落点，**每次搜索都要重算**。
+ *
+ * 早先这个地址只在服务端返回里带回来，于是有两种情况会给出错的链接：
+ * ① 新一轮搜索还在跑（或直接失败）时，界面上留着**上一个关键词**的地址——
+ *   用户搜了「我是谁」，点过去却是上次那个词的结果页，看着像我们把搜索词记串了；
+ * ② `url` 是接口而不是页面的站点（kpkuang 的 JSONP），点过去是一坨 JSON。
+ *
+ * 拿不到「带关键词的页面地址」时返回 null，让调用方退回服务端给的值或站点首页——
+ * 典型是 ncat：它的搜索页要带一个现抠的 `t`，只有服务端手上有。
+ */
+export function buildSiteSearchUrl(rule: SearchRule, kw: string): string | null {
+  if (rule.manual) return buildSearchUrl(rule.manual.searchUrl, kw)
+
+  const tpl = rule.humanSearchUrl ?? rule.url
+  // %TOKEN% 得靠服务端现抠，前端拼不出来（拼了也是个少参数的死链）
+  if (!tpl || tpl.includes('%TOKEN%')) return null
+
+  const base = rule.homepage.replace(/\/+$/, '')
+  const abs = /^https?:/i.test(tpl) ? tpl : base + tpl
+  // 跨到别的域名 = 那是接口不是页面，当不得「去源站搜」的落点
+  if (!abs.startsWith(base + '/') && abs !== base) return null
+  return buildSearchUrl(abs, kw)
+}
+
 export function buildSearchUrl(template: string, kw: string, token = ''): string {
   return template
     .replace(/%KW%/g, encodeURIComponent(kw))

@@ -10,7 +10,7 @@
  * 一次会话只算一遍（一遍约 6.5 万次 SHA1）。
  */
 import type { SearchItem, SiteSearchResult } from './videoSearchRules'
-import { SEARCH_RULES } from './videoSearchRules'
+import { SEARCH_RULES, buildSiteSearchUrl } from './videoSearchRules'
 
 export type SiteSearchStatus =
   | 'idle'       // 还没搜
@@ -71,11 +71,15 @@ export function useVideoSearch() {
 
   const stateOf = (siteId: string) => states.value.find(s => s.siteId === siteId)!
 
-  /** manual 站点的源站搜索地址要跟着关键词走 */
-  const applyManualUrls = (kw: string) => {
+  /**
+   * 「去源站搜」的地址跟着关键词走。**每一轮搜索开始时先按新词整体重写一遍**，
+   * 不能只在结果回来时更新：搜索中和搜索失败这两种状态下压根没有新结果，
+   * 留着上一轮的地址就是「输入框写着这个词、按钮却指向上一个词」（踩过）。
+   * 拼不出来的（ncat 要服务端现抠的 t）先退回首页，等结果回来再换成服务端给的。
+   */
+  const applySiteSearchUrls = (kw: string) => {
     for (const rule of SEARCH_RULES) {
-      if (!rule.manual) continue
-      stateOf(rule.siteId).siteSearchUrl = rule.manual.searchUrl.replace(/%KW%/g, encodeURIComponent(kw))
+      stateOf(rule.siteId).siteSearchUrl = buildSiteSearchUrl(rule, kw) ?? rule.homepage
     }
   }
 
@@ -88,11 +92,12 @@ export function useVideoSearch() {
     const cacheKey = `${siteId}|${kw}`
     if (useCache) {
       const hit = memCache.get(cacheKey)
-      if (hit) { applyResult(st, hit); return }
+      if (hit) { applyResult(st, hit, kw); return }
     }
 
     st.status = 'searching'
     st.items = []
+    st.siteSearchUrl = buildSiteSearchUrl(rule, kw) ?? rule.homepage
     st.error = undefined
     st.powTried = undefined
 
@@ -109,7 +114,7 @@ export function useVideoSearch() {
         res = await call(pow.cookie)
       }
       memCache.set(cacheKey, res as SiteSearchResult)
-      applyResult(st, res as SiteSearchResult)
+      applyResult(st, res as SiteSearchResult, kw)
     } catch (e: any) {
       // 409 = 服务端说令牌没过：丢掉重来一轮（只重来一次，避免死循环）
       if ((e?.statusCode || e?.response?.status) === 409 && powTokens.has(host)) {
@@ -122,10 +127,13 @@ export function useVideoSearch() {
     }
   }
 
-  const applyResult = (st: SiteSearchState, res: SiteSearchResult) => {
+  const applyResult = (st: SiteSearchState, res: SiteSearchResult, kw: string) => {
+    const rule = SEARCH_RULES.find(r => r.siteId === st.siteId)
     st.items = res.items ?? []
     st.total = res.total
-    st.siteSearchUrl = res.siteSearchUrl ?? st.siteSearchUrl
+    // 前端拼得出「带关键词的页面地址」就用前端的：服务端返回的那个是它自己抓的地址，
+    // 对 kpkuang 这类站点是接口 URL（点过去一坨 JSON），只有 ncat 那种要令牌的才非它不可
+    st.siteSearchUrl = (rule && buildSiteSearchUrl(rule, kw)) ?? res.siteSearchUrl ?? st.siteSearchUrl
     st.status = res.blocked ? 'blocked' : 'done'
     st.powTried = undefined
     if (res.blocked === 'cloudflare') {
@@ -138,7 +146,7 @@ export function useVideoSearch() {
     const q = kw.trim()
     if (!q) return
     keyword.value = q
-    applyManualUrls(q)
+    applySiteSearchUrls(q)
     for (const rule of SEARCH_RULES) {
       if (rule.manual) continue
       void searchSite(rule.siteId, q)
@@ -181,7 +189,7 @@ export function useVideoSearch() {
           ? { ...s, ...old, powTried: undefined }
           : s
       })
-      applyManualUrls(c.kw)
+      applySiteSearchUrls(c.kw)
       // 内存缓存也灌一份，这样「切 tab / 重新点搜索」同样不发请求
       for (const s of states.value) {
         if (s.status === 'done') memCache.set(`${s.siteId}|${c.kw}`, { siteId: s.siteId, items: s.items, total: s.total, siteSearchUrl: s.siteSearchUrl })
@@ -190,5 +198,16 @@ export function useVideoSearch() {
     } catch { return false }
   }
 
-  return { keyword, states, searching, totalFound, search, retrySite, saveCache, restoreCache }
+  /**
+   * 回到「还没搜过」。给「点导航重新进本页」用——那种情况下组件不会重新挂载
+   * （同一条路由），不显式清就会带着上一次的关键词和整屏结果。
+   * 只清本次会话的展示状态，不动 memCache/localStorage：那两份是「搜过什么」的记录，
+   * 用户下次搜同一个词还要靠它们免掉一轮请求。
+   */
+  const reset = () => {
+    keyword.value = ''
+    states.value = initialStates()
+  }
+
+  return { keyword, states, searching, totalFound, search, retrySite, saveCache, restoreCache, reset }
 }

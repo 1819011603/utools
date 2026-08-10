@@ -2,7 +2,10 @@ export default defineNuxtConfig({
   devtools: { enabled: false },
   
   modules: ['@nuxt/ui'],
-  
+
+  // 纯 keyframes，不含 @tailwind 指令，跟 @nuxt/ui 自己注入的那份互不干扰
+  css: ['~/assets/css/motion.css'],
+
   ssr: false,
   
   nitro: {

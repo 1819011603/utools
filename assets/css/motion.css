@@ -1,0 +1,56 @@
+/*
+ * 几个跨组件复用的动效原语。放全局而不是各组件 <style> 里：
+ * 同一段 keyframes 抄两遍必然漂移（改了 fade-up 的位移量却只改一处），
+ * 而 Tailwind 自带的 animate-* 只有 spin/ping/pulse/bounce，没有这里要的入场和微光。
+ *
+ * 一律带 prefers-reduced-motion 兜底：动效是氛围，不是信息，
+ * 用户关掉系统动效时不该被强行推一脸位移。
+ */
+
+@keyframes wf-fade-up {
+  from { opacity: 0; transform: translateY(10px) }
+  to   { opacity: 1; transform: none }
+}
+
+@keyframes wf-fade-in {
+  from { opacity: 0 }
+  to   { opacity: 1 }
+}
+
+/* 骨架屏的一道扫光。用 translate 而非 background-position：前者只在合成层动，不触发重绘 */
+@keyframes wf-shimmer {
+  100% { transform: translateX(100%) }
+}
+
+/* 背景光斑的极慢呼吸。幅度刻意压得很小——看得出「在动」就够了，看得清就俗了 */
+@keyframes wf-drift {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1) }
+  50%      { transform: translate3d(0, -14px, 0) scale(1.06) }
+}
+
+.wf-fade-up { animation: wf-fade-up .45s cubic-bezier(.22, 1, .36, 1) both }
+.wf-fade-in { animation: wf-fade-in .3s ease-out both }
+.wf-drift   { animation: wf-drift 14s ease-in-out infinite }
+
+/* 扫光块自己不占位，靠父级 overflow-hidden 裁边 */
+.wf-shimmer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background-image: linear-gradient(90deg, transparent, rgb(255 255 255 / .55), transparent);
+  animation: wf-shimmer 1.6s infinite;
+}
+.dark .wf-shimmer::after {
+  background-image: linear-gradient(90deg, transparent, rgb(255 255 255 / .07), transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wf-fade-up,
+  .wf-fade-in,
+  .wf-drift,
+  .wf-shimmer::after {
+    animation: none !important;
+  }
+  .wf-fade-up { opacity: 1; transform: none }
+}
