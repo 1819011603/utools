@@ -27,8 +27,8 @@ export interface VideoConnStrategyDeps {
 const VERDICT_TOAST_ID = 'vp-probe-verdict'
 
 /** 线性阶梯每一级的展示文案（下标即 step） */
-const STRATEGY_STEP_LABELS = ['直连', '代理清单·分片直连', '代理·伪装', '代理·防盗链', '代理·防盗链·主域']
-const MAX_STRATEGY_STEP = 4
+const STRATEGY_STEP_LABELS = ['直连', '代理清单·分片直连', '代理·伪装', '代理·防盗链']
+const MAX_STRATEGY_STEP = 3
 
 export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   const { media, tier } = deps
@@ -169,17 +169,14 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     } else if (step === 2) {             // 代理+伪装全程：服务端补 CORS、不发 Origin/Referer
       disguiseAsDownloader.value = true
       requestOrigin.value = ''; requestReferer.value = ''; manifestOnly.value = false
-    } else if (step === 3) {             // 代理+注入 Origin/Referer：防盗链站点，全程代理。
-      // 用户填了候选值就用他的——阶梯是探测没结论时才走的盲试，这时用户那点线索比从地址硬推更值钱
+    } else {                             // 代理+注入 Origin/Referer：防盗链站点，全程代理。
+      // 用户填了候选值就用他的——阶梯是探测没结论时才走的盲试，这时用户那点线索比从地址硬推更值钱。
+      // 曾经在这后面还有一级「注入主域」（parentOrigin），已随 rootRef 通道一起删
       const o = originHint.value.trim() || host
       disguiseAsDownloader.value = false
       requestOrigin.value = o
       requestReferer.value = refererHint.value.trim() || (o ? o + '/' : '')
       manifestOnly.value = false
-    } else {                             // 同上，但注入主域：防盗链只认主域的站点（见 parentOrigin）
-      const root = parentOrigin(videoUrl.value) || host
-      disguiseAsDownloader.value = false
-      requestOrigin.value = root; requestReferer.value = root ? root + '/' : ''; manifestOnly.value = false
     }
   }
 
@@ -204,7 +201,7 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   const hintPair = () => ({ origin: originHint.value.trim(), referer: refererHint.value.trim() })
 
   /**
-   * 探测已经实测证伪时**立刻**说出来（典型：清单能取到，分片四条通道全 403）。
+   * 探测已经实测证伪时**立刻**说出来（典型：清单能取到，分片三条通道全 403）。
    *
    * 不早说的代价是用户干等一分多钟：探测结束后还要跑「重新取址 → 重探」，失败还要爬阶梯，
    * 每级一次 15s 加载超时，画面全程转圈，最后只给一句「加载超时」——而结论在探测收尾那一刻
@@ -386,12 +383,12 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
       runProbe(url, true).then(() => deps.reload())
       return true
     }
-    // 探测已经把四条通道全部实测证伪 → 不爬阶梯。阶梯那 5 级本就是同样这四种通道的排列组合，
+    // 探测已经把三条通道全部实测证伪 → 不爬阶梯。阶梯那 5 级本就是同样这四种通道的排列组合，
     // 每级还各要等一次 15s 加载超时；爬完只是把「注定播不了」拖成一分多钟的转圈 + 反复重载
     //（每次 `videoKey++` 重建 `<video>`，看着就是页面一直在闪）。结论早就有了，直接交回上层报错。
     // 注意这一步在「重新取址」和「重探一次」之后：地址过期比通道判断错常见得多，那两条路要先走完
     if (diagnoseProbe(probeResult.value).severity === 'fatal') {
-      console.warn('探测已实测证伪（四条通道全不可达），不再爬线性阶梯')
+      console.warn('探测已实测证伪（三条通道全不可达），不再爬线性阶梯')
       return false
     }
     if (autoStrategyStep.value >= MAX_STRATEGY_STEP) return false

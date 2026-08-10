@@ -21,6 +21,9 @@ export function useVideoServerTier(deps: VideoServerTierDeps) {
   const tierOverrides = ref<Partial<TierParams>>({})    // 页面可调的档位参数覆盖（空=用预设）
   const guardRateCeiling = ref(Infinity)                // 抗卡降速守卫上限：PANIC 置 1，恢复置 Infinity
   const currentHost = ref('')                           // 当前视频 host（学习档案按 host 存取）
+  // 按 host 学到的目标并发（0=没学过）。切集/换流会清空实测样本，那一刻它是唯一的并发先验：
+  // 预取阶梯拿它当地板，慢站第二次进来不用先卡一片才放开（见 useHlsPrefetch 的 catchUpFloor）
+  const learnedConcurrency = ref(0)
 
   // 生效档位名 = 实测/学习档。规则锁定那条路已随站点规则一起删除，档位现在恒为自动
   const effectiveTierName = computed<ServerTier>(() => autoTier.value)
@@ -53,12 +56,13 @@ export function useVideoServerTier(deps: VideoServerTierDeps) {
     currentHost.value = host
     const learned = loadLearnedProfile(host)
     autoTier.value = learned?.learnedTier ?? DEFAULT_TIER
+    learnedConcurrency.value = learned?.bestConcurrency ?? 0
     guardRateCeiling.value = Infinity
     return learned
   }
 
   return {
-    autoTier, tierOverrides, guardRateCeiling, currentHost,
+    autoTier, tierOverrides, guardRateCeiling, currentHost, learnedConcurrency,
     effectiveTierName, tierIsAuto, tierDefaults, effectiveTierParams,
     tierLabel, tierBadgeColor, hasTierOverride, clearTierOverrides,
     beginHost,

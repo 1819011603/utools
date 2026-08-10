@@ -33,13 +33,29 @@ const hostOfUrl = (u: string): string => {
   try { return new URL(u).hostname.toLowerCase() } catch { return '' }
 }
 
-// 动态获取 undici Dispatcher（仅在 Node 可用）。
-// 用变量包裹 specifier + @vite-ignore 防止 Vite/Nitro 在 CF 构建时静态解析。
-let _dispatcher: any = undefined
-let _dispatcherChecked = false
-async function getNodeDispatcher(): Promise<any> {
-  if (_dispatcherChecked) return _dispatcher
-  _dispatcherChecked = true
+/**
+ * 动态获取 undici Dispatcher（仅在 Node 可用）。
+ * 用变量包裹 specifier + @vite-ignore 防止 Vite/Nitro 在 CF 构建时静态解析。
+ *
+ * **本接口有两类流量，出口选择恰好相反，所以备两个 dispatcher**（`?site=1` 区分）：
+ *
+ *  · **媒体流**（清单/分片/key，默认）：本地开发时**不一定该走代理**——出口 IP 一变很多 CDN 直接 403
+ *    （实测 vip.ffzy-play10.com：本机直连 200、经本地代理 403，且与 Referer 完全无关）。
+ *    这种 403 极难归因：页面上是「分片红一片」，很容易误判成防盗链或连接策略写错了。
+ *    故留 `MEDIA_NO_PROXY=1` 让媒体流直连（也可用 `MEDIA_HTTPS_PROXY` 单独指定媒体出口）。
+ *  · **站点资源**（`?site=1`：解析链路要取的站点自己的 js/wasm、签名取址接口）：**必须能走代理**，
+ *    因为目标站点在本机往往被 DNS 污染／压根连不通（同 siteFetch.ts 的理由）。
+ *
+ * 这两件事曾经共用一个 dispatcher，于是 `MEDIA_NO_PROXY=1` 把解析链路一起按成直连，
+ * 表现是**解析页能出选集、一取址就全 502**（`UND_ERR_CONNECT_TIMEOUT`）。
+ * 实测 4kvm：`/static/wasm/*.js` 直连超时、经本机代理 1.2s 200。踩过，别再合并。
+ *
+ * CF Pages 上这些环境变量都不存在，两个 dispatcher 都是直连，行为一致。
+ */
+const _dispatchers = new Map<string, any>()   // 'media' | 'site' → dispatcher（undefined 也要存，表示已查过）
+async function getNodeDispatcher(kind: 'media' | 'site'): Promise<any> {
+  if (_dispatchers.has(kind)) return _dispatchers.get(kind)
+  _dispatchers.set(kind, undefined)
   // CF Workers 没有 process；只在 Node 进程里尝试加载 undici
   // @ts-ignore globalThis.process 在 CF 上不存在
   if (typeof globalThis.process === 'undefined' || !globalThis.process?.versions?.node) return undefined
@@ -55,30 +71,25 @@ async function getNodeDispatcher(): Promise<any> {
       connections: 64,             // 每 origin 最大连接数（默认 10，太低会让 hls.js + 预取互相堵）
       pipelining: 1,
     }
-    // 本地开发时目标站点常被 DNS 污染或需要代理才能访问（同 siteFetch.ts 的理由）。
-    // 视频解析会经本接口去取站点自己的 js/wasm 和取址接口，这条链路也得能走代理，
-    // 否则「解析页能出选集、取址却全 502」。CF Pages 上没有这些变量，出口直连。
-    //
-    // 但**视频流不一定该跟着走代理**：出口 IP 一变，很多 CDN 直接 403
-    //（实测 vip.ffzy-play10.com：本机直连 200，经本地代理出口 403，且与 Referer 完全无关）。
-    // 这种 403 极难归因——页面上看到的是「所有分片红一片」，很容易误判成防盗链或连接策略有问题。
-    // 所以留一个 MEDIA_NO_PROXY=1 的开关：解析链路照走代理，媒体流直连。
     // @ts-ignore CF Workers 上没有 process
     const env = globalThis.process?.env ?? {}
-    const noMediaProxy = env.MEDIA_NO_PROXY === '1'
-    const proxyUri = noMediaProxy ? ''
-      : (env.MEDIA_HTTPS_PROXY || env.HTTPS_PROXY || env.https_proxy || env.HTTP_PROXY || env.http_proxy || env.ALL_PROXY || env.all_proxy)
-    if (noMediaProxy) console.log('[proxy] MEDIA_NO_PROXY=1：媒体流直连出口，不走本地代理')
+    const generic = env.HTTPS_PROXY || env.https_proxy || env.HTTP_PROXY || env.http_proxy || env.ALL_PROXY || env.all_proxy
+    // 站点资源：MEDIA_NO_PROXY 管不着它，有代理就走
+    const proxyUri = kind === 'site' ? generic
+      : (env.MEDIA_NO_PROXY === '1' ? '' : (env.MEDIA_HTTPS_PROXY || generic))
+    let d: any
     if (proxyUri && undici?.ProxyAgent) {
-      _dispatcher = new undici.ProxyAgent({ uri: proxyUri, ...opts })
-      console.log('[proxy] 走代理转发：' + proxyUri)
+      d = new undici.ProxyAgent({ uri: proxyUri, ...opts })
+      console.log(`[proxy] ${kind} 走代理转发：${proxyUri}`)
     } else if (undici?.Agent) {
-      _dispatcher = new undici.Agent(opts)
+      d = new undici.Agent(opts)
+      if (kind === 'media' && env.MEDIA_NO_PROXY === '1') console.log('[proxy] MEDIA_NO_PROXY=1：媒体流直连出口，不走本地代理')
     }
+    _dispatchers.set(kind, d)
   } catch {
     // 加载失败就降级为原生 fetch
   }
-  return _dispatcher
+  return _dispatchers.get(kind)
 }
 
 export default defineEventHandler(async (event) => {
@@ -103,7 +114,8 @@ export default defineEventHandler(async (event) => {
   const rangeHeader = getRequestHeader(event, 'range')
   if (rangeHeader) reqHeaders['Range'] = rangeHeader
 
-  const dispatcher = await getNodeDispatcher()
+  // site=1：解析链路要取的站点资源（js/wasm/取址接口），出口选择与媒体流相反，见 getNodeDispatcher
+  const dispatcher = await getNodeDispatcher(query.site === '1' ? 'site' : 'media')
 
   let response: Response
   try {

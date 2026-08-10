@@ -30,9 +30,12 @@ export interface HlsPrefetchOptions {
   // 预取以 max(currentTime, 此值) 为起点——起播即在正确位置全力并行预取，既不浪费带宽下开头，
   // 也不会退化成「只有 hls.js 串行下 1 片」。播放头到位/用户跳转后返回 0（改用 currentTime）。默认 0。
   getStartPosition?: () => number
-  // 「存货保险线」（秒，墙钟）：缓存够播的秒数低于它就把预取线程收敛到 2~3（见 SAFE_WALL_SECS）。
+  // 「存货保险线」（秒，墙钟）：缓存够播的秒数低于它就按阶梯收敛并发（见 WALL_CONN_STEPS）。
   // 由「HLS 配置」里的 safeWallSecs 提供，不设则用兜底值。
   getSafeWallSecs?: () => number
+  // 冷启动并发先验：按 host 学到的 bestConcurrency。切集/换流清掉实测样本后，
+  // 阶梯的地板拿它兜住慢源（见 catchUpFloor）。0/不设 = 没学过，交给阶梯。
+  getColdStartConn?: () => number
   // 连接 lane：返回同一分片在「不同 origin」下的多个 URL（如 [直连CDN, /api/proxy]）。
   // 浏览器 per-origin 只给 6 条连接，分属两个 origin 即可并行 ~12 条。默认单 lane（当前 getProxyUrl 结果）。
   getLaneUrls?: (url: string) => string[]
@@ -201,7 +204,9 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
 
   // 实测驱动的目标并发：需要带宽 = 码率 × 倍速 × 安全系数；并发 = ⌈需要 / 每连接速度⌉
   const computeTargetConcurrency = (): number => {
-    if (!bw.hasSamples()) return Math.min(hostConcurrencyCap, 4)   // 冷启动：乐观
+    // 冷启动（切集/换流刚清掉样本）：乐观值 4 起步，但按 host 学到的并发更可信就用它
+    // ——慢站上 4 条一样喂不动，而阶梯的地板已经放开了，这里不跟上就等于白学（见 catchUpFloor）
+    if (!bw.hasSamples()) return Math.min(hostConcurrencyCap, Math.max(4, opts.getColdStartConn?.() ?? 0))
     const need = bw.requiredConn(getPlaybackRate(), tier().safety)
     return Math.min(hostConcurrencyCap, Math.max(2, need))
   }
@@ -260,10 +265,35 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     // 中间且未在掉：维持
   }
 
+  /**
+   * 阶梯的**地板**：慢源上「少开线程」的前提不成立，这里兜住。
+   *
+   * 阶梯的立论是「带宽不是瓶颈，摊薄才是」——快源确实如此。但源站真慢时（每连接喂不动码率、
+   * 靠并行才凑得出吞吐），2 条连接连维持播放都不够，**存货永远涨不到 2 倍保险线，阶梯就永远不放开**
+   * ——自锁。表现最狠的是切集/拖进度：缓存归零，正好落在阶梯最低那一档。
+   *
+   * 所以地板取「维持当前倍速播放所需的连接数 × 2」：×1 只够不掉队、存货原地不动，
+   * ×2 才是「一边播一边以约 1 秒/秒的速度攒存货」。快源上 requiredConn=1 → 地板 2，
+   * 等于阶梯原样生效（防摊薄的目的不受影响）；慢源上 requiredConn=6 → 地板顶到 hostCap，等于拉满。
+   *
+   * **切集/换流会清空实测样本**（`resetStrategy`，换 CDN 用旧数据必跑偏），那一刻没有 requiredConn 可算，
+   * 于是退回按 host 学到的 `bestConcurrency`（自愈环连续流畅 20s+ 时每 30s 写一份）——
+   * 它本身就是当时的目标并发，不再翻倍。学过的慢站第二次进来即刻高并发，不用先卡一片。
+   * 都没有（生面孔第一片）就交给阶梯：先按 2 条把第一片让过去，一有样本立刻按实测放开，代价是一片。
+   */
+  const catchUpFloor = (): number => {
+    const need = bw.hasSamples()
+      ? bw.requiredConn(getPlaybackRate(), tier().safety) * 2
+      : (opts.getColdStartConn?.() ?? 0)
+    return Math.min(hostConcurrencyCap, Math.max(0, need))
+  }
+
   /** 存货阶梯（表见 WALL_CONN_STEPS）：wall = 还够播几秒。保险线填 0/负数 = 关掉整条阶梯 */
   const wallConnCap = (wall: number, safe: number): number => {
     if (safe <= 0) return hostConcurrencyCap
-    for (const [ratio, cap] of WALL_CONN_STEPS) if (wall < safe * ratio) return cap
+    for (const [ratio, cap] of WALL_CONN_STEPS) {
+      if (wall < safe * ratio) return Math.max(cap, catchUpFloor())   // 地板兜住慢源，见 catchUpFloor
+    }
     return hostConcurrencyCap
   }
 

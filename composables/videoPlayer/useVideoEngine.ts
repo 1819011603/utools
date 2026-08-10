@@ -92,8 +92,10 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     },
     // 起播锚点：定位未到位前，预取从 pendingStartPos 起（而非 currentTime=0）
     getStartPosition: () => (startAnchorActive ? pendingStartPos : 0),
-    // 存货保险线：缓存够播的秒数低于它就把预取线程收敛到 2~3（见 useHlsPrefetch 的 SAFE_WALL_SECS）
+    // 存货保险线：缓存够播的秒数低于它就按阶梯收敛并发（见 useHlsPrefetch 的 WALL_CONN_STEPS）
     getSafeWallSecs: () => hlsConfig.value.safeWallSecs,
+    // 切集/换流会清掉实测样本，那一刻用按 host 学到的并发当阶梯地板（见 catchUpFloor）
+    getColdStartConn: () => tier.learnedConcurrency.value,
     // 直连+代理双通道：仅在「开启 + 该分片直连可达」时加一条本站代理 lane（不同 origin → 各享 6 连接）。
     // 需注入头/走代理的源直连 lane 会 403，退回单 lane。
     getLaneUrls: (url: string) => {
@@ -145,6 +147,50 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     },
   })
 
+  /**
+   * 转圈遮罩的延迟闸门（`isBuffering` 的唯一点亮入口）。
+   *
+   * 治的是**拖进度时那一下 0~1s 的无意义转圈**（实测：徽标显示「缓冲 24.1s」还在转）。
+   * 成因是**判据用错了量**：新位置的分片往往已经在预取缓存里，`fLoader` 同步就返回，
+   * 但 hls.js 仍要 demux + append、浏览器还要解码，这几百毫秒 **MSE 前向确实是 0**
+   * ——按 MSE 判就点亮转圈，几百毫秒后 FRAG_BUFFERED 又熄掉。那一圈不携带任何信息：
+   * 数据一个字节都不缺，缺的只是 append。
+   *
+   * 所以闸门到点后按**两级判据**决定要不要亮：
+   *  · 150ms：只有「**有效可播**（MSE + 预取缓存）也不足 2s」才亮——那才是真在等网络。
+   *  · 800ms：货在手上却还没播起来 = 反常（曾经真出过：分片一个接一个 200、缓冲恒 0、
+   *    一直转圈，pLoader 同步回调把 MediaSource 撞坏了）。这种必须让用户看见，否则
+   *    画面冻住却什么提示都没有，更难归因。
+   *
+   * 两个定时器都**在到点时自检**（播放头已前进 / 已暂停 / 已 seek 走 → 直接放弃），
+   * 因此不需要在 seeked/playing/canplaythrough 那一堆事件里逐个 cancel——漏一个就是长亮。
+   */
+  const SPINNER_SOFT_MS = 150   // 有货就先别喊
+  const SPINNER_HARD_MS = 800   // 有货却还在等 → 无条件亮
+  let spinnerSoftTimer: ReturnType<typeof setTimeout> | null = null
+  let spinnerHardTimer: ReturnType<typeof setTimeout> | null = null
+  /** 到点时还在等吗：暂停/正在 seek/前方已有 MSE 存货 → 都不算 */
+  const stillStalled = (): HTMLVideoElement | null => {
+    const v = videoEl.value
+    if (!v || v.paused || v.seeking) return null
+    return getAheadBuffered(v) < 2 ? v : null
+  }
+  const armBufferingGate = () => {
+    if (!spinnerSoftTimer) spinnerSoftTimer = setTimeout(() => {
+      spinnerSoftTimer = null
+      const v = stillStalled()
+      if (v && getCachedAhead(v) < 2) isBuffering.value = true   // 连预取缓存都没货 = 真在等网络
+    }, SPINNER_SOFT_MS)
+    if (!spinnerHardTimer) spinnerHardTimer = setTimeout(() => {
+      spinnerHardTimer = null
+      if (stillStalled()) isBuffering.value = true
+    }, SPINNER_HARD_MS)
+  }
+  const cancelBufferingGate = () => {
+    if (spinnerSoftTimer) { clearTimeout(spinnerSoftTimer); spinnerSoftTimer = null }
+    if (spinnerHardTimer) { clearTimeout(spinnerHardTimer); spinnerHardTimer = null }
+  }
+
   // ── 实时心跳的外挂钩子 ──
   // 自愈调参环（useVideoAutoTune.selfHeal）、下一集预热（useVideoPrewarm.tick）都挂在这儿，
   // 引擎不反向依赖它们。多播而不是单槽：单槽时后登记的会把前一个静默顶掉
@@ -157,6 +203,14 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     if (hlsTickTimer) return
     document.addEventListener('visibilitychange', onVisibilityChange)
     hlsTickTimer = setInterval(() => {
+      // 转圈的兜底熄灯：以「真的在播」为地面真值，不指望事件齐全。
+      // `isBuffering` 只由 playing/canplaythrough/seeked/FRAG_BUFFERED 熄，而正播着的视频
+      // **不会再补发 playing**——任何一次漏发都会让转圈一直盖在正常播放的画面上（同 stallTracker
+      // 那条「事件之外还要位置采样兜底」的理由）
+      const v = videoEl.value
+      if (isBuffering.value && v && !v.paused && !v.seeking && v.readyState >= 3 && getAheadBuffered(v) >= 1) {
+        isBuffering.value = false
+      }
       stall.tick()   // 绑定/改绑卡顿监听（幂等）+ 刷新连续流畅读数
       prefetchTick()
       refreshCacheStats()   // 面板上的「预取缓存 N 片 / X MB」
@@ -211,6 +265,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
 
   const destroyHls = () => {
     clearLoadTimeout()
+    cancelBufferingGate()   // 别让上一个流的闸门在新流身上到点
     onDestroyHooks.forEach(fn => fn())
     if (hls) { hls.destroy(); hls = null }
     hlsStats.value = null
@@ -411,20 +466,17 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     // 分片加载完成 → 更新统计 + 触发自适应预取
     hls.on(HlsLib.Events.FRAG_BUFFERED, (_, data) => {
       updateHlsStats()
+      cancelBufferingGate()
       isBuffering.value = false
       // sn 在 init segment 上是字符串 'initSegment'，那种片没有后续可预取，跳过
       const sn = data?.frag?.sn
       if (typeof sn === 'number') triggerAdaptivePrefetch(sn)
     })
 
-    // 分片加载中：只在没有足够缓冲时显示加载
-    hls.on(HlsLib.Events.FRAG_LOADING, () => {
-      const v = videoEl.value
-      if (v && v.buffered.length > 0) {
-        const bufferedEnd = v.buffered.end(v.buffered.length - 1)
-        if (bufferedEnd - v.currentTime < 2) isBuffering.value = true
-      }
-    })
+    // 分片加载中：不再当场点亮转圈，交给延迟闸门按「有效可播」判（见 armBufferingGate）。
+    // 原来这里是 `buffered.end(最后一段) - currentTime < 2` 就亮，两处都错：判据该看播放头
+    // 所在缓冲段的前向（拖进度后最后一段常整段落在播放头后面，两者差十几秒），且不该立刻亮
+    hls.on(HlsLib.Events.FRAG_LOADING, () => armBufferingGate())
 
     hls.on(HlsLib.Events.LEVEL_SWITCHED, () => updateHlsStats())
 
@@ -478,6 +530,8 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     loadVideo, destroyHls, applyHlsConfig, resetHlsConfig,
     clearLoadTimeout, markDataReceived,
     registerDestroyHook, registerAutoPlayHook, registerTickHook,
+    // 转圈闸门（事件层唯一的点亮入口，别直接写 isBuffering）
+    armBufferingGate, cancelBufferingGate,
     // 预取 / 缓存 / 卡顿
     prefetchInfo, strategy, stall,
     getAheadBuffered, getCachedAhead, primePrefetch, startOnePrefetch, prefetchTick,

@@ -296,7 +296,9 @@ export function useVideoEvents(deps: VideoEventsDeps) {
   const onLoadedData = () => { isLoading.value = false }
 
   const onWaiting = () => {
-    isBuffering.value = true
+    // 不当场点亮转圈：拖进度后 waiting 必然触发一次，而目标分片多半已在预取缓存里，
+    // 等的只是 append/解码那几百毫秒（见 engine.armBufferingGate 的两级判据）
+    engine.armBufferingGate()
     if (!isHls.value) return
     // 卡顿即刻反应：立即跑一次预取控制（不等下一个心跳/FRAG_BUFFERED）
     engine.prefetchTick()

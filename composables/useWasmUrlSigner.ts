@@ -20,7 +20,15 @@ const moduleCache = new Map<string, Promise<WasmModule>>()
 // 逐集取址的并发。太高会被源站限流，也没必要——瓶颈在源站不在本地
 const CONCURRENCY = 5
 
-const proxied = (url: string) => `/api/proxy?url=${encodeURIComponent(url)}`
+/**
+ * 走 `/api/proxy` 而不是直接 fetch：站点不发 `Access-Control-Allow-Origin`，
+ * 浏览器直取它的 js/wasm/取址接口一律被 CORS 拦掉（本接口会补上 ACAO）。
+ *
+ * **`site=1` 必须带**：它告诉服务端「这是解析链路的站点资源，不是媒体流」，
+ * 从而不受 `MEDIA_NO_PROXY=1`（媒体流直连出口）影响。漏了它的表现是本地
+ * 「解析页能出选集、一取址就全 502」——目标站点在本机多半直连不通（见 proxy.ts 那段注释）。
+ */
+const proxied = (url: string) => `/api/proxy?site=1&url=${encodeURIComponent(url)}`
 
 /**
  * 有些 wasm 会读页面上某个 <meta> 的 content 当时间戳（站点原页面由内联脚本写入）。
