@@ -91,6 +91,65 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
     })
   }
 
+  /**
+   * 「上次看到第 N 集」——**播放器自己也要提**，不能只在解析页提。
+   *
+   * 解析页那条提示只覆盖「重新搜一遍再解析」这一条路；而用户也可能直接点「播放全部」、
+   * 或者拿着分享链接/交接槽进来，那时播放器照旧从第 1 集起播，续看记录白记了一场。
+   *
+   * 只在**没指定集数**（`currentIndex === 0`）时提：深链带了 `index`/`ep` 就是明确要看那一集，
+   * 这时候插嘴纯属干扰。也不自动跳过去——用户可能就是想重看第 1 集，跳了他还得自己找回来。
+   */
+  const resumeHint = ref<{ index: number; epName?: string; total?: number } | null>(null)
+  /** 用户自己动过集数之后就永久闭嘴（见下面那个 watch(currentIndex)） */
+  let resumeSettled = false
+
+  const findResumeHint = () => {
+    // 用户已经自己动过集数 → 这条提示本次会话不再出现（见下面那个 watch）
+    if (resumeSettled) { resumeHint.value = null; return }
+    if (playlist.value.length <= 1 || currentIndex.value !== 0) { resumeHint.value = null; return }
+    const rec = watchHistory.findWatch({
+      title: handoff.playlistTitle.value || undefined,
+      pageUrl: handoff.playlistSource.value?.pageUrl,
+    })
+    if (!rec) { resumeHint.value = null; return }
+    // 落点先按集名认再退回序号（源站会往中间加塞，几天前的序号可能已经指到别人身上）
+    const byName = rec.epName
+      ? playlist.value.findIndex((u, i) => handoff.getVideoName(u, i) === rec.epName)
+      : -1
+    const index = byName >= 0 ? byName : (rec.index < playlist.value.length ? rec.index : -1)
+    // **落点就是正在播的这一集时一个字都不说**：那条提示等于「点我跳到你已经在看的地方」，
+    // 纯噪音。（`index > 0` 已经隐含了这一条，但把它写出来——将来若允许在非第 1 集时也提示，
+    // 漏了这一句就会冒出「上次看到第 12 集」而画面上正播着第 12 集）
+    resumeHint.value = index > 0 && index !== currentIndex.value
+      ? { index, epName: rec.epName, total: rec.total }
+      : null
+  }
+
+  const resumeToHint = async () => {
+    const r = resumeHint.value
+    resumeHint.value = null
+    if (r) await playByIndex(r.index)
+  }
+  const dismissResumeHint = () => { resumeHint.value = null }
+
+  // 列表换了（解析出新的一份 / 交接槽读进来 / 手工贴一批）就重算一次
+  watch([playlist, () => handoff.playlistTitle.value], () => findResumeHint(), { flush: 'post' })
+
+  /**
+   * **用户一旦自己动过集数，这条提示就永久闭嘴**（本次会话内）。
+   *
+   * 「正常切上一集/下一集」时再冒出「上次看到第 N 集」是纯噪音：他显然已经知道自己在哪、
+   * 也已经在按自己的意思走了。判据用「集数离开了第 1 集」而不是去各处调用点埋钩子——
+   * 选集面板、全屏抽屉、上下集按钮、快捷键、播完自动下一集全都汇到这里，一处就够。
+   * 起播那一下（停在第 1 集）不算动过，所以提示照旧出得来。
+   */
+  watch(currentIndex, i => {
+    if (i === 0) return
+    resumeSettled = true
+    resumeHint.value = null
+  })
+
   const saveCurrentProgress = () => {
     const key = progressKey()
     if (!key || media.currentTime.value <= 0) return   // 还没播就别动已有记录（切集时会经过这里）
@@ -493,6 +552,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
     playlist, currentIndex, hasPrev, hasNext, isRefreshingLinks, lastRefreshAt, isSwitching,
     progressKey, currentVideoName, saveCurrentProgress, getSavedProgress, clearAllProgress,
     parseAndLoad, playByIndex, playPrev, playNext, clearPlaylist, loadExample, dropSavedProgress,
+    resumeHint, resumeToHint, dismissResumeHint,
     resolveLazyUrl, peekLazyUrl, refetchCurrentUrl, refreshPlaylistLinks, loadFromParseSource,
   }
 }

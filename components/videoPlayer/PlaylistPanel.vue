@@ -29,7 +29,7 @@
     </div>
 
     <!-- 网格排布：几十集竖着列要滚很久，横着摆一眼能扫到目标集 -->
-    <div class="max-h-80 overflow-y-auto p-2 bg-gray-50 dark:bg-gray-800 rounded-lg">
+    <div ref="scroller" class="max-h-80 overflow-y-auto p-2 bg-gray-50 dark:bg-gray-800 rounded-lg">
       <!-- 列数给足：一屏能扫到的集数越多越省事，超长剧尤其明显 -->
       <div class="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10 xl:grid-cols-12 gap-2">
         <div
@@ -77,7 +77,31 @@ const {
  * `block: 'nearest'` 而不是 'center'：已经在视野里就别动，否则每次切集整块都跳一下。
  */
 const curEl = ref<HTMLElement | null>(null)
-watch([currentIndex, () => playlist.value.length], () => {
-  nextTick(() => curEl.value?.scrollIntoView({ block: 'nearest' }))
-}, { immediate: true })
+const scroller = ref<HTMLElement | null>(null)
+const scrollCurrentIntoView = () => nextTick(() => curEl.value?.scrollIntoView({ block: 'nearest' }))
+watch([currentIndex, () => playlist.value.length], scrollCurrentIntoView, { immediate: true })
+
+/*
+ * **这张卡默认是折起来的**（`openPlaylist = ref(false)`），而 CollapseCard 用的是 `v-show`
+ * —— 元素在 DOM 里但没有布局，此时 `scrollIntoView` 是彻底的空操作。
+ * 于是「切集时滚一下」全发生在看不见的时候，用户真正展开面板那一刻反而没人滚，
+ * 当前集照旧躺在视野外（差点当成已经修好，实测量到这个滚动区 clientHeight 恒为 0 才发现）。
+ * 展开那一下没有任何事件可听（开合状态在父组件里），所以只能观察元素自己。
+ *
+ * **用 ResizeObserver 而不是 IntersectionObserver**：后者要等元素进入**视口**才触发，
+ * 而这张卡在长页面里通常还在首屏下面 —— 展开了却不在视口里，一次都不会回调（踩过，
+ * 测出来是「展开之后 scrollTop 仍为 0、当前集在视野外」）。尺寸从 0 变成 320 才是
+ * 「现在滚才有意义」的准确信号，跟页面滚到哪儿无关。
+ */
+onMounted(() => {
+  if (!scroller.value || typeof ResizeObserver === 'undefined') return
+  let wasVisible = scroller.value.clientHeight > 0
+  const ro = new ResizeObserver(() => {
+    const visible = (scroller.value?.clientHeight ?? 0) > 0
+    if (visible && !wasVisible) scrollCurrentIntoView()   // 只在「刚露出来」这一下滚，别每次尺寸抖动都抢滚动位置
+    wasVisible = visible
+  })
+  ro.observe(scroller.value)
+  onUnmounted(() => ro.disconnect())
+})
 </script>
