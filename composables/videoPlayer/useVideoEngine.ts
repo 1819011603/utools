@@ -96,6 +96,8 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     getSafeWallSecs: () => hlsConfig.value.safeWallSecs,
     // 切集/换流会清掉实测样本，那一刻用按 host 学到的并发当阶梯地板（见 catchUpFloor）
     getColdStartConn: () => tier.learnedConcurrency.value,
+    // 卡顿守卫的输入：真实停顿的时间戳（stall 在下面才声明，这里是惰性读取，调用时早已初始化）
+    getLastStallAt: () => stall.lastStallAt.value,
     // 直连+代理双通道：仅在「开启 + 该分片直连可达」时加一条本站代理 lane（不同 origin → 各享 6 连接）。
     // 需注入头/走代理的源直连 lane 会 403，退回单 lane。
     getLaneUrls: (url: string) => {

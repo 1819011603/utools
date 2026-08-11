@@ -42,6 +42,12 @@ export interface HlsPrefetchOptions {
   // 当前服务器档位参数（好/中/差预设 + 页面覆盖）。不设则用中档兜底。
   // 抗卡阈值(panicSecs/lowSecs)、安全系数、对冲/跳片超时、并发下限、预取深度全从这里读。
   getTierParams?: () => TierParams
+  /**
+   * 上一次**真实卡顿**的时间戳（`Date.now()`，0=没卡过）。来自 useStallTracker——
+   * 它以 `<video>` 的实际停顿为地面真值（排除 seek 与用户 pause），比任何带宽估算都可信，
+   * 所以卡顿守卫排在缺口/聚合那些「省流量」的判据前面（见 stallGuard）。
+   */
+  getLastStallAt?: () => number
 }
 
 export interface StrategySnapshot {
@@ -52,6 +58,8 @@ export interface StrategySnapshot {
   aggregateScales: boolean // 聚合是否随线程增长（true=每连接限速可并行；false=每IP硬顶不可并行）
   healthZone: HealthZone  // 缓冲健康区（按「有效可播」分档，panic 触发抗卡降速）
   playableSecs: number    // 有效可播秒数（MSE + 预取缓存），倍速决策的经验依据
+  avgSegLoadMs: number    // 一片平均下载耗时（ms）：判「每连接够不够快」比看瞬时速度直观
+  aggKneeConn: number     // 实测到的聚合拐点并发（0=还没见到拐点）
 }
 
 const MAX_CONN = 6               // 浏览器同 host 连接上限（HTTP/1.1，硬顶）
@@ -116,6 +124,24 @@ const FILL_HORIZON_SECS = 60
  * 调大 = 更保守（更愿意为钉住预加载时长而多开连接），调小 = 更省连接、缓存更愿意往下滑。
  */
 const COAST_WALL_SECS = 20
+
+/**
+ * **冷启动并发硬帽：3 条，无论有没有双通道。**
+ *
+ * 「还没有任何实测样本」= 不知道这个源是快是慢、每连接扛不扛得动、聚合能不能并行。
+ * 这种时候开一堆连接是拿**最需要的那一片**去赌：同 host 只有 6 个槽（双通道 12），
+ * 多开的每一条都在下更远的分片，跟紧邻播放头那一片抢带宽——越不确定越该少开。
+ * 3 条是「够试探出聚合能不能并行」（bandwidth 的低并发档要 ≤2、高并发档要 ≥5，
+ * 3 条正好不污染两档）与「不摊薄第一片」之间的折中。
+ * 一有样本立刻按实测放开，代价至多一两片。
+ */
+const COLD_START_CONN_CAP = 3
+
+/**
+ * 卡顿守卫的观察窗（ms）：这段时间内发生过真实卡顿就算「近期在卡」。
+ * 取 20s——比一次抗卡动作的生效周期长，短于「换了个源/换了段网络」的时间尺度。
+ */
+const STALL_WINDOW_MS = 20_000
 
 export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   const { getProxyUrl, cache } = opts
@@ -190,6 +216,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
 
   // 闭环控制状态：以「缓冲是否在掉」为反馈调并发，比开环测速更抗卡顿、天然适配倍速
   let ctrlConn = 0                        // 当前受控并发（0=未初始化）
+  let lastTargetConn = 0                  // 上一拍算出的目标并发（卡顿守卫拿它判「带宽够不够」）
   let lastAhead = -1                      // 上次的前向缓冲秒数
   let lastHealthZone: HealthZone = 'healthy'  // 健康区（驱动 UI 与降速守卫）
   let lastPlayable = 0                    // 上次量到的有效可播秒数（MSE + 预取缓存）
@@ -200,20 +227,25 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     bw.resetSamples()
     hostConcurrencyCap = MAX_CONN
     ctrlConn = 0
+    lastTargetConn = 0
     lastAhead = -1
     lastHealthZone = 'healthy'
     lastPlayable = 0
     segDurSecs = 0
     resetLanes()
     segInflightStart.clear()
-    strategy.value = { perConnKBps: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0, aggregateScales: true, healthZone: 'healthy', playableSecs: 0 }
+    strategy.value = { perConnKBps: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0, aggregateScales: true, healthZone: 'healthy', playableSecs: 0, avgSegLoadMs: 0, aggKneeConn: 0 }
   }
 
   // 实测驱动的目标并发：需要带宽 = 码率 × 倍速 × 安全系数；并发 = ⌈需要 / 每连接速度⌉
   const computeTargetConcurrency = (): number => {
     // 冷启动（切集/换流刚清掉样本）：乐观值 4 起步，但按 host 学到的并发更可信就用它
     // ——慢站上 4 条一样喂不动，而阶梯的地板已经放开了，这里不跟上就等于白学（见 catchUpFloor）
-    if (!bw.hasSamples()) return Math.min(hostConcurrencyCap, Math.max(4, opts.getColdStartConn?.() ?? 0))
+    // 冷启动：**一律不超过 COLD_START_CONN_CAP**。按 host 学到的并发只用来「不低于」，
+    // 不再用来突破那个帽子——学到的是上次稳态的值，而此刻还没起播，处境完全不同
+    if (!bw.hasSamples()) {
+      return Math.min(hostConcurrencyCap, COLD_START_CONN_CAP, Math.max(2, opts.getColdStartConn?.() ?? 0))
+    }
     const need = bw.requiredConn(getPlaybackRate(), tier().safety)
     return Math.min(hostConcurrencyCap, Math.max(2, need))
   }
@@ -229,6 +261,8 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
       aggregateScales: getAggregateScales(),
       healthZone: lastHealthZone,
       playableSecs: Math.round(lastPlayable),
+      avgSegLoadMs: bw.avgSegLoadMs(),
+      aggKneeConn: bw.bestAggConn(),
     }
   }
 
@@ -360,6 +394,44 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     return Math.max(1, bw.requiredConn(needRate, tier().safety))
   }
 
+  /**
+   * 卡顿守卫：**卡顿是地面真值，比任何估算都可信**，所以它排在缺口/聚合那些「省流量」的判据前面。
+   *
+   * 但「卡了该加线程还是该减线程」没有唯一答案，取决于卡在哪：
+   *   · **聚合速度已经够喂**（≥ 码率 × 倍速 × 安全系数）却还在卡 → 是**摊薄**：
+   *     带宽不是瓶颈，是那 N 条连接把槽位和带宽摊给了远处的分片，紧邻播放头那一片反而最晚到。
+   *     这时要**减到 2~3 条**，把资源让给眼前那一片。（实测截图：聚合 16.8Mbps、码率 2.1Mbps，
+   *     跑着 6 线程却卡到已缓冲 0.3s。）
+   *   · **聚合速度喂不动** → 是**真慢**：少开线程只会更慢，这时反过来把地板抬到 hostCap，
+   *     能开多少开多少（慢源、拖进度后最常见）。
+   * 判据用聚合而不是单连接速度：单连接慢但能并行的源（每连接限速的 CDN）恰恰要多开。
+   * 单连接速度的位置在 requiredConn 里——它决定「喂饱需要几条」，是上面那个比较的分母。
+   *
+   * 返回 `{ cap, floor }`：不卡时两边都不咬人（cap=hostCap、floor=0）。
+   */
+  const stallGuard = (): { cap: number; floor: number } => {
+    const stalledAt = opts.getLastStallAt?.() ?? 0
+    const recentlyStalled = stalledAt > 0 && Date.now() - stalledAt < STALL_WINDOW_MS
+    if (!recentlyStalled || !bw.hasSamples()) return { cap: hostConcurrencyCap, floor: 0 }
+    // 「喂饱要几条」× 当前每连接速度 = 需要的聚合；拿实测聚合跟它比
+    const need = bw.requiredConn(getPlaybackRate(), tier().safety)
+    const bandwidthEnough = need <= Math.max(1, lastTargetConn)
+    return bandwidthEnough
+      ? { cap: 3, floor: 0 }                       // 摊薄型：收紧，让眼前那一片先到
+      : { cap: hostConcurrencyCap, floor: hostConcurrencyCap }  // 真慢型：能开多少开多少
+  }
+
+  /**
+   * 聚合拐点帽：**加线程却没换来吞吐，就别再加**（每 IP 限总量的源）。
+   *
+   * 数据来自 bandwidth 的 `aggByConn`（按并发档记聚合成绩）。拿到拐点后封在 `bestConn + 1`：
+   * 留一档继续试探，网络变好时还能爬回去；锁死在最优档的话，一次偶发抖动就把上限永久压住了。
+   */
+  const aggregateKneeCap = (): number => {
+    const knee = bw.bestAggConn()
+    return knee > 0 ? Math.min(hostConcurrencyCap, knee + 1) : hostConcurrencyCap
+  }
+
   // 返回当前目标并发（受控值，双重钳制在 [2, hostCap]）。只读，供两个预取入口共用。
   // 注意：永远保持并行预取后续分片，绝不因当前分片慢而停掉后面的（否则退化成串行/卡死）。
   const getAdaptivePrefetchCount = (cachedAhead?: number): number => {
@@ -373,11 +445,29 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     //   · 存货阶梯：还够播几秒 → 2/3/4/6 条，过 2 倍保险线才放开（见 WALL_CONN_STEPS）。
     //     起播那一刻正是「还没 play() 所以 paused 为真」+「缓存为 0」同时成立，压不住就是满并发抢第一片。
     //   · 快到预加载时长 → 按「播放消耗 + 缺口摊到 60s 补」所需的速率收（见 headroomConnCap）。
+    /*
+     * ── 并发决策的优先级阶梯 ──
+     * 一律取 min（除了最后那道地板），**越靠前越「救命」，越靠后越只是「省」**：
+     *   ① 冷启动帽    没有任何实测 → ≤3，无论双通道（拿第一片去赌是最亏的）
+     *   ② 存货墙钟    还够播几秒 → 2/3/4/6（「现在能不能播下去」压倒一切）
+     *   ③ 卡顿守卫    真卡过 → 摊薄型收紧到 3 / 真慢型抬地板到 hostCap
+     *   ④ 聚合拐点    加线程不涨吞吐 → 封在拐点 +1
+     *   ⑤ 缺口速率    接近预加载时长 → 按所需速率收（headroomConnCap，只省流量）
+     *   ⑥ 地板        慢源兜底：catchUpFloor / 卡顿守卫的 floor（防「越缺越不敢开」自锁）
+     */
+    if (!bw.hasSamples()) target = Math.min(target, COLD_START_CONN_CAP)     // ①
     if (cachedAhead !== undefined) {
       const wall = cachedAhead / Math.max(1, getPlaybackRate())
-      target = Math.min(target, wallConnCap(wall, getSafeWallSecs()))
-      target = Math.min(target, headroomConnCap(cachedAhead))
+      target = Math.min(target, wallConnCap(wall, getSafeWallSecs()))        // ②（内含 catchUpFloor 地板）
+      const guard = stallGuard()                                            // ③
+      target = Math.min(target, guard.cap)
+      target = Math.min(target, aggregateKneeCap())                         // ④
+      target = Math.min(target, headroomConnCap(cachedAhead))               // ⑤
+      // ⑥ 地板只在「真慢型卡顿」时抬——它要压过上面所有的收紧，否则慢源永远补不回来。
+      //    冷启动帽不受它影响：那时没样本，stallGuard 直接返回不咬人的值
+      target = Math.max(target, Math.min(hostConcurrencyCap, guard.floor))
     }
+    lastTargetConn = target
     refreshStrategy(target)
     return target
   }

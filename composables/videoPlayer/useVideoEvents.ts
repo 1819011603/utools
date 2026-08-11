@@ -31,12 +31,26 @@ const AUTOPLAY_COLD_MIN_BUFFER = 6    // 冷启动的缓冲下限（1x 时就是
 const AUTOPLAY_MIN_BUFFER = 1         // 再快也得有这么多，否则等于没缓冲就播
 const AUTOPLAY_MAX_WAIT_MS = 8000
 
-/** 起播门槛（秒缓冲）。relocating = 切集/拖进度/重载那一档 */
-const autoPlayTarget = (rate: number, relocating: boolean): number => {
+/**
+ * 卡一次，下一次起播的门槛就翻一倍（封顶 ×8）。
+ *
+ * 治的是**慢源上「多次短频卡顿」**——尤其拖完进度那一下：缓冲清零后按「够播 2 秒」就出画面，
+ * 而慢源两秒后供给还没跟上，于是又卡；浏览器只要拿到一帧就继续播，于是卡→播→卡→播 抖成锯齿。
+ * 用户感受上，**五次一秒的卡远比一次四秒的等难受**（每一次都要重新对焦画面和声音）。
+ *
+ * 所以门槛不是常量而是「这条源最近有多不争气」的函数：连着卡就多攒一点再出画面，
+ * 连续流畅一段时间后自动归零（见 recentStalls）。翻倍而不是线性加：
+ * 真慢的源线性爬要卡七八次才够，指数两三次就到位。
+ */
+const STALL_ESCALATION_CAP = 8
+
+/** 起播门槛（秒缓冲）。relocating = 切集/拖进度/重载那一档；stalls = 近期卡顿次数 */
+const autoPlayTarget = (rate: number, relocating: boolean, stalls = 0): number => {
   const byRate = AUTOPLAY_PLAYABLE_SECS * Math.max(1, rate)
-  return relocating
+  const base = relocating
     ? Math.max(AUTOPLAY_MIN_BUFFER, byRate)
     : Math.max(AUTOPLAY_COLD_MIN_BUFFER, byRate)
+  return base * Math.min(STALL_ESCALATION_CAP, 2 ** Math.max(0, stalls))
 }
 /**
  * 起播就绪的轮询间隔。原来是 300ms 固定轮询 + 起手先空等 500ms——
@@ -106,6 +120,21 @@ export function useVideoEvents(deps: VideoEventsDeps) {
   }
 
   // ── 起播预缓冲 ──
+  /**
+   * 近期卡顿次数（供门槛递增用）。**连续流畅 20s 就清零**——门槛涨上去容易，
+   * 不给它一条下坡路的话，源恢复正常之后每次拖进度还得干等十几秒（比卡顿更烦）。
+   * 计数只认 stallTracker 的真实停顿（排除 seek 与用户 pause），不认我们自己的加载等待。
+   */
+  let recentStalls = 0
+  let lastSeenStallCount = 0
+  const refreshStallEscalation = () => {
+    const n = engine.stall.stallCount.value
+    if (n > lastSeenStallCount) { recentStalls += n - lastSeenStallCount; lastSeenStallCount = n }
+    if (engine.stall.smoothSecs.value >= 20) recentStalls = 0
+    return recentStalls
+  }
+  engine.registerTickHook(refreshStallEscalation)   // 每秒心跳刷新一次
+
   const scheduleAutoPlay = () => {
     if (delayedPlayTimer) { clearTimeout(delayedPlayTimer); delayedPlayTimer = null }
     isBuffering.value = true
@@ -120,7 +149,7 @@ export function useVideoEvents(deps: VideoEventsDeps) {
       const ahead = engine.getAheadBuffered(video)
       const waited = performance.now() - startTs
       // 门槛每一拍现算：倍速可能在等待期间被自愈环改掉（尤其「自动最佳倍速」刚测出带宽那一下）
-      const target = autoPlayTarget(playbackRate.value, relocating)
+      const target = autoPlayTarget(playbackRate.value, relocating, recentStalls)
       const ready = !isHls.value
         ? waited >= 2000
         : ahead >= target || waited >= AUTOPLAY_MAX_WAIT_MS
@@ -130,7 +159,7 @@ export function useVideoEvents(deps: VideoEventsDeps) {
       }
       delayedPlayTimer = null
       console.log(`开始自动播放（预缓冲 ${ahead.toFixed(1)}s / 门槛 ${target.toFixed(1)}s @${playbackRate.value}x`
-        + `，等待 ${(waited / 1000).toFixed(1)}s）`)
+        + `，等待 ${(waited / 1000).toFixed(1)}s${recentStalls ? `，近期卡顿 ${recentStalls} 次已抬高门槛` : ''}）`)
       engine.clearRelocating()
       isBuffering.value = false
       void attemptPlay(0)
@@ -302,8 +331,26 @@ export function useVideoEvents(deps: VideoEventsDeps) {
     if (!isHls.value) return
     // 卡顿即刻反应：立即跑一次预取控制（不等下一个心跳/FRAG_BUFFERED）
     engine.prefetchTick()
-    // 缓冲空洞跳跃：播放头前方几乎没缓冲、但更后面存在缓冲段（洞），跳过小洞恢复播放
+
+    /*
+     * **已经形成抖动了就主动 hold 一下，把「五次一秒的卡」换成「一次几秒的等」。**
+     *
+     * 浏览器的默认行为是「拿到一帧就继续播」——慢源上这必然抖成锯齿：播 1 秒、卡 1 秒、
+     * 再播 1 秒……每一次都要重新对焦画面和声音，比一次干脆的等待难受得多。
+     * 我们没法改浏览器的恢复策略，但可以自己按住：暂停 → 走 scheduleAutoPlay，
+     * 由它按**抬高后的门槛**（见 autoPlayTarget 的递增）攒够再放行，遮罩上还有转圈交代。
+     *
+     * 只在**已经连着卡两次**时才这么做：第一次卡完全可能是偶发（一个慢分片），
+     * 当场按住反而是自找的延迟；连着卡才说明供给真的跟不上。
+     * 用户主动暂停的不管（paused 时压根不会走到这里）。
+     */
     const video = videoEl.value
+    if (refreshStallEscalation() >= 2 && video && !video.paused && !video.ended) {
+      console.log(`连续卡顿 ${recentStalls} 次 → 主动缓冲到更高门槛再播（避免反复短卡）`)
+      video.pause()
+      scheduleAutoPlay()
+    }
+    // 缓冲空洞跳跃：播放头前方几乎没缓冲、但更后面存在缓冲段（洞），跳过小洞恢复播放
     if (video && video.buffered.length > 1 && engine.getAheadBuffered(video) < 0.3) {
       const ct = video.currentTime
       for (let i = 0; i < video.buffered.length; i++) {

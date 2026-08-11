@@ -31,6 +31,17 @@
         位置放在「选集」左边而不是最右——右上角是拇指最难够到的地方，那儿该留给要点的东西
       -->
       <div v-if="isFullscreen" class="flex items-center gap-2 shrink-0 text-white/85 tabular-nums">
+        <!--
+          聚合下载速度摆在时间/电量**左边**：全屏时页面上那行信息条整个看不见，
+          而「现在到底下得动下不动」恰恰是看片当下最想知道的一件事（卡的时候尤其）。
+          只显示 KB/s / MB/s；采样为 0 时不渲染——摆个 0 会被当成「一点都没下下来」
+        -->
+        <span
+          v-if="isHls && aggregateKBps > 0"
+          class="text-xs font-medium drop-shadow"
+          :class="dualChannel ? 'text-emerald-300/90' : 'text-white/70'"
+          :title="`聚合下载速度 ≈ 单连接 ${formatSpeed(strategy.perConnKBps)} × ${strategy.targetConn} 并发`"
+        >{{ formatSpeed(aggregateKBps) }}</span>
         <span class="text-sm font-medium drop-shadow">{{ clock }}</span>
         <!-- 电量画成一枚小电池而不是写个数字：形状本身就传达「还剩多少」，扫一眼不用读数。
              拿不到电量的浏览器（Safari/Firefox）整块不渲染 -->
@@ -75,6 +86,8 @@ const {
   playlistTitle, currentVideoName, playlist, currentIndex,
   showEpisodes, isFullscreen, controlsVisible,
   toggleFullscreen, keepControlsAlive,
+  // 全屏顶栏那枚聚合速度（时间/电量左边）
+  isHls, aggregateKBps, strategy, dualChannel,
 } = useVideoPlayerCtx()
 
 // 时钟/电量**不进 ctx**：它只服务这一个组件，进 ctx 就得跟别的模块抢键名
