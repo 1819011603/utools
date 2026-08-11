@@ -30,6 +30,16 @@ export function createFragLoaderFactory(deps: FragLoaderDeps) {
   const { acquireLane, releaseLane, markLaneOk, markLaneFail } = deps.lanes
   const { tier, sampleSpeed, segInflightStart, skipSegment } = deps
 
+  /*
+   * 「hls.js 还在跟我们要东西吗」的活动记录。**排查冻屏时这是分岔口**：
+   *   · 最近还在 `load()`（`askedAgoMs` 小）→ 它在要，卡在我们这边（取不到/交不出去）；
+   *   · 很久没 `load()` 过 → 它压根没在要，问题在 hls.js 侧（认为缓冲够了 / 那一片被记成
+   *     已缓冲或 gap），这时再怎么改预取都没用，得逼它重排（见 engine/stallRecovery.ts 的阶梯）。
+   * 光看「缓冲多少」永远分不清这两种，这也是那一幕追了好几轮的原因。
+   */
+  const activity = { lastLoadAt: 0, lastServedAt: 0, lastSn: null as unknown, lastUrl: '' }
+  const getLoaderActivity = () => ({ ...activity })
+
   // 创建自定义 HLS 分片加载器（fLoader）
   // 优先从预取缓存返回数据，cache miss 时走 fetch 正常加载
   const createHlsFragLoader = () => {
@@ -51,6 +61,9 @@ export function createFragLoaderFactory(deps: FragLoaderDeps) {
         this.context = context
         const url: string = context.url
         const t0 = performance.now()
+        activity.lastLoadAt = Date.now()
+        activity.lastSn = context?.frag?.sn
+        activity.lastUrl = url
 
         // 重置 stats 字段（必须原地修改，不能替换整个对象）
         // frag.stats 持有的是同一个对象引用，替换会导致 frag.stats 仍指向旧的 undefined
@@ -79,6 +92,7 @@ export function createFragLoaderFactory(deps: FragLoaderDeps) {
           this.stats.chunkCount = 1
           if (!this.stats.loading.first) this.stats.loading.first = t0 + 1
           this.stats.loading.end = t1
+          activity.lastServedAt = Date.now()
           callbacks.onSuccess({ data, url }, this.stats, context)
         }
 
@@ -88,13 +102,24 @@ export function createFragLoaderFactory(deps: FragLoaderDeps) {
           callbacks.onError({ code: 0, text: e.message }, context, null, this.stats)
         }
 
-        // 1. 命中预取缓存（且未过期）→ 即时返回，并刷新 LRU 顺序与访问时间
+        /*
+         * 1. 命中预取缓存（且未过期）→ 即时返回，并刷新 LRU 顺序与访问时间。
+         *
+         * **回调必须延到下一个宏任务，绝不能在 `load()` 里同步回**（踩过，跟 pLoader 那个坑
+         * 是同一个，见 CLAUDE.md「pLoader 同步回调」那条）：hls.js 是在 `loader.load()`
+         * **返回之后**才把这一片记成「在加载中」的；同步回调等于在它记账之前就把结果交出去，
+         * 那一片的结果被当成无主的丢掉——而 hls.js 那边永远停在「还在等这一片」上。
+         * 后果极难归因：**缓存越满越容易发生**（越满越多片走这条同步路径），
+         * 表现是「缓冲 300s、0 线程、0 KB/s，画面冻住，每秒一条 bufferStalledError」，
+         * 连 `startLoad(currentTime)` 都救不回来（重来一遍照样走同步路径，照样被丢）。
+         * `setTimeout(0)` 的代价是一个宏任务（几乎为 0），换的是这一片真的被收下。
+         */
         const cachedBuf = getPrefetchedBuf(url)
         if (cachedBuf) {
           segPrefetchCache.delete(url)
           segPrefetchCache.set(url, { buf: cachedBuf, ts: Date.now() })
           prefetchInfo.value.cached = segPrefetchCache.size
-          succeed(cachedBuf)
+          setTimeout(() => succeed(cachedBuf), 0)   // succeed 自己会查 stats.aborted，中途被 abort 也安全
           return
         }
 
@@ -201,5 +226,5 @@ export function createFragLoaderFactory(deps: FragLoaderDeps) {
     }
   }
 
-  return { createHlsFragLoader }
+  return { createHlsFragLoader, getLoaderActivity }
 }

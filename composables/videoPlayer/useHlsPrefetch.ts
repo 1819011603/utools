@@ -504,7 +504,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
 
   // hls.js 正在等的那一片：命中预取缓存即时返回，miss 走对冲竞速 + 硬超时跳片。
   // 实现见 ./prefetch/fragLoader.ts（它可以抢连接，不受下面「存货不够就少开线程」的预取上限约束）
-  const { createHlsFragLoader } = createFragLoaderFactory({
+  const { createHlsFragLoader, getLoaderActivity } = createFragLoaderFactory({
     cache,
     lanes: laneControl,
     tier,
@@ -745,5 +745,5 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     }
   }
 
-  return { getAheadBuffered, getCachedAhead, getAdaptivePrefetchCount, createHlsFragLoader, triggerAdaptivePrefetch, startOnePrefetch, strategy, resetStrategy, tick, primePrefetch, getStuckSegment, laneDead, reviveLanes, purgePlayedSegments }
+  return { getAheadBuffered, getCachedAhead, getAdaptivePrefetchCount, createHlsFragLoader, triggerAdaptivePrefetch, startOnePrefetch, strategy, resetStrategy, tick, primePrefetch, getStuckSegment, laneDead, reviveLanes, purgePlayedSegments, getLoaderActivity, isSegCached: (url: string) => getPrefetchedBuf(url) !== null }
 }

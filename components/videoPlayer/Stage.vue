@@ -330,6 +330,10 @@ const {
   onCanPlayThrough, onSeeking, onSeeked, onPlaying, onPause, onVolumeChange, onVideoError,
 } = useVideoPlayerCtx()
 
+// 锁定按钮「未锁定时小窗不出」要用它。**曾经漏了这行声明**：模板里读不存在的属性只是一条
+// Vue warn，取值恒 undefined（= 假），于是那个条件悄悄变成「任何尺寸都显示」，界面上看不出错
+const isNarrow = useNarrowScreen()
+
 // 「停在那儿了」：暂停且不是在加载/取址中。加载中另有转圈遮罩，两个叠一起只会打架。
 // 自动播放被浏览器拦下时也是这个状态——那正是最需要一枚大播放键的时候。
 const pausedIdle = computed(() =>

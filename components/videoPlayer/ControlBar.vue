@@ -238,13 +238,8 @@ watch(showSpeedMenu, async (open) => {
 })
 
 // 窄屏（手机竖屏）：控制栏塞不下这么多图标，画中画这类低频项直接不渲染。
-// 用 matchMedia 而不是 Tailwind 的 hidden：它控制的是 v-if，没有能挂 class 的元素
-const isNarrow = ref(false)
-onMounted(() => {
-  const mq = window.matchMedia('(max-width: 639px)')
-  isNarrow.value = mq.matches
-  mq.addEventListener('change', e => { isNarrow.value = e.matches })
-})
+// 判定收在 useNarrowScreen 里（Stage 也要用同一个断点，各写一份必然漂移）
+const isNarrow = useNarrowScreen()
 </script>
 
 <style scoped>

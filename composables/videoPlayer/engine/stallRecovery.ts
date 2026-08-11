@@ -34,6 +34,8 @@ const HOLE_JUMP_MAX = 3
 const FIX_COOLDOWN_MS = 2000
 /** 播放头冻住多久算真卡（ms）。心跳兜底那条用它——事件不一定每次都来 */
 const FROZEN_MS = 2000
+/** 阶梯第 ③ 级的微跳距离（秒）：要够跨过被标成 `gap` 的那一片的开头，又不至于丢掉一句台词 */
+const NUDGE_SEC = 0.5
 
 export interface StallRecoveryDeps {
   getVideoEl: () => HTMLVideoElement | undefined
@@ -42,12 +44,19 @@ export interface StallRecoveryDeps {
   getAheadBuffered: (v: HTMLVideoElement) => number
   /** 有效可播：MSE + JS 预取缓存。>0 说明数据在手上，卡的不是网络 */
   getCachedAhead: (v: HTMLVideoElement) => number
+  /** 四级自救全部无效：把话说清楚（写 errorMessage），别让用户对着冻住的画面猜 */
+  onGiveUp?: () => void
+  /** fLoader 的活动记录：hls.js 最近一次跟我们要片/我们最近一次交货是什么时候 */
+  getLoaderActivity?: () => { lastLoadAt: number; lastServedAt: number; lastSn: unknown; lastUrl: string }
+  /** 这一片在不在 JS 预取缓存里 */
+  isSegCached?: (url: string) => boolean
 }
 
 export function useStallRecovery(deps: StallRecoveryDeps) {
   let lastFixAt = 0
   let lastTime = -1
   let lastMoveAt = 0
+  let step = 0        // 自救阶梯的进度，播放头一动就归零
 
   /** 播放头后面最近一段缓冲的起点（没有就返回 null） */
   const nextBufferedStart = (v: HTMLVideoElement): number | null => {
@@ -56,6 +65,52 @@ export function useStallRecovery(deps: StallRecoveryDeps) {
       if (s > v.currentTime + 0.1) return s
     }
     return null
+  }
+
+  /**
+   * 同一招重复十次无效就该换招（实测日志：`startLoad(1987.3)` 连打 10 次，播放头一动不动）。
+   * 所以按**阶梯**升级，每一级只用一次，播放头一动就整份归零：
+   *   ① 跳空洞——洞小的话这一下就好了，代价最小
+   *   ② `startLoad(currentTime)`——让 streamController 从播放头重排一次
+   *   ③ 微跳 0.5s——跨过被 hls.js 标成 `gap` 的那一片（标了 gap 的片它不会再取，只能绕过去）
+   *   ④ `recoverMediaError()`——重建 MediaSource。append 通道本身坏了时这是唯一的出路，
+   *      也是最后一手：它会重新 attach，代价是画面黑一下
+   * 四级都过不去就**停手并说明白**：继续原地打转只是把控制台刷满，而画面早就冻住了，
+   * 用户需要的是「换条线路试试」这句话。
+   */
+  /**
+   * 冻屏现场一次打全。**这一幕靠单个读数永远查不出来**（「缓冲 305s」既可能是 MSE 也可能全是
+   * JS 缓存，「0 线程/0 KB/s」在全命中缓存时是正常的），所以把分岔口需要的量一起打出来：
+   *
+   *   · `askedAgoMs` 小 = hls.js 还在跟我们要片 → 卡在我们这边（取不到 / 交不出去）；
+   *     很大 = **它压根没在要** → 问题在 hls.js 侧（认为缓冲够了、或那一片被记成已缓冲/gap），
+   *     这时改预取毫无用处，只能逼它重排（阶梯 ①②③）。
+   *   · `frag.gap` 为真 = hls.js 已经把那一片判成空洞，它**再也不会去取**，只能绕过去（阶梯 ②）。
+   *   · `ranges` 为空而 `cached` 很大 = 数据全在 JS 缓存、一个字节都没进 MSE（append 通道的问题）。
+   */
+  const snapshot = (v: HTMLVideoElement, hls: any) => {
+    const ct = v.currentTime
+    const ranges: string[] = []
+    for (let i = 0; i < v.buffered.length; i++) ranges.push(`${v.buffered.start(i).toFixed(1)}~${v.buffered.end(i).toFixed(1)}`)
+    const level = hls?.currentLevel >= 0 ? hls.currentLevel : 0
+    const frags: any[] = hls?.levels?.[level]?.details?.fragments ?? []
+    const cur = frags.find(f => f.start <= ct + 0.1 && ct < f.end + 0.1)
+    const act = deps.getLoaderActivity?.()
+    const now = Date.now()
+    console.warn('[stall] 现场', {
+      at: +ct.toFixed(2),
+      readyState: v.readyState,
+      rate: v.playbackRate,
+      mseAhead: +deps.getAheadBuffered(v).toFixed(2),
+      cached: +deps.getCachedAhead(v).toFixed(1),
+      ranges: ranges.length ? ranges.join(' , ') : '(MSE 全空)',
+      hlsState: hls?.streamController?.state ?? '?',
+      frag: cur ? `sn=${cur.sn} ${cur.start.toFixed(1)}~${cur.end.toFixed(1)}${cur.gap ? ' gap!' : ''}` : '(播放头不在任何分片里)',
+      fragCached: cur ? deps.isSegCached?.(cur.url) : null,
+      askedAgoMs: act?.lastLoadAt ? now - act.lastLoadAt : null,
+      servedAgoMs: act?.lastServedAt ? now - act.lastServedAt : null,
+      askedSn: act?.lastSn ?? null,
+    })
   }
 
   const attempt = (reason: string) => {
@@ -68,15 +123,31 @@ export function useStallRecovery(deps: StallRecoveryDeps) {
     if (deps.getCachedAhead(v) < 1) return
     if (Date.now() - lastFixAt < FIX_COOLDOWN_MS) return
     lastFixAt = Date.now()
+    snapshot(v, hls)   // 动手之前先留一份现场：动过之后就分不清是谁的因果了
 
+    const at = v.currentTime
     const next = nextBufferedStart(v)
-    if (next !== null && next - v.currentTime <= HOLE_JUMP_MAX) {
-      console.warn(`[stall] ${reason}：MSE 在 ${v.currentTime.toFixed(1)}s 处有个 ${(next - v.currentTime).toFixed(2)}s 的空洞，跳到 ${next.toFixed(1)}s`)
+    // ① 洞小就直接跳过去（等于临时放大 maxBufferHole）。这一级不占阶梯——它每次都值得先试
+    if (next !== null && next - at <= HOLE_JUMP_MAX) {
+      console.warn(`[stall] ${reason}：MSE 在 ${at.toFixed(1)}s 处有个 ${(next - at).toFixed(2)}s 的空洞，跳到 ${next.toFixed(1)}s`)
       v.currentTime = next + 0.05
       return
     }
-    console.warn(`[stall] ${reason}：播放头前方 MSE 为空而预取缓存有货，从 ${v.currentTime.toFixed(1)}s 重新加载`)
-    try { hls.startLoad(v.currentTime) } catch {}
+
+    step++
+    if (step === 1) {
+      console.warn(`[stall] ${reason}：播放头前方 MSE 为空而预取缓存有货，从 ${at.toFixed(1)}s 重新加载`)
+      try { hls.startLoad(at) } catch {}
+    } else if (step === 2) {
+      console.warn(`[stall] ${reason}：重新加载无效，微跳 ${NUDGE_SEC}s 绕过可能被标记为 gap 的那一片`)
+      v.currentTime = at + NUDGE_SEC
+    } else if (step === 3) {
+      console.warn(`[stall] ${reason}：仍然冻住，重建 MediaSource（recoverMediaError）`)
+      try { hls.recoverMediaError() } catch {}
+    } else {
+      console.error(`[stall] ${reason}：四级自救全部无效，停在 ${at.toFixed(1)}s。这一条源大概率喂不进解码器，换条线路试试`)
+      deps.onGiveUp?.()
+    }
   }
 
   /** hls.js 报了非致命 bufferStalledError（每秒复发那个）。这是最准的入口 */
@@ -93,13 +164,14 @@ export function useStallRecovery(deps: StallRecoveryDeps) {
     if (lastTime < 0 || Math.abs(v.currentTime - lastTime) > 0.05) {
       lastTime = v.currentTime
       lastMoveAt = now
+      step = 0          // 又在往前播了 → 阶梯归零，下次卡顿重新从最轻的那一级开始
       return
     }
     if (now - lastMoveAt >= FROZEN_MS) attempt('心跳发现播放头冻住')
   }
 
   /** 换流/切集时清掉采样，否则上一集的时间点会被当成「冻住」 */
-  const reset = () => { lastTime = -1; lastFixAt = 0 }
+  const reset = () => { lastTime = -1; lastFixAt = 0; step = 0 }
 
   return { onBufferStalled, tick, reset }
 }

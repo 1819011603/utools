@@ -111,7 +111,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   const {
     getAheadBuffered, getCachedAhead, createHlsFragLoader, triggerAdaptivePrefetch,
     startOnePrefetch, strategy, resetStrategy, tick: prefetchTick, primePrefetch, getStuckSegment, laneDead,
-    reviveLanes, purgePlayedSegments,
+    reviveLanes, purgePlayedSegments, getLoaderActivity, isSegCached,
   } = prefetch
 
   // 双通道实际有没有跑起来：真实请求连续失败会把某条 lane 熔断（见 useHlsPrefetch 的 markLaneFail）。
@@ -136,6 +136,14 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     getHls: () => hls,
     getAheadBuffered,
     getCachedAhead,
+    // 冻屏现场要打的两件事：hls.js 还在跟我们要片吗、那一片在缓存里吗
+    getLoaderActivity,
+    isSegCached,
+    // 四级全过不去 → 明确报出来。转圈遮罩自己不会消失，不说话用户只能一直等
+    onGiveUp: () => {
+      isBuffering.value = false
+      errorMessage.value = '画面卡住且四级自救均无效：取回的数据喂不进解码器，换一条线路试试'
+    },
   })
 
   // 清单加载器：命中「探测刚下载过的同一份 m3u8」就省掉一次 RTT（实现见 ./engine/playlistLoader.ts）
