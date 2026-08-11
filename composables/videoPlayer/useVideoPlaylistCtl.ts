@@ -171,10 +171,18 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
   /** 切集中（含取址/探测/建流）。UI 据此给上/下一集按钮上 loading，别只有画面中央一个转圈 */
   const isSwitching = ref(false)
 
-  const playByIndex = async (index: number) => {
+  /**
+   * 正在飞的这一轮是不是「自动下一集」发起的（播完 / 跳片尾），而不是用户点的。
+   * 用来区分两种「切集期间又要下一集」：自动那次已经把用户想要的下一集切上了，
+   * 用户这一下不该再加一集；用户自己连点两下才该跳两集。
+   */
+  let inFlightAuto = false
+
+  const playByIndex = async (index: number, opts: { auto?: boolean } = {}) => {
     if (index < 0 || index >= playlist.value.length) return
     if (switching) { queuedIndex = index; return }
     switching = true
+    inFlightAuto = !!opts.auto
     isSwitching.value = true
     try {
       await doPlayByIndex(index)
@@ -189,17 +197,20 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
       while (queuedIndex !== null && queuedIndex !== currentIndex.value && drained++ < 3) {
         const next = queuedIndex
         queuedIndex = null
+        inFlightAuto = false   // 排进队的一律是用户点的（自动那条在 playNext 里就返回了）
         await doPlayByIndex(next)
       }
     } finally {
       queuedIndex = null
       switching = false
+      inFlightAuto = false
       isSwitching.value = false
     }
   }
 
   const doPlayByIndex = async (index: number) => {
     saveCurrentProgress()
+    const cameFrom = currentIndex.value
     currentIndex.value = index
     resetRefetchQuota()   // 换了一集，「重新取址」的额度重新给一次
 
@@ -208,7 +219,17 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
     const t0 = performance.now()
     const warmHit = hasWarmLazyUrl(playlist.value[index])
     const realUrl = await resolveLazyUrl(playlist.value[index])
-    if (!realUrl) return
+    /*
+     * 取址失败必须把集数**退回去**。
+     *
+     * 早先这里只是 `return`，而 `currentIndex` 在上面已经乐观地前进了一格，于是：
+     * ① 画面还停在上一集，集数却涨了 —— 用户看到的是「自动下一集没跳过去」；
+     * ② 紧接着无论是 `ended` 还是他自己点「下一集」，基准都从那个**虚假的**集数再 +1,
+     *    于是漏掉一集，表现就是「手动点一下跳了两集」。
+     * 两个症状本是同一件事的前后两幕（按需取址的站点地址带时效签名、还会限流，失败并不罕见）。
+     * 错误提示由 resolveWithUi 负责，这里只把状态摆回真实的那一集。
+     */
+    if (!realUrl) { currentIndex.value = cameFrom; return }
     // 切集慢在哪一段，光看转圈看不出来 → 把取址耗时和「预热有没有命中」打出来
     console.log(`切集取址 ${Math.round(performance.now() - t0)}ms（预热${warmHit ? '命中' : '未命中'}）`)
 
@@ -300,7 +321,25 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
   }
 
   const playPrev = async () => { if (hasPrev.value) await playByIndex(currentIndex.value - 1) }
-  const playNext = async () => { if (hasNext.value) await playByIndex(currentIndex.value + 1) }
+
+  /**
+   * 下一集。`auto` = 由「播完」或「跳过片尾」发起，不是用户点的。
+   *
+   * 两者的目标算法必须分开，因为 `currentIndex` 在切集**一开始**就乐观地指向了目标集，
+   * 而这一轮要好几秒（按需取址 + 建流）。这几秒里画面上还是上一集：
+   *
+   * · 自动那条在切集期间一律作废——正在切的那一集就是「下一集」，再排一次就是跳两集。
+   *   （`ended` 在切集途中补一发、坏源一 attach 就 `ended`，都会撞上这里）
+   * · 用户那条在**自动**切集期间也作废：他看到画面没动以为没生效才点的，
+   *   他要的正是已经在飞的这一集。若按 `currentIndex + 1` 算就凭空多跳一集
+   *   —— 这就是「手动切下一集一下跳了两集」的另一半原因。
+   * · 但用户自己连点两下仍然跳两集（那时 `inFlightAuto` 为假，走 latest-wins 排队）：
+   *   那是明确的意图，不能一起吃掉。
+   */
+  const playNext = async (auto = false) => {
+    if (switching && (auto || inFlightAuto)) return
+    if (hasNext.value) await playByIndex(currentIndex.value + 1, { auto })
+  }
 
   const clearPlaylist = () => {
     playlist.value = []

@@ -67,7 +67,7 @@
           title="下一集（N）"
           @pointerenter="hasNext && prewarmNextNow()"
           @touchstart.passive="hasNext && prewarmNextNow()"
-          @click="playNext"
+          @click="playNext()"
         >
           <UIcon
             :name="isSwitching ? 'i-heroicons-arrow-path' : 'i-heroicons-forward-solid'"

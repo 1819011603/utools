@@ -167,7 +167,7 @@ export function useVideoEvents(deps: VideoEventsDeps) {
       const remaining = duration.value - currentTime.value
       if (remaining > 0 && remaining <= skipOutro.value && playlist.hasNext.value) {
         outroFired = true
-        void playlist.playNext()
+        void playlist.playNext(true)   // 自动：切集期间不再叠加（见 playNext 注释）
         return
       }
     }
@@ -371,7 +371,7 @@ export function useVideoEvents(deps: VideoEventsDeps) {
 
   const onVideoEnded = () => {
     isPlaying.value = false
-    if (playlist.hasNext.value) playlist.playNext()
+    if (playlist.hasNext.value) void playlist.playNext(true)   // 播完自动下一集：同上，auto
   }
 
   /** 页面卸载时清掉本模块起的定时器 */
