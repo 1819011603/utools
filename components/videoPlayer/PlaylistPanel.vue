@@ -35,6 +35,7 @@
         <div
           v-for="(item, index) in playlist"
           :key="index"
+          :ref="el => { if (index === currentIndex) curEl = el as HTMLElement }"
           class="rounded cursor-pointer transition-colors text-sm text-center px-2 py-2 truncate"
           :class="[
             index === currentIndex
@@ -67,4 +68,16 @@ const {
   getSavedProgress, getVideoName, playByIndex,
   refreshPlaylistLinks, clearAllProgress, clearPlaylist,
 } = useVideoPlayerCtx()
+
+/**
+ * 把当前集滚进视野（与全屏选集抽屉 EpisodeOverlay 同样的处置）。
+ *
+ * 这块是 `max-h-80` 的滚动区，78 集的剧要滚三四屏。切集后当前那格常常落在视野外，
+ * 于是「现在是第几集」得靠自己找那枚紫格子——用户的原话是「不知道播到第多少集了」。
+ * `block: 'nearest'` 而不是 'center'：已经在视野里就别动，否则每次切集整块都跳一下。
+ */
+const curEl = ref<HTMLElement | null>(null)
+watch([currentIndex, () => playlist.value.length], () => {
+  nextTick(() => curEl.value?.scrollIntoView({ block: 'nearest' }))
+}, { immediate: true })
 </script>

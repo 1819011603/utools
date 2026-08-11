@@ -18,7 +18,7 @@ import type { SiteSearchResult } from '../../composables/videoSearchRules'
 import { buildSearchUrl, findSearchRule } from '../../composables/videoSearchRules'
 import { cdndefendChallenge } from '../parsers/challenges/cdndefend'
 import { dropCookie, readCookie, saveCookie } from '../parsers/cookieStore'
-import { extractJsonItems, extractSearchItems, extractTotal, isCloudflareChallenge } from '../parsers/searchRule'
+import { extractJsonItems, extractSearchItems, extractTotal, hasNextPage, isCloudflareChallenge } from '../parsers/searchRule'
 import { absolutize, hostOf } from '../parsers/utils'
 import { fetchSitePage } from '../utils/siteFetch'
 
@@ -37,6 +37,8 @@ export default defineEventHandler(async (event): Promise<SiteSearchResult | PowC
   const siteId = (query.site as string)?.trim()
   const kw = (query.kw as string)?.trim()
   const step = (query.step as string) || 'challenge'
+  // 页码封顶 99：翻页是用户一页页点出来的，出现三位数只可能是拼错的地址
+  const pageNo = Math.min(Math.max(Number.parseInt((query.page as string) || '1', 10) || 1, 1), 99)
 
   if (!siteId || !kw) throw createError({ statusCode: 400, statusMessage: '缺少 site 或 kw 参数' })
 
@@ -132,7 +134,8 @@ export default defineEventHandler(async (event): Promise<SiteSearchResult | PowC
       const { ok, items } = extractJsonItems(res.body, rule, rule.homepage, await resolvePicBase(''))
       if (ok) {
         setResponseHeader(event, 'Cache-Control', 'no-store')
-        return { siteId, items, siteSearchUrl: rule.homepage }
+        // 接口型站点目前都是一发给完，没有翻页这回事
+        return { siteId, items, page: 1, siteSearchUrl: rule.homepage }
       }
       console.log(`[search] ${siteId} 接口回了空载荷，第 ${i + 1}/${tries} 次`)
     }
@@ -140,7 +143,9 @@ export default defineEventHandler(async (event): Promise<SiteSearchResult | PowC
   }
 
   // ── 2b. 抓搜索页 ──
-  const searchUrl = absolutize(buildSearchUrl(rule.url, kw, token), rule.homepage)
+  // 第 1 页仍走 url：翻页模板只在真要翻页时才用得上，让「每次搜索」这条主路径原样不动
+  const tpl = pageNo > 1 && rule.pageUrl ? rule.pageUrl : rule.url
+  const searchUrl = absolutize(buildSearchUrl(tpl, kw, token, pageNo), rule.homepage)
   const page = await grab(searchUrl)
 
   if (challenge?.detect(page.body)) return powOf(page.body)
@@ -163,5 +168,12 @@ export default defineEventHandler(async (event): Promise<SiteSearchResult | PowC
   // 交给前端按「该站没有这部片 + 去源站搜」来说，比一句「规则需要更新」有用
   const items = extractSearchItems(page.body, rule, searchUrl, await resolvePicBase(page.body))
   setResponseHeader(event, 'Cache-Control', 'no-store')
-  return { siteId, items, total: extractTotal(page.body, rule), siteSearchUrl: searchUrl }
+  return {
+    siteId,
+    items,
+    total: extractTotal(page.body, rule),
+    page: pageNo,
+    hasMore: hasNextPage(page.body, rule, pageNo),
+    siteSearchUrl: searchUrl,
+  }
 })

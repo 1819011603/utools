@@ -33,6 +33,23 @@ export interface SearchRule {
   url?: string
 
   /**
+   * 翻页地址模板：同 `url`，另外认一个 `%PAGE%`（页码，从 1 起）。**留空 = 这个站不翻页**。
+   *
+   * 第 1 页仍走 `url`（那是每次搜索都要跑的路径，不必为翻页改道），只有第 2 页起用它。
+   */
+  pageUrl?: string
+
+  /**
+   * 从「下一页」链接里抠出**它指向的页码**（第 1 个捕获组），大于当前页才算真有下一页。
+   *
+   * 为什么不按「页面上有没有『下一页』」判：MacCMS 的分页条**最后一页照样渲染那颗按钮**，
+   * 只是让它指回自己（实测 ylsp 第 17 页的「下一页」href 还是 17）。只看有没有的话，
+   * 用户会在最后一页上一直点得到「下一页」，点了还停在原地。
+   * 而 ncat 相反：最后一页干脆不渲染那个 `<a>`（抠不到 = 没有下一页），同一条判据也成立。
+   */
+  nextPageRe?: string
+
+  /**
    * 请求要带的 Referer。留空 = 不带。
    * 有的接口靠它认「这是从站点页面发起的」（实测 kpkuang 的搜索接口不带就恒回空结果）。
    */
@@ -167,6 +184,10 @@ export const SEARCH_RULES: SearchRule[] = [
     homepage: 'https://www.ylsp.lv',
     // 关键词直接嵌在路径里，后面那串短横是 MacCMS 的空筛选位
     url: '/vodsearch/%KW%-------------/',
+    // 页码占的是第 11 个筛选位（短横总数不变，只是把那一格填上数字）
+    pageUrl: '/vodsearch/%KW%----------%PAGE%---/',
+    // 分页条上「下一页」那颗；最后一页它指回自己，所以要比页码而不是看有没有
+    nextPageRe: 'href="[^"]*-(\\d+)---/"[^>]*class="page-link page-next"[^>]*title="下一页"',
     // 卡片收在「详情」按钮上：每张卡恰好一个 play-btn-o，用它当尾锚不会跨卡
     itemRe: '<div class="module-card-item module-item">[\\s\\S]*?class="play-btn-o"[\\s\\S]*?</a>',
     playRe: 'href="(/play/[^"]+)"',
@@ -195,6 +216,9 @@ export const SEARCH_RULES: SearchRule[] = [
     name: '网飞猫',
     homepage: 'https://www.ncat22.com',
     url: '/search?t=%TOKEN%&k=%KW%',
+    pageUrl: '/search?t=%TOKEN%&k=%KW%&page=%PAGE%',
+    // 最后一页压根不渲染这颗按钮（实测第 5 页 / 共 90 部就没有了），抠不到即到底
+    nextPageRe: 'href="[^"]*page=(\\d+)[^"]*"[^>]*class="page-item-next"',
     challenge: 'cdndefend',
     // 站点任意页面的搜索表单里都有这个隐藏字段，抓首页最稳
     token: { re: 'name="t" value="([^"]+)"' },
@@ -285,10 +309,11 @@ export function buildSiteSearchUrl(rule: SearchRule, kw: string): string | null 
   return buildSearchUrl(abs, kw)
 }
 
-export function buildSearchUrl(template: string, kw: string, token = ''): string {
+export function buildSearchUrl(template: string, kw: string, token = '', page = 1): string {
   return template
     .replace(/%KW%/g, encodeURIComponent(kw))
     .replace(/%TOKEN%/g, encodeURIComponent(token))
+    .replace(/%PAGE%/g, String(page))
     .replace(/%TS%/g, String(Date.now()))
     .replace(/%CB%/g, 'jQuery' + Math.floor(Math.random() * 1e10))
 }
@@ -315,6 +340,10 @@ export interface SiteSearchResult {
   items: SearchItem[]
   /** 站点自报的总数，用来提示「只列出了第一页」 */
   total?: number
+  /** 这一份是第几页（从 1 起）。不支持翻页的站点恒为 1 */
+  page?: number
+  /** 还有下一页（判据见 SearchRule.nextPageRe）。规则没配翻页时恒为 false */
+  hasMore?: boolean
   /**
    * 站点在服务端被挡住了（目前只有 Cloudflare 人机校验这一种）。
    * 不当错误报：这不是我们坏了，用户在源站自己搜还是能搜到的。

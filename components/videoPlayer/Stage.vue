@@ -234,7 +234,17 @@
     -->
     <div class="px-4 sm:px-0 pt-3 flex items-center gap-2 flex-wrap text-sm">
       <span class="font-semibold truncate max-w-full">{{ playlistTitle || '放映厅' }}</span>
-      <UBadge v-if="playlistTitle && playlist.length > 1" color="violet" variant="soft" size="xs">
+      <!--
+        「第 N/M 集」是这一行最该显眼的东西，所以给实色徽标（其余都是 soft）。
+        原来这里只有一枚写着集名的徽标，而且**挂着 `playlistTitle &&` 的条件** ——
+        交接槽/直链进来的列表多半没有剧名，于是整页找不到任何「现在是第几集」的字样：
+        画面里那份（TopBar）只在全屏出，选集面板要自己数格子。用户原话「不知道播到第多少集了」。
+        集名单独一枚 soft 徽标：它常常就是「index.m3u8」这种没信息量的东西，不能拿它当集数用
+      -->
+      <UBadge v-if="playlist.length > 1" color="violet" variant="solid" size="xs">
+        第 {{ currentIndex + 1 }}/{{ playlist.length }} 集
+      </UBadge>
+      <UBadge v-if="playlist.length > 1 && currentVideoName" color="violet" variant="soft" size="xs">
         {{ currentVideoName }}
       </UBadge>
       <UBadge :color="isHls ? 'violet' : 'blue'" variant="soft" size="xs">{{ isHls ? 'HLS/M3U8' : 'MP4' }}</UBadge>
@@ -285,7 +295,7 @@ const {
   isHls, isPlaying, isBuffering, isResolvingUrl, resolveStage, isProbing, isFullscreen, isVideoLoaded,
   showControls,  showPlayIcon,
   currentTime, duration,
-  hlsStats, prefetchInfo, playlist, playlistTitle, strategyLabel, showAdvancedProxy,
+  hlsStats, prefetchInfo, playlist, playlistTitle, currentIndex, strategyLabel, showAdvancedProxy,
   playlistSource, backToParseSource,
   // 选集按钮在顶部信息条里（VideoPlayerTopBar），这里只留抽屉本身要用的状态
   currentVideoName, volumeIcon,

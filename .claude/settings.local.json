@@ -55,7 +55,10 @@
       "Bash(python3 - *)",
       "Bash(\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless=new --disable-gpu --no-first-run --user-data-dir=/tmp/cprof --virtual-time-budget=25000 --dump-dom \"http://localhost:3000/video-search?kw=%E4%B8%9C%E5%AE%AB\")",
       "Bash(timeout 100 \"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless=new --disable-gpu --no-first-run --user-data-dir=/tmp/cprof4 --virtual-time-budget=30000 --dump-dom \"http://localhost:3000/video-search?kw=%E4%B8%9C%E5%AE%AB\")",
-      "Bash(lsof -ti:3000)"
+      "Bash(lsof -ti:3000)",
+      "Bash(ffmpeg -hide_banner -loglevel error -f lavfi -i color=c=black:s=128x72:d=20 -c:v libx264 -pix_fmt yuv420p -y public/__t.mp4)",
+      "Bash(sed -i '' 's/length: 80 }/length: 150 }/; s/children\\\\[69\\\\]/children[139]/; s/第 70 集/第 140 集/g; s/children\\\\[74\\\\]/children[144]/; s/第 75 集/第 145 集/g' ep80.mjs)",
+      "Bash(node ep80.mjs)"
     ],
     "ask": [
       "Bash(rm *)",

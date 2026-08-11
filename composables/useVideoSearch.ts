@@ -28,6 +28,10 @@ export interface SiteSearchState {
   items: SearchItem[]
   /** 站点自报的总数，用来提示「只列出了第一页」 */
   total?: number
+  /** 当前看的是第几页（从 1 起）。翻页是**按站**的：各站的页码互不相干 */
+  page: number
+  /** 还有下一页（服务端按分页条实测，见 SearchRule.nextPageRe） */
+  hasMore?: boolean
   error?: string
   /** 「在源站搜」按钮的落点（blocked/manual/空结果时都要有） */
   siteSearchUrl?: string
@@ -40,8 +44,12 @@ export interface SiteSearchState {
 /** 反爬令牌，按 host 存。解析页有它自己那份（powCookie），这里不去打通——两边都只是缓存，各自算一次的代价可接受 */
 const powTokens = new Map<string, string>()
 
-/** 结果缓存：同一关键词切回来不重搜。键含站点，因为「重试本站」只该刷新那一站 */
+/**
+ * 结果缓存：同一关键词切回来不重搜。键含站点，因为「重试本站」只该刷新那一站；
+ * 也含页码——翻回上一页是常态（「刚那张海报在第几页来着」），不该再发一次请求。
+ */
 const memCache = new Map<string, SiteSearchResult>()
+const cacheKeyOf = (siteId: string, kw: string, page: number) => `${siteId}|${kw}|${page}`
 
 const CACHE_KEY = 'video-search-last-result'
 const CACHE_TTL = 60 * 60 * 1000
@@ -58,6 +66,7 @@ function initialStates(): SiteSearchState[] {
     homepage: r.homepage,
     status: r.manual ? 'manual' : 'idle',
     items: [],
+    page: 1,
     reason: r.manual?.reason,
     siteSearchUrl: r.manual?.searchUrl,
   }))
@@ -84,12 +93,12 @@ export function useVideoSearch() {
   }
 
   /** 搜一个站。走完两步式 PoW，结果写回它自己那份状态，不碰别人 */
-  const searchSite = async (siteId: string, kw: string, useCache = true) => {
+  const searchSite = async (siteId: string, kw: string, useCache = true, page = 1) => {
     const rule = SEARCH_RULES.find(r => r.siteId === siteId)
     if (!rule || rule.manual) return
 
     const st = stateOf(siteId)
-    const cacheKey = `${siteId}|${kw}`
+    const cacheKey = cacheKeyOf(siteId, kw, page)
     if (useCache) {
       const hit = memCache.get(cacheKey)
       if (hit) { applyResult(st, hit, kw); return }
@@ -97,13 +106,16 @@ export function useVideoSearch() {
 
     st.status = 'searching'
     st.items = []
+    // 页码先写上：骨架屏那一行要说清「正在翻到第几页」，不然翻页期间界面上看不出发生了什么
+    st.page = page
+    st.hasMore = undefined
     st.siteSearchUrl = buildSiteSearchUrl(rule, kw) ?? rule.homepage
     st.error = undefined
     st.powTried = undefined
 
     const host = hostOfUrl(rule.homepage)
     const call = (cookie: string) => $fetch<SiteSearchResult & { needPow?: boolean; c?: string; n1?: number; target?: [number, number] }>('/api/search', {
-      query: { site: siteId, kw, step: cookie ? 'extract' : 'challenge', ...(cookie ? { cookie } : {}) },
+      query: { site: siteId, kw, step: cookie ? 'extract' : 'challenge', ...(page > 1 ? { page } : {}), ...(cookie ? { cookie } : {}) },
     })
 
     try {
@@ -119,7 +131,7 @@ export function useVideoSearch() {
       // 409 = 服务端说令牌没过：丢掉重来一轮（只重来一次，避免死循环）
       if ((e?.statusCode || e?.response?.status) === 409 && powTokens.has(host)) {
         powTokens.delete(host)
-        return searchSite(siteId, kw, false)
+        return searchSite(siteId, kw, false, page)
       }
       st.status = 'error'
       st.error = e?.statusMessage || e?.data?.statusMessage || e?.message || '搜索失败'
@@ -131,6 +143,8 @@ export function useVideoSearch() {
     const rule = SEARCH_RULES.find(r => r.siteId === st.siteId)
     st.items = res.items ?? []
     st.total = res.total
+    st.page = res.page ?? 1
+    st.hasMore = res.hasMore
     // 前端拼得出「带关键词的页面地址」就用前端的：服务端返回的那个是它自己抓的地址，
     // 对 kpkuang 这类站点是接口 URL（点过去一坨 JSON），只有 ncat 那种要令牌的才非它不可
     st.siteSearchUrl = (rule && buildSiteSearchUrl(rule, kw)) ?? res.siteSearchUrl ?? st.siteSearchUrl
@@ -156,8 +170,19 @@ export function useVideoSearch() {
   /** 只重搜一个站（tab 里那颗「重试」）。绕开缓存，否则重试等于什么都没做 */
   const retrySite = (siteId: string) => {
     if (!keyword.value) return
-    memCache.delete(`${siteId}|${keyword.value}`)
-    void searchSite(siteId, keyword.value, false)
+    const page = stateOf(siteId).page || 1
+    memCache.delete(cacheKeyOf(siteId, keyword.value, page))
+    void searchSite(siteId, keyword.value, false, page)
+  }
+
+  /**
+   * 翻到某一页（只动这一个站）。**页码不进地址栏**：地址栏那份是「搜了什么」，
+   * 而各站各有各的页码，写进去要么只写一个站（另外几个站的页码就成了谎话），
+   * 要么拼成一串没人看得懂的东西。翻页是当下的浏览动作，刷新回到第 1 页正合适。
+   */
+  const goPage = (siteId: string, page: number) => {
+    if (!keyword.value || page < 1) return
+    void searchSite(siteId, keyword.value, true, page)
   }
 
   // ── 上次结果的缓存 ──
@@ -185,14 +210,19 @@ export function useVideoSearch() {
       states.value = initialStates().map(s => {
         const old = c.states.find(x => x.siteId === s.siteId)
         // 上次没搜完的（searching/idle）不复原，让它显示成没搜过
+        // page 兜一道 1：这份缓存可能是加翻页之前写下的，那时没有这个字段
         return old && (old.status === 'done' || old.status === 'blocked' || old.status === 'error')
-          ? { ...s, ...old, powTried: undefined }
+          ? { ...s, ...old, page: old.page || 1, powTried: undefined }
           : s
       })
       applySiteSearchUrls(c.kw)
       // 内存缓存也灌一份，这样「切 tab / 重新点搜索」同样不发请求
       for (const s of states.value) {
-        if (s.status === 'done') memCache.set(`${s.siteId}|${c.kw}`, { siteId: s.siteId, items: s.items, total: s.total, siteSearchUrl: s.siteSearchUrl })
+        if (s.status === 'done') {
+          memCache.set(cacheKeyOf(s.siteId, c.kw, s.page || 1), {
+            siteId: s.siteId, items: s.items, total: s.total, page: s.page, hasMore: s.hasMore, siteSearchUrl: s.siteSearchUrl,
+          })
+        }
       }
       return true
     } catch { return false }
@@ -209,5 +239,5 @@ export function useVideoSearch() {
     states.value = initialStates()
   }
 
-  return { keyword, states, searching, totalFound, search, retrySite, saveCache, restoreCache, reset }
+  return { keyword, states, searching, totalFound, search, retrySite, goPage, saveCache, restoreCache, reset }
 }

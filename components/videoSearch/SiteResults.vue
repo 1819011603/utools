@@ -9,7 +9,7 @@
       <div class="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
         <UIcon name="i-heroicons-arrow-path" class="w-4 h-4 animate-spin text-rose-400" />
         <span>
-          正在搜「{{ keyword }}」…
+          正在搜「{{ keyword }}」<template v-if="state.page > 1">第 {{ state.page }} 页</template>…
           <!-- 算工作量证明那几百毫秒界面上什么都没有，不说一句会以为卡住了 -->
           <template v-if="state.powTried">（正在过站点校验，已试 {{ state.powTried.toLocaleString() }} 次）</template>
         </span>
@@ -135,8 +135,11 @@
       <div class="flex items-center justify-between gap-2 text-xs text-gray-500 dark:text-gray-400">
         <span class="truncate">
           <span class="font-medium text-gray-700 dark:text-gray-200">{{ state.items.length }}</span> 个结果
+          <!-- 能翻页时就别再说「只列第一页」了：那句话是「后面的看不了」的意思，
+               而现在下面就有翻页条 —— 说成「第 N 页」才对得上用户能做的事 -->
+          <template v-if="paged">· 第 {{ state.page }} 页</template>
           <template v-if="state.total && state.total > state.items.length">
-            · 站点共 {{ state.total }} 部，这里只列第一页
+            · 站点共 {{ state.total }} 部<template v-if="!paged">，这里只列第一页</template>
           </template>
           · 点一格在新标签解析
         </span>
@@ -155,6 +158,31 @@
       </div>
 
       <VideoSearchResultGrid :items="state.items" @open="openParse" />
+
+      <!--
+        翻页条只在**这个站真能翻**时出现（规则表配了 pageUrl + 服务端实测到下一页）。
+        各站的页码互不相干：翻的是当前选中的这一个站，别的站原地不动。
+        「上一页」在第 1 页禁用而不是隐藏 —— 隐藏会让「下一页」左右横跳一格
+      -->
+      <div v-if="paged" class="flex items-center justify-center gap-3 pt-1">
+        <UButton
+          size="xs"
+          variant="soft"
+          color="gray"
+          icon="i-heroicons-chevron-left-20-solid"
+          :disabled="state.page <= 1"
+          @click="$emit('page', state.page - 1)"
+        >上一页</UButton>
+        <span class="text-xs tabular-nums text-gray-500 dark:text-gray-400">第 {{ state.page }} 页</span>
+        <UButton
+          size="xs"
+          variant="soft"
+          color="gray"
+          trailing-icon="i-heroicons-chevron-right-20-solid"
+          :disabled="!state.hasMore"
+          @click="$emit('page', state.page + 1)"
+        >下一页</UButton>
+      </div>
     </template>
   </div>
 </template>
@@ -162,8 +190,11 @@
 <script setup lang="ts">
 import type { SiteSearchState } from '~/composables/useVideoSearch'
 
-defineProps<{ state: SiteSearchState; keyword: string }>()
-defineEmits<{ retry: [] }>()
+const props = defineProps<{ state: SiteSearchState; keyword: string }>()
+defineEmits<{ retry: []; page: [number] }>()
+
+/** 这个站有没有翻页这回事：还有下一页、或者已经翻出去过（能翻回来） */
+const paged = computed(() => !!props.state.hasMore || props.state.page > 1)
 
 const toast = useToast()
 const pasted = ref('')

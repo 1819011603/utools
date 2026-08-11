@@ -83,9 +83,14 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
 
   // 双通道需要分片「直连」和「经代理」两条路都通。有实测就用实测，否则按当前配置推断。
   const dualChannelUnavailable = computed(() => {
+    // 已经开着就别再说「不可用」：那条 lane 可能是靠**迟到判定**开的（两条通道各自实测 ok，
+    // 只是有一条没在预算内回来 → 矩阵里留着 'skip'）。此时按矩阵读会得出相反的结论，
+    // 界面上就是「灯亮着、提示说不可用」（踩过）
+    if (dualChannel.value) return false
     const r = probeResult.value
     if (r && !r.degraded && axisMeasured(r.segment)) {
-      return !(r.segment.direct === 'ok' && r.segment.disguise === 'ok')
+      // **只把 'fail'/'unknown' 当不可用**：'skip' 是「没等到」，不是「测过不通」
+      return r.segment.direct !== 'ok' || (r.segment.disguise !== 'ok' && r.segment.disguise !== 'skip')
     }
     // 无探测数据（分片轴没测到 / 走了兜底阶梯）：跟 getProxyUrl 对分片(.ts)的判定保持一致——
     // 分片走代理时直连 lane 必 403/CORS，没有分流可言。
@@ -102,6 +107,7 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     const r = probeResult.value
     if (r && !r.degraded && axisMeasured(r.segment)) {
       if (r.segment.direct !== 'ok') return '实测分片无法直连（须走代理）→ 直连通道会失败'
+      if (r.segment.disguise === 'skip') return '分片的代理通道这一轮没等到结论（起播不为它多等）→ 等它回来会自动开'
       return '实测分片无法经代理获取（如源站端口非标被 CF 吞、服务器 IP 被封）→ 代理通道会失败'
     }
     return '需分片直连可达才有效：分片走代理时直连通道会 403'
@@ -259,6 +265,15 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
       ladderMode.value = false
       applyConnConfig(cfg)
       console.log('可达性探测:', describeProbe(r), r)
+      // 迟到的双通道结论：起播不等它（它只影响预取分流）。等回来了再把第二条 lane 打开，
+      // 前提是这份结论还属于当前这条地址 —— 中途切了集就该作废，不能把上一集的判断按到这一集上
+      if (r.dualChannelLate) {
+        void r.dualChannelLate.then(late => {
+          if (!late || dualChannel.value || probedUrl !== url) return
+          dualChannel.value = true
+          console.log('双通道（迟到判定）：分片直连与代理均实测可达 → 预取开第二条 lane')
+        })
+      }
     } else {
       ladderMode.value = true                    // 三条路都没测通 → 交回阶梯继续盲试
       applyReachabilityStep(autoStrategyStep.value)

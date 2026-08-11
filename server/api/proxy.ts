@@ -182,7 +182,21 @@ export default defineEventHandler(async (event) => {
     isM3u8Url(targetUrl)
   ) {
     const text = await response.text()
-    const baseUrl = targetUrl.replace(/\/[^/?#]*(\?.*)?$/, '/')
+    // ── 相对分片 URI 的基准必须是**重定向之后**的最终地址，不是我们请求的那个 ──
+    //
+    // 浏览器和 hls.js 天然按最终地址还原相对 URI（RFC 3986 的 base 就是最终 URI），
+    // 这里跟着来才对得上。客户端那条路早已这么做了（useM3u8 取 res.url、
+    // playlistLoader 把 finalUrl 交给 hls.js），漏的一直是服务端这一半。
+    //
+    // 实测 ncat22 这条流：清单在 `64.112.77.160:21305`，一请求就 302 到同 IP 的 `:11305`，
+    // 而 `:21305` 是个**健康检查口** —— 对 `.ts` 一律回
+    // **200 + `content-type: video/mp2t` + 3 字节正文 `OK\n`**。于是拿错基准的后果是：
+    //   · 分片被拼回 `:21305` → 每片都 200、还带着视频 MIME；
+    //   · 可达性探测只看 `res.ok` → 分片轴判 `ok`（假阳性，比 403 难查得多）；
+    //   · hls.js 把 3 字节 "OK" 当 TS 解 → fatal MEDIA_ERROR，
+    //     报出来是「取回的数据不是可播的视频，换一条线路试试」，看着像源站挂了或正则写坏了。
+    // 只有服务端看得见重定向链（跨域响应在浏览器侧读不到），所以这一刀只能落在这。
+    const baseUrl = (response.url || targetUrl).replace(/\/[^/?#]*(\?.*)?$/, '/')
     const noseg = query.noseg === '1'
     const rewritten = rewriteM3u8(text, baseUrl, origin, referer, noseg, noref)
 

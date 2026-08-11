@@ -66,9 +66,35 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
     return dur > 0 ? dur - Math.max(5, media.skipOutro.value) : Infinity
   }
 
+  const watchHistory = useWatchHistory()
+
+  /**
+   * 「这部剧看到第几集」——按剧记一条，供解析页显示「继续观看」（见 useWatchHistory）。
+   *
+   * 挂在进度保存这条路上而不是切集处：切集只在换集那一下发生，而用户看完第 10 集就关页面时
+   * 压根不会再切集，那一集就记不下来。进度保存是周期性的，覆盖「看到哪就记到哪」。
+   * 单集列表不记：那不是「剧」，记了只会把续看列表塞满一堆一次性视频。
+   */
+  const recordWatchProgress = () => {
+    if (playlist.value.length <= 1) return
+    const src = handoff.playlistSource.value
+    const title = handoff.playlistTitle.value || ''
+    if (!title && !src?.pageUrl) return      // 既没剧名也没来源页 → 无从归属到某部剧
+    watchHistory.recordWatch({
+      title,
+      pageUrl: src?.pageUrl,
+      line: src?.line,
+      lineName: src?.lineName,
+      index: currentIndex.value,
+      epName: handoff.getVideoName(playlist.value[currentIndex.value] || '', currentIndex.value),
+      total: playlist.value.length,
+    })
+  }
+
   const saveCurrentProgress = () => {
     const key = progressKey()
     if (!key || media.currentTime.value <= 0) return   // 还没播就别动已有记录（切集时会经过这里）
+    recordWatchProgress()
     if (media.currentTime.value >= finishedThreshold()) {
       // 看完了：清掉记录，下次从头开始
       if (savedProgress.value[key] !== undefined) {

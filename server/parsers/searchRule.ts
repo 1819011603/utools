@@ -131,6 +131,16 @@ export function extractTotal(html: string, rule: SearchRule): number | undefined
 }
 
 /**
+ * 还有没有下一页。判据是「『下一页』链接指向的页码 > 当前页」，不是「有没有那颗按钮」
+ * —— MacCMS 的分页条在最后一页照样渲染它、只是指回自己（见 SearchRule.nextPageRe）。
+ */
+export function hasNextPage(html: string, rule: SearchRule, page: number): boolean {
+  if (!rule.pageUrl || !rule.nextPageRe) return false
+  const n = Number.parseInt(html.match(new RegExp(rule.nextPageRe, 'i'))?.[1] ?? '', 10)
+  return Number.isFinite(n) && n > page
+}
+
+/**
  * 认出 Cloudflare 的人机校验。
  *
  * 判据优先看响应头 `cf-mitigated: challenge`（明确、不受页面文案影响），

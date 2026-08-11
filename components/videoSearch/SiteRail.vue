@@ -34,13 +34,21 @@
       **所有折叠相关的类都带 md: 前缀**：窄屏没有折叠这回事，漏一个前缀就是「手机上站名全没了」
     -->
     <div class="flex md:flex-col gap-1.5 overflow-x-auto md:overflow-visible pb-2 md:pb-0 -mx-1 px-1 md:mx-0 md:px-0">
+      <!--
+        **md 上格子高度写死，两种状态必须一样高**（`md:h-12` + `md:py-0`）：
+        折叠态是「缩写 + 数字」两行、展开态是一行，靠内容撑高的话整列会矮七十多像素。
+        而 hover 展开正是靠外层的 mouseenter/mouseleave 驱动的 —— 列表一变矮，
+        光标底下那一格就跑到列表外面去了 → mouseleave → 收起 → 又长回来 → mouseenter，
+        表现是**鼠标停在最下面那几格上一直闪个不停**（越靠底部越明显，上面几格因为位移小不会触发）。
+        高度锁死之后展开只往右撑宽，纵向不再位移，这个环就断了
+      -->
       <button
         v-for="(s, i) in states"
         :key="s.siteId"
         type="button"
         :aria-pressed="s.siteId === modelValue"
         class="wf-fade-up group relative shrink-0 md:w-full flex items-center gap-2.5 rounded-xl
-               py-2.5 text-sm text-left cursor-pointer select-none
+               py-2.5 md:py-0 md:h-12 text-sm text-left cursor-pointer select-none
                transition-all duration-300 hover:-translate-y-px active:translate-y-0 active:scale-[0.985]
                focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-400"
         :class="[

@@ -128,6 +128,32 @@
         </template>
       </p>
 
+      <!--
+        搜过的片名。摆成一行小胶囊而不是一张历史卡片：这一页的主角是海报网格，
+        而历史的用处只有一个——**点一下重搜**（追剧就是天天搜同一个名字）。
+        限 12 条：一行扫得完，再多就成了另一块要读的东西
+      -->
+      <div v-if="kwHistory.length" class="wf-fade-up flex items-center justify-center gap-1.5 flex-wrap" style="animation-delay: 140ms">
+        <UIcon name="i-heroicons-clock" class="w-3.5 h-3.5 shrink-0 text-gray-400" />
+        <button
+          v-for="h in kwHistory.slice(0, 12)"
+          :key="h.timestamp"
+          type="button"
+          class="px-2.5 py-1 rounded-full text-xs cursor-pointer transition-all duration-200
+                 ring-1 hover:-translate-y-px active:translate-y-0"
+          :class="h.data.kw === keyword
+            ? 'bg-rose-500/10 text-rose-600 dark:text-rose-300 ring-rose-300/70 dark:ring-rose-400/25 font-medium'
+            : 'bg-white/70 dark:bg-white/[0.06] text-gray-500 dark:text-gray-400 ring-black/5 dark:ring-white/10 hover:text-rose-600 dark:hover:text-rose-300 hover:ring-rose-200 dark:hover:ring-rose-400/20'"
+          @click="input = h.data.kw; run(h.data.kw)"
+        >{{ h.data.kw }}</button>
+        <button
+          type="button"
+          class="px-2 py-1 rounded-full text-xs text-gray-400 hover:text-red-500 cursor-pointer transition-colors"
+          title="清空搜索历史"
+          @click="clearKwHistory"
+        >清空</button>
+      </div>
+
       <div
         v-if="keyword"
         class="wf-fade-up rounded-2xl bg-white/70 dark:bg-white/[0.04] backdrop-blur-sm
@@ -175,6 +201,7 @@
             :state="activeState"
             :keyword="keyword"
             @retry="retrySite(activeState.siteId)"
+            @page="goPage(activeState.siteId, $event)"
           />
         </div>
       </div>
@@ -201,7 +228,7 @@
 </template>
 
 <script setup lang="ts">
-const { keyword, states, searching, totalFound, search, retrySite, saveCache, restoreCache, reset } = useVideoSearch()
+const { keyword, states, searching, totalFound, search, retrySite, goPage, saveCache, restoreCache, reset } = useVideoSearch()
 
 const input = ref('')
 const focused = ref(false)
@@ -251,12 +278,24 @@ const activeState = computed(() => states.value.find(s => s.siteId === activeId.
 const autoCount = computed(() => states.value.filter(s => s.status !== 'manual').length)
 const manualNames = computed(() => states.value.filter(s => s.status === 'manual').map(s => s.name).join('、'))
 
+// ── 搜索历史 ──
+// 与解析历史同一套（`utools-history-video-search`，含持久化授权那一整套说法）。
+// `bump: true`：反复搜同一个片名是常态（今天搜、明天接着看），默认「重复就丢弃」会让
+// 最常搜的词永远停在末尾、先被淘汰。
+const { addToHistory, getHistory, clearHistory } = useHistory<{ kw: string }>('video-search', { maxItems: 200 })
+const kwHistory = ref(getHistory())
+const clearKwHistory = () => { clearHistory(); kwHistory.value = [] }
+
 const run = (kw = input.value) => {
   const q = kw.trim()
   if (!q) return
   autoPicked.value = false
   search(q)
   syncUrlToQuery(q)
+  // 搜下去那一刻就记，不等结果：搜出 0 条也是一次「我搜过这个」，
+  // 而且各站是异步落地的，等「有结果了」再记就得挑一个说不清的时机
+  addToHistory({ kw: q }, { bump: true })
+  kwHistory.value = getHistory()
 }
 
 /** 第一个真有结果的站点，用来自动选中 */

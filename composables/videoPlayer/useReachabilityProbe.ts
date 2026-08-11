@@ -51,6 +51,12 @@ export interface ProbeResult {
   manifestChannel: Channel | null   // null = 三条路全不通
   segmentChannel: Channel | null
   dualChannel: boolean              // 分片「直连 + 代理」双向可达且最终走直连 → 双通道有效
+  /**
+   * 迟到的双通道结论：两条 lane 的探测有一条没在预算内回来时，等它回来再判一次。
+   * 起播**不等**它（双通道只是预取加速），上层拿到 true 再把第二条 lane 打开。
+   * 不做成 `dualChannel` 的一部分，是因为那个字段还要落进跨页缓存，promise 序列化不了。
+   */
+  dualChannelLate?: Promise<boolean>
   degraded: boolean                 // 探测本身没结论（全 unknown/全败）→ 调用方退回线性阶梯兜底
   segmentUrl?: string
   keyUrl?: string
@@ -283,13 +289,23 @@ export async function probeReachability(
     hdrOrigin: selfOrigin, hdrReferer: referer,
   }
 
-  // 探一根轴：直连 + 伪装并发，两者都没通才追加防盗链
+  /**
+   * 探一根轴：直连 + 伪装并发，两者都没通才追加防盗链。
+   *
+   * 返回 `{ pair, raw }` 供调用方做「迟到证据」用：
+   * `axis` 里 `'skip'` 的语义是**没等到**（不是测过不通），这条语义有别处在用（needsHeadersChannel），
+   * 所以迟到的结论不能回填进 axis；`raw` 是不受收工影响的原始结论，只作证据、不参与选通道。
+   */
   const probeAxis = async (axis: AxisProbe, urlOf: (c: Channel) => string) => {
     // 上次在这个 host 上直连是黑洞（超时不返回）→ 这回照样发探测，但**一分钟预算都不给它**，
     // 结论不等它（见 probeStore 的 isDirectDead：负面记忆 + 自愈，通了就清）
-    const w = makeAxisWaiter(expired, isDirectDead(probeHost) ? 0 : PRIORITY_BUDGET)
+    const budgetMs = isDirectDead(probeHost) ? 0 : PRIORITY_BUDGET
+    const axisT0 = performance.now()
+    const w = makeAxisWaiter(expired, budgetMs)
+    const raw: Partial<Record<Channel, Reach>> = {}
     const run = async (c: Channel) => {
       const { reach, ms, status } = await probeUrl(urlOf(c), timeoutMs, deadline)
+      raw[c] = reach                    // 原始结论恒记：收工与否只影响「用不用它选通道」，不影响它是不是事实
       if (w.st.settled) return          // 已收工：这条留在 'skip'（没等到，不是测过不通）
       axis[c] = reach
       axis.ms[c] = ms
@@ -311,7 +327,26 @@ export async function probeReachability(
     await w.wait(pair, HEDGE_DELAY)
     if (!w.st.settled && needsHeadersChannel(axis) && !expired()) {
       await w.wait(Promise.all([pair, run('headers')]))
+    } else if (!w.st.settled && !expired()) {
+      /*
+       * **HEDGE_DELAY 只用来决定「要不要补防盗链」，不能用它来收工。**
+       *
+       * 它（250ms）比本轴预算（PRIORITY_BUDGET 400ms）短，所以上面那次 wait 恒因 maxWait 返回，
+       * 预算那句 `hasOk && now - since >= budgetMs` 在常见路径上**一次都跑不到** —— 等于预算是死代码。
+       * 后果不是「少等一会儿」，而是**拿一份缺页的矩阵下判断**：慢的那条通道此刻还是 `skip`，
+       * 它的结果几百毫秒后才写进 axis（那时 pickChannel/dualChannel 早算完了）。
+       *
+       * 实测 mux 那条流：分片 disguise 158ms ok、direct 597ms ok，判定发生在 250ms，
+       * 于是 `segmentChannel = disguise`（**明明能直连却被按到代理上**，每片多绕一跳、吃我们的出口流量，
+       * 还可能撞上「经代理反而 403」那类源），`dualChannel` 也永远是 false —— 它的判据要求
+       * 直连与伪装两条都**实测** ok。矩阵事后看起来两条全 ok，最难查就在这儿。
+       *
+       * 所以：两条都还没齐时再等到本轴预算用完为止（从轴开始算，不与对冲窗口叠加）。
+       * 过时仍不候 —— 语义还是那一句「直连有 PRIORITY_BUDGET，过时不候」。
+       */
+      await w.wait(pair, Math.max(0, budgetMs - (performance.now() - axisT0)))
     }
+    return { pair, raw }
   }
 
   // ── 非 HLS（MP4 等）：只有一根轴，探文件本身即可，两轴同值 ──
@@ -427,7 +462,7 @@ export async function probeReachability(
   // AES key 折进分片轴：noseg=1 时服务端只重写 .m3u8，key 会留成直连地址、由浏览器直接取，
   // 所以 key 跟分片走同一条通道。key 这条通道不通 → 整条通道判不可用（自然降级到需要代理的通道）。
   probeHost = hostOf(result.segmentUrl!)
-  await probeAxis(result.segment, c => buildChannelUrl(result.segmentUrl!, c, hdrFor(c)))
+  const segAxis = await probeAxis(result.segment, c => buildChannelUrl(result.segmentUrl!, c, hdrFor(c)))
   if (result.keyUrl) {
     const keyUrl = result.keyUrl
     await Promise.all(CHANNEL_ORDER.filter(c => result.segment[c] === 'ok').map(async c => {
@@ -460,6 +495,18 @@ export async function probeReachability(
   result.dualChannel = result.segment.direct === 'ok'
     && result.segment.disguise === 'ok'
     && result.segmentChannel === 'direct'
+
+  /*
+   * 两条 lane 的证据常常凑不齐 —— 谁先回来就在预算内定了通道，另一条还在路上
+   * （实测同一条流两次跑：一次 disguise 158ms/direct 597ms，一次 direct 268ms/disguise 更晚）。
+   * **但双通道只影响预取分流，不影响能不能起播**，所以绝不为它多等一毫秒：
+   * 把「等齐之后再判一次」交出去，迟到就迟到，上层收到再把第二条 lane 打开。
+   * 判据里仍要求最终走直连；万一那条代理 lane 其实不通，还有 markLaneFail 连续失败 3 次熔断兜底。
+   */
+  if (!result.dualChannel && result.segmentChannel === 'direct') {
+    result.dualChannelLate = segAxis.pair.then(() =>
+      segAxis.raw.direct === 'ok' && segAxis.raw.disguise === 'ok' && result.segmentChannel === 'direct')
+  }
 
   result.degraded = result.manifestChannel === null || result.segmentChannel === null
   return result

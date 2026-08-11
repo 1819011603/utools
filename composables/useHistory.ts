@@ -86,7 +86,14 @@ export function useHistory<T>(page: string, options: HistoryOptions = {}) {
     }
   }
 
-  const addToHistory = (data: T): boolean => {
+  /**
+   * `bump`：已存在的同一条**挪到最前**，而不是当重复丢弃。
+   *
+   * 搜索框需要这个：反复搜同一个片名是常态（今天搜、明天接着看），
+   * 默认那套「重复就返回 false」会让常用的词永远停在列表末尾、先被淘汰掉。
+   * 默认仍是丢弃 —— 解析历史那类「一条地址就是一条记录」的场景不该被重新排序。
+   */
+  const addToHistory = (data: T, opts: { bump?: boolean } = {}): boolean => {
     let dataStr = ''
     try {
       dataStr = JSON.stringify(data)
@@ -97,15 +104,14 @@ export function useHistory<T>(page: string, options: HistoryOptions = {}) {
     const size = getByteSizeFromString(dataStr)
     if (size > MAX_ITEM_SIZE) return false
 
-    const items = loadHistory()
-    const isDuplicate = items.some(item => {
-      try {
-        return JSON.stringify(item.data) === dataStr
-      } catch {
-        return false
-      }
-    })
-    if (isDuplicate) return false
+    let items = loadHistory()
+    const sameData = (item: HistoryItem<T>) => {
+      try { return JSON.stringify(item.data) === dataStr } catch { return false }
+    }
+    if (items.some(sameData)) {
+      if (!opts.bump) return false
+      items = items.filter(item => !sameData(item))   // 摘掉旧的那条，下面按新的时间重新插到最前
+    }
 
     const newItem: HistoryItem<T> = { data, timestamp: Date.now(), size }
     let totalSize = items.reduce((sum, i) => sum + i.size, 0) + size

@@ -290,6 +290,38 @@
           @status="reach = $event"
         />
 
+        <!--
+          续看条：重新搜一遍、重新解析之后，页面上一切都从第 1 集开始，而「上次看到第几集」
+          只存在播放器自己的状态里，解析页看不到——用户只能靠回忆或一集一集点过去试（原话
+          「假设我今天看了10集，我重新搜索解析，我只能从第一集开始看」）。
+          记录按**剧名**存（见 useWatchHistory），所以换站、换线路也能续上。
+        -->
+        <div
+          v-if="resumeTarget"
+          class="flex flex-wrap items-center gap-2 p-3 rounded-xl bg-gradient-to-r from-violet-50 to-rose-50
+                 dark:from-violet-500/10 dark:to-rose-500/10 ring-1 ring-violet-200/70 dark:ring-violet-400/20"
+        >
+          <UIcon name="i-heroicons-clock" class="w-4 h-4 shrink-0 text-violet-500" />
+          <span class="text-sm">
+            上次看到
+            <b class="text-violet-600 dark:text-violet-300">第 {{ resumeTarget.index + 1 }} 集</b>
+            <span v-if="resumeTarget.epName && resumeTarget.epName !== String(resumeTarget.index + 1)" class="text-gray-500">
+              （{{ resumeTarget.epName }}）
+            </span>
+            <span v-if="resumeWatch?.total" class="text-xs text-gray-400">/ 共 {{ resumeWatch.total }} 集</span>
+            <!-- 线路对不上要说出来：同一部剧不同线路的集数可能不一样，续看落点只能按集名/序号猜 -->
+            <span v-if="resumeOtherLine" class="text-xs text-amber-600 dark:text-amber-400">
+              · 当时看的是「{{ resumeWatch?.lineName }}」
+            </span>
+          </span>
+          <div class="flex items-center gap-2 ml-auto">
+            <UButton size="xs" icon="i-heroicons-play" @click="requestPlay(resumeTarget.index)">
+              继续观看
+            </UButton>
+            <UButton size="xs" variant="ghost" color="gray" @click="dismissResume">不用了</UButton>
+          </div>
+        </div>
+
         <!-- 选集 -->
         <div class="space-y-2">
           <div class="text-sm font-medium text-gray-700 dark:text-gray-300">
@@ -432,6 +464,7 @@
 </template>
 
 <script setup lang="ts">
+import type { WatchRecord } from '~/composables/useWatchHistory'
 import type { ParsedEpisode, ParseResult, ParseRule } from '~/composables/videoParseRules'
 import type { ProbeVerdict } from '~/composables/videoPlayer/useReachabilityProbe'
 
@@ -470,6 +503,39 @@ const historySite = (url: string): { label: string; known: boolean } => {
   const hit = matchParseSite(url, userRules.value)
   if (hit) return { label: hit.name, known: true }
   try { return { label: new URL(url).hostname.replace(/^www\./, ''), known: false } } catch { return { label: '未知来源', known: false } }
+}
+
+// ── 续看 ──
+// 记录按剧名存（换站、换线路也能续上），见 composables/useWatchHistory.ts
+const { findWatch, forgetWatch } = useWatchHistory()
+const resumeWatch = ref<WatchRecord | null>(null)
+/** 用户在本次解析里点了「不用了」——只压这一次，不删记录（他可能只是想先看别的集） */
+const resumeDismissed = ref(false)
+
+/**
+ * 续看落点。**先按集名认，再退回序号**：源站会往中间加塞（实测 ylsp 有「上/下」），
+ * 而记录可能是几天前、甚至另一条线路上记的，那时的序号早就指到别人身上了
+ * （与 URL 参数直链里 `ep` 优先于 `index` 是同一条规矩）。
+ */
+const resumeTarget = computed(() => {
+  const w = resumeWatch.value
+  const eps = currentLine.value?.episodes || []
+  if (!w || resumeDismissed.value || eps.length <= 1) return null
+  const byName = w.epName ? eps.findIndex(e => (e.title || '') === w.epName) : -1
+  const index = byName >= 0 ? byName : (w.index < eps.length ? w.index : -1)
+  // 落在第 1 集就不必提示了：那跟「从头看」没区别，白占一行
+  if (index <= 0) return null
+  return { index, epName: eps[index]?.title || w.epName }
+})
+
+/** 记录是在别的线路上记的：集数可能不一样，落点只能按集名/序号猜，要如实说出来 */
+const resumeOtherLine = computed(() =>
+  !!resumeWatch.value?.lineName && resumeWatch.value.lineName !== currentLine.value?.name)
+
+const dismissResume = () => {
+  resumeDismissed.value = true
+  // 连记录一起删掉：用户明确说了不用续看，留着下次解析又冒出来就成了牛皮糖
+  forgetWatch({ title: result.value?.title, pageUrl: result.value?.pageUrl })
 }
 
 const currentLine = computed(() => result.value?.lines[result.value.activeLineIndex] ?? null)
@@ -703,6 +769,10 @@ const startResolve = async (line?: number) => {
       lastParsedUrl.value = res.pageUrl
     }
     if (res.lineUnsupported) deadLines.value.add(res.activeLineIndex)
+
+    // 查一次续看记录：按剧名优先，退回播放页地址（换站也能续上）
+    resumeDismissed.value = false
+    resumeWatch.value = findWatch({ title: res.title, pageUrl: res.pageUrl })
 
     addToHistory({ url, title: res.title })
     parseHistory.value = getHistory()
