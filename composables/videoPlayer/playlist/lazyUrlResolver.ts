@@ -46,6 +46,15 @@ export function useLazyUrlResolver(deps: LazyResolverDeps) {
    */
   const RESOLVE_TIMEOUT = 30_000
   /**
+   * **后台预热的死线要比前台短**（前台 15s，这里 12s）。
+   *
+   * 预热是「顺手做掉」的事，没人等它，跑多久对它自己无所谓——但它会连累前台：
+   * 同集去重会让用户那一下点击直接复用这条在飞的 promise（见 fetchLazyUrl），
+   * 预热挂 30s 就意味着这 30s 里的每一次点击都被拴在一具尸体上。
+   * 排成「预热 12s < 前台 15s」之后，被复用的那一发一定先死，前台还有时间自己重来。
+   */
+  const PREWARM_TIMEOUT = 12_000
+  /**
    * 用户点了之后最多让他等这么久。**必须独立于底层那条 promise**：
    * 前台可能命中去重、复用一条正在排队让路的预热请求，那条的剩余寿命跟点击这一刻毫无关系。
    * 15s 是「还愿意等」的上限，到点就明确报错，比无声转圈强。
@@ -97,7 +106,10 @@ export function useLazyUrlResolver(deps: LazyResolverDeps) {
    * 为什么不把结果存进播放列表：这类地址带时效签名，存下来下次进来就是死链，
    * 而且站点限流，与其提前批量取被封，不如播一集取一集（站点自己也是这么做的）。
    */
-  const fetchLazyUrl = (placeholder: string, giveWay = false): Promise<string> => {
+  /** 这条占位地址现在有没有在飞的取址（前台据此判断「我复用的是别人那一发」） */
+  const isInflight = (placeholder: string): boolean => inflight.has(placeholder)
+
+  const fetchLazyUrl = (placeholder: string, giveWay = false, timeoutMs = RESOLVE_TIMEOUT): Promise<string> => {
     const idx = handoff.lazyIndexByUrl.value[placeholder]
     if (!handoff.lazyTask.value || idx === undefined) return Promise.resolve(placeholder)
 
@@ -106,8 +118,8 @@ export function useLazyUrlResolver(deps: LazyResolverDeps) {
 
     const withTimeout = () => new Promise<string>((resolve, reject) => {
       const timer = setTimeout(
-        () => reject(new Error(`取址超时（${RESOLVE_TIMEOUT / 1000}s 没有响应），站点可能在限流`)),
-        RESOLVE_TIMEOUT,
+        () => reject(new Error(`取址超时（${timeoutMs / 1000}s 没有响应），站点可能在限流`)),
+        timeoutMs,
       )
       doFetchLazyUrl(placeholder).then(resolve, reject).finally(() => clearTimeout(timer))
     })
@@ -144,15 +156,38 @@ export function useLazyUrlResolver(deps: LazyResolverDeps) {
     }
     tick()
     const timer = setInterval(tick, 1000)
+    // 死线跟着**这次点击**走，不跟着底层那条 promise（它可能是别人的、已经排了很久的）
+    const raced = () => Promise.race([
+      fetchLazyUrl(placeholder),
+      new Promise<never>((_, reject) => setTimeout(
+        () => reject(new Error(`等了 ${FOREGROUND_TIMEOUT / 1000}s 还没拿到地址，站点可能在限流`)),
+        FOREGROUND_TIMEOUT,
+      )),
+    ])
     try {
-      // 死线跟着这次点击走，不跟着底层那条 promise（它可能是别人的、已经排了很久的）
-      return await Promise.race([
-        fetchLazyUrl(placeholder),
-        new Promise<never>((_, reject) => setTimeout(
-          () => reject(new Error(`等了 ${FOREGROUND_TIMEOUT / 1000}s 还没拿到地址，站点可能在限流`)),
-          FOREGROUND_TIMEOUT,
-        )),
-      ])
+      /*
+       * **复用了后台预热那一发、而它失败了 → 自己立刻重来一次，别让用户再点一遍。**
+       *
+       * 同集去重是无条件的（`inflight.get()` 直接返回），这在预热健康时是对的（省一发请求，
+       * 也避开 nbmovie 那个「两发并发抢 <meta id="nb-plt"> 时间戳 → 401」的坑）。
+       * 但预热卡住时它就变成了陷阱：那条 promise 已经跑了十几秒、注定要超时，
+       * 而这段时间里**每一次点击都会被拴到这具尸体上**，各自等满自己的 15s 然后报错。
+       * 用户看到的就是「点了好几次下一集才切过去」——实测日志：
+       *   预热取址失败（30s 超时）… 切集取址 10932ms（预热未命中）
+       * 最后成功的那一发，正是预热咽气之后重发的。
+       *
+       * 重来的这一发不会撞上 401：走到这里说明在飞的那条已经出局（inflight 在它落定时就清了）。
+       * 只重来一次——真限流和真失效表现一样，无限重试只会把限流坐实。
+       */
+      if (isInflight(placeholder)) {
+        try {
+          return await raced()
+        } catch (e: any) {
+          console.warn('复用的在飞取址失败，改自己重取一次:', e?.message || e)
+          media.resolveStage.value = '上一发没回来，正在重新获取…'
+        }
+      }
+      return await raced()
     } catch (e: any) {
       errorMessage.value = '获取播放地址失败：' + (e?.message || '未知错误')
       return ''
@@ -225,7 +260,7 @@ export function useLazyUrlResolver(deps: LazyResolverDeps) {
     const warm = lazyUrlCache.get(placeholder)
     if (warm && Date.now() - warm.at < LAZY_URL_TTL) return warm.url
     try {
-      const url = await fetchLazyUrl(placeholder, true)   // 让路：前台取址优先
+      const url = await fetchLazyUrl(placeholder, true, PREWARM_TIMEOUT)   // 让路 + 更短死线：前台取址优先
       if (url && url !== placeholder) lazyUrlCache.set(placeholder, { url, at: Date.now() })
       return url
     } catch (e: any) {

@@ -261,6 +261,21 @@
         size="xs"
         :title="`预取并发（在途 ${prefetchInfo.pending} 片 / 缓存 ${prefetchInfo.cached} 片）`"
       >{{ prefetchInfo.threads }} 线程</UBadge>
+      <!--
+        聚合速度摆在线程数**旁边**：这两个数只有对着看才有意义。
+        「线程多」本身不说明问题，「线程多但聚合速度没跟着涨」才是（每 IP 硬顶，加连接换不来带宽）；
+        反过来「聚合速度是码率的好几倍却还在卡」说明带宽不是瓶颈、是摊薄——
+        判读抗卡问题时这两条是同一句话的两半，分开摆就得来回翻统计面板（实测那次误判就是这么来的）。
+        双通道真生效时标绿，跟统计面板同一套配色。
+      -->
+      <UBadge
+        v-if="isHls && aggregateKBps > 0"
+        :color="dualChannel && !dualChannelUnavailable ? 'green' : 'gray'"
+        variant="soft"
+        size="xs"
+        :title="`聚合下载速度 ≈ 单连接 ${formatSpeed(strategy.perConnKBps)} × ${strategy.targetConn} 并发`
+          + `（${aggregateMbps} Mbps，视频码率 ${strategy.segMbps} Mbps）`"
+      >{{ formatSpeed(aggregateKBps) }}</UBadge>
       <!-- 回解析页换线路：播放器手上只有一条线路的列表，换线路只能回去 -->
       <UButton
         v-if="playlistSource"
@@ -296,6 +311,8 @@ const {
   showControls,  showPlayIcon,
   currentTime, duration,
   hlsStats, prefetchInfo, playlist, playlistTitle, currentIndex, strategyLabel, showAdvancedProxy,
+  // 聚合速度那枚徽标要的：实测策略快照 + 两个换算值 + 双通道状态（配色跟统计面板一致）
+  strategy, aggregateKBps, aggregateMbps, dualChannel, dualChannelUnavailable,
   playlistSource, backToParseSource,
   // 选集按钮在顶部信息条里（VideoPlayerTopBar），这里只留抽屉本身要用的状态
   currentVideoName, volumeIcon,

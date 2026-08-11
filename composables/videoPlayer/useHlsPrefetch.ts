@@ -110,6 +110,13 @@ const FALLBACK_SEG_SECS = 10
  */
 const FILL_HORIZON_SECS = 60
 
+/**
+ * 「存货厚到可以躺着花」的墙钟余量（秒）：超过「存货阶梯放开线 + 它」就给到满折扣（见 headroomConnCap）。
+ * 取 20s —— 阶梯放开线（默认 10s 墙钟）之上再攒够 20 秒，才算真的有余量可花。
+ * 调大 = 更保守（更愿意为钉住预加载时长而多开连接），调小 = 更省连接、缓存更愿意往下滑。
+ */
+const COAST_WALL_SECS = 20
+
 export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   const { getProxyUrl, cache } = opts
   const getPlaybackRate = opts.getPlaybackRate ?? (() => 1)
@@ -330,7 +337,27 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     // 还没测出速度：退回「缺口装得下几片」。冷启动时缺口远大于一片，等于不限；
     // 但这样「快满了还开满线程」这个毛病就不依赖采样数据也不会犯
     if (!bw.hasSamples()) return Math.max(1, Math.ceil(gap / (segDurSecs || FALLBACK_SEG_SECS)))
-    return Math.max(1, bw.requiredConn(getPlaybackRate() + gap / FILL_HORIZON_SECS, tier().safety))
+
+    /*
+     * 手上存货厚的时候，「播放消耗」那一项可以**打折**——余量本来就是拿来花的。
+     *
+     * 由来（实测）：预加载时长 100s、已经缓存 98s，线程却顶到 12。缺口只有 2s，
+     * 摊到 60s 里补，那一项贡献 2/60 ≈ 0.03，**12 条全是「维持 3x 播放」算出来的**：
+     * 慢源上每连接扛不动 3 倍码率，要不掉队就得这么多条。算式没错，但那一刻它答错了问题——
+     * 已经攒下 98s÷3x ≈ 33 秒墙钟的余量，根本没必要为了把数字钉在 100 而拉满连接；
+     * 少供一点、让缓存慢慢往下滑才是对的，滑到接近保险线时再全额补。
+     *
+     * 折扣按**墙钟余量**给（不是按视频秒——3x 下 98 视频秒只值 33 秒墙钟）：
+     * 从「存货阶梯放开线」（保险线 ×2）起算，再多出 COAST_WALL_SECS 就给到满折。
+     * 封顶 0.9 而不是 1：始终留一点供给，免得存货厚时干脆一条不开、跌下来又猛开的锯齿。
+     * 余量掉回放开线以下时折扣归零 → 回到全额供给，所以这条仍然压不出卡顿。
+     */
+    const rate = getPlaybackRate()
+    const wall = cachedAhead / Math.max(1, rate)          // 还够播几秒（墙钟）
+    const releaseWall = Math.max(0, getSafeWallSecs()) * 2 // 存货阶梯的放开线，低于它一律全额供
+    const credit = Math.min(0.9, Math.max(0, (wall - releaseWall) / COAST_WALL_SECS))
+    const needRate = rate * (1 - credit) + gap / FILL_HORIZON_SECS
+    return Math.max(1, bw.requiredConn(needRate, tier().safety))
   }
 
   // 返回当前目标并发（受控值，双重钳制在 [2, hostCap]）。只读，供两个预取入口共用。
