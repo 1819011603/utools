@@ -126,6 +126,23 @@ const FILL_HORIZON_SECS = 60
 const COAST_WALL_SECS = 20
 
 /**
+ * 折扣的**收尾窗口**（墙钟秒）：缺口还够播这么久以上时，折扣一律为 0（全额供给）。
+ *
+ * 由来（踩过）：折扣只看「存货厚不厚」（`COAST_WALL_SECS`）时，任何缓了半分钟以上的流都拿满折
+ * 0.9，于是 `needRate = rate×0.1 + gap/60`，解 `needRate = rate` 得**平衡点恒在
+ * `预加载时长 − 0.9×rate×FILL_HORIZON`**（1x 下就是 −54s）——跟用户填多少无关。
+ * 实测正是「预加载 300s，缓存卡在 240s 上不上下不下」：那不是慢，是折扣把供给正好抵成了持平。
+ *
+ * 折扣的立论只在「缺口已经很小」时成立（当初那个例子是 100s 里差 2s）。所以把它按
+ * **缺口墙钟秒**线性淡入：缺口 ≥ 本窗口 → 折扣 0（照常往上补），缺口 → 0 → 给到满折
+ * （不为把数字钉死在目标值而拉满连接，那才是本来要治的毛病）。
+ * 新的平衡点解 `0.9(1 − gw/10)×FILL_HORIZON = gw` 得 gw ≈ 8.4s 墙钟，即缓存收在
+ * 「预加载时长 − 8 秒左右」而不是 −54s，且**是一路缓慢爬上去的**。
+ * 用墙钟而不是视频秒：3x 下 10 视频秒只值 3.3 秒余量，两边尺子要跟折扣本身一致。
+ */
+const COAST_GAP_WALL_SECS = 10
+
+/**
  * **冷启动并发硬帽：3 条，无论有没有双通道。**
  *
  * 「还没有任何实测样本」= 不知道这个源是快是慢、每连接扛不扛得动、聚合能不能并行。
@@ -385,11 +402,18 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
      * 从「存货阶梯放开线」（保险线 ×2）起算，再多出 COAST_WALL_SECS 就给到满折。
      * 封顶 0.9 而不是 1：始终留一点供给，免得存货厚时干脆一条不开、跌下来又猛开的锯齿。
      * 余量掉回放开线以下时折扣归零 → 回到全额供给，所以这条仍然压不出卡顿。
+     *
+     * **但光看「存货厚不厚」会把平衡点永久钉在目标值下方**（`COAST_GAP_WALL_SECS` 那段注释里的
+     * 300→240）：所以再乘一道「缺口快没了」的淡入系数，缺口还有 10 秒墙钟以上时折扣为 0，
+     * 缓存于是一路缓慢往上爬，直到贴着目标值才开始躺着花。
      */
     const rate = getPlaybackRate()
     const wall = cachedAhead / Math.max(1, rate)          // 还够播几秒（墙钟）
     const releaseWall = Math.max(0, getSafeWallSecs()) * 2 // 存货阶梯的放开线，低于它一律全额供
-    const credit = Math.min(0.9, Math.max(0, (wall - releaseWall) / COAST_WALL_SECS))
+    const thick = Math.min(0.9, Math.max(0, (wall - releaseWall) / COAST_WALL_SECS))
+    const gapWall = gap / Math.max(1, rate)                          // 缺口还够播几秒（墙钟）
+    const nearTarget = Math.max(0, 1 - gapWall / COAST_GAP_WALL_SECS) // 缺口 ≥10s 墙钟 → 不打折
+    const credit = thick * nearTarget
     const needRate = rate * (1 - credit) + gap / FILL_HORIZON_SECS
     return Math.max(1, bw.requiredConn(needRate, tier().safety))
   }
