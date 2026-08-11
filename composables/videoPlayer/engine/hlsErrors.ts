@@ -40,6 +40,8 @@ export interface HlsErrorDeps {
   escalateStrategy: () => boolean
   /** 网络恢复时重新开始加载（引擎登记一次性 online 监听） */
   waitForOnline: (resume: () => void) => void
+  /** 非致命的缓冲停滞：货在手上却播不动，交给 stallRecovery 自救 */
+  onBufferStalled: () => void
 }
 
 export function useHlsErrorHandler(deps: HlsErrorDeps) {
@@ -83,6 +85,14 @@ export function useHlsErrorHandler(deps: HlsErrorDeps) {
 
   const onHlsError = (data: any) => {
     console.warn('HLS 错误:', data.type, data.details, 'fatal:', data.fatal)
+    /*
+     * **非致命错误不能一概丢掉**（踩过：这一行原来就是 `if (!data.fatal) return`）。
+     * `bufferStalledError` 是非致命的、每秒复发，而它恰恰是「缓冲 305s 却一直转圈」
+     * 那一幕的唯一线索：hls.js 卡在一个比 `maxBufferHole`(0.5s) 更大的空洞前面，
+     * 自己的 nudge 跨不过去，就只能一直报给我们听——而我们连听都没听。
+     * 现在把它接到 stallRecovery（见那个文件的两级出路）。
+     */
+    if (data.details === HlsLib.ErrorDetails.BUFFER_STALLED_ERROR) deps.onBufferStalled()
     if (!data.fatal) return
     switch (data.type) {
       case HlsLib.ErrorTypes.NETWORK_ERROR:

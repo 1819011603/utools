@@ -13,6 +13,7 @@ import { useRecomposite } from './engine/recomposite'
 import { buildHlsConfig } from './engine/hlsConfig'
 import { useLoadTimeout } from './engine/loadTimeout'
 import { useHlsErrorHandler, failMessageOf } from './engine/hlsErrors'
+import { useStallRecovery } from './engine/stallRecovery'
 
 export interface VideoEngineDeps {
   media: VideoMediaState
@@ -124,6 +125,18 @@ export function useVideoEngine(deps: VideoEngineDeps) {
 
   // 卡顿记录器：以 <video> 真实停顿为地面真值，喂给自愈调参环（selfHeal）
   const stall = useStallTracker(() => videoEl.value)
+
+  /**
+   * 「货在手上却播不动」的自救（实现见 ./engine/stallRecovery.ts）：
+   * MSE 在播放头处是空的、而预取缓存里有货 → 跳过小空洞 / 从播放头重新加载。
+   * 两个入口：hls.js 的非致命 `bufferStalledError`，以及心跳里的播放头冻结采样。
+   */
+  const stallRecovery = useStallRecovery({
+    getVideoEl: () => videoEl.value,
+    getHls: () => hls,
+    getAheadBuffered,
+    getCachedAhead,
+  })
 
   // 清单加载器：命中「探测刚下载过的同一份 m3u8」就省掉一次 RTT（实现见 ./engine/playlistLoader.ts）
   const createHlsPlaylistLoader = createPlaylistLoaderFactory(conn.takeSeededManifest)
@@ -248,6 +261,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
         isBuffering.value = false
       }
       stall.tick()   // 绑定/改绑卡顿监听（幂等）+ 刷新连续流畅读数
+      stallRecovery.tick()   // 播放头冻住而手上有货 → 跳空洞 / 从播放头重拉（bufferStalledError 不一定每次都来）
       prefetchTick()
       refreshCacheStats()   // 面板上的「预取缓存 N 片 / X MB」
       updateHlsStats()
@@ -317,6 +331,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     resetStrategy()
     stall.unbind()          // 解绑卡顿监听（换流重新计）
     stall.reset()
+    stallRecovery.reset()   // 上一集的播放头时间点不能拿来判「冻住」
     tier.guardRateCeiling.value = Infinity   // 解除抗卡降速守卫
   }
 
@@ -498,6 +513,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
       refetchUrl: () => deps.refetchUrl(),
       escalateStrategy: () => conn.escalateStrategyAndReload(),
       waitForOnline,
+      onBufferStalled: stallRecovery.onBufferStalled,
     })
     resetErrorCounters()
     hls.on(HlsLib.Events.ERROR, (_, data) => onHlsError(data))
