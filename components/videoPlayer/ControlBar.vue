@@ -158,8 +158,9 @@
                        bg-gradient-to-br from-white/10 via-rose-200/10 to-violet-300/15
                        backdrop-blur-md ring-1 ring-white/20 shadow-xl shadow-violet-950/20"
               >
+                <!-- 档位表来自 controls.rateOptions：开了「超快倍速」才多出 3.5~5x 那几档 -->
                 <button
-                  v-for="rate in PLAYBACK_RATES"
+                  v-for="rate in rateOptions"
                   :key="rate"
                   :data-rate="rate"
                   class="block w-full px-5 py-2.5 text-sm text-white text-center transition-colors
@@ -210,7 +211,7 @@ const {
   progressPercent, bufferedPercent, seekPreviewTime, seekPreviewPercent, hoverTime, hoverPercent,
   playlist, hasPrev, hasNext, isSwitching, prewarmNextNow,
   volumeIcon, supportsPiP, showSpeedMenu, controlsVisible,
-  togglePlay, startSeek, updateHoverTime, setVolume, toggleMute, setPlaybackRate,
+  togglePlay, startSeek, updateHoverTime, setVolume, toggleMute, setPlaybackRate, rateOptions,
   toggleFullscreen, togglePiP, keepControlsAlive, playPrev, playNext,
 } = useVideoPlayerCtx()
 

@@ -2,7 +2,7 @@
   <div ref="menuRef" class="relative">
     <button
       class="text-white hover:text-violet-400 transition-colors"
-      title="播放器设置（自动全屏 / 自动倍速 / 跳过片头片尾）"
+      title="播放器设置（自动全屏 / 自动倍速 / 超快倍速 / 跳过片头片尾）"
       @click="open = !open"
     >
       <UIcon name="i-heroicons-cog-6-tooth" class="w-5 h-5" :class="{ 'rotate-90': open }" style="transition: transform .3s" />
@@ -32,6 +32,18 @@
           <span>
             自动最佳倍速
             <span class="block text-xs text-white/70">1x ~ {{ autoRateCap }}x，流畅就提速，卡了就降回</span>
+          </span>
+        </label>
+
+        <!--
+          超快倍速：默认关。两条代价都要写在脸上——不写的话用户选了 5x 发现没声音、还一直卡，
+          只会当成播放器坏了（4x 往上浏览器直接静音是 Chrome 的硬规则，不是我们能改的）
+        -->
+        <label class="flex items-start gap-2 cursor-pointer">
+          <input v-model="turboRate" type="checkbox" class="accent-violet-500 w-4 h-4 mt-0.5" @change="saveState">
+          <span>
+            超快倍速
+            <span class="block text-xs text-white/70">解锁 3.5x ~ 5x。要几倍码率的带宽，4x 以上多数浏览器会静音</span>
           </span>
         </label>
 
@@ -74,7 +86,7 @@
  */
 import { onClickOutside } from '@vueuse/core'
 
-const { autoFullscreen, autoBestRate, autoRateCap, skipIntro, skipOutro, saveState } = useVideoPlayerCtx()
+const { autoFullscreen, autoBestRate, autoRateCap, turboRate, skipIntro, skipOutro, saveState } = useVideoPlayerCtx()
 
 const menuRef = ref<HTMLElement>()
 const open = ref(false)

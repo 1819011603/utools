@@ -33,3 +33,15 @@ export function formatTime(seconds: number): string {
   if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
 }
+
+/**
+ * 「超快倍速」开关打开后**追加**的档位（3x 以上）。默认不给，因为它有两条真实代价：
+ *   · 带宽按倍数吃——3x 就要 3 倍码率的持续供给，5x 上大部分源根本喂不动，
+ *     结果是「选了 5x 却一直卡」，而用户会当成播放器坏了；
+ *   · 4x 往上多数浏览器**直接静音**（Chrome 的音频播放上限就是 4x），一开始只会以为是自己点错了。
+ * 所以做成开关：想要的人自己打开（设置里写清楚这两句），默认那 10 档保持干净。
+ *
+ * 放在**文件末尾**是有意的：unimport 扫描踩过「数组常量后面紧跟的导出被静默漏掉」那个坑
+ * （见文件头注释），新数组摆在所有函数之后就不会连累任何人。
+ */
+export const TURBO_PLAYBACK_RATES = [3.5, 4, 4.5, 5]

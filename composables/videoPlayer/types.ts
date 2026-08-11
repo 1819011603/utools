@@ -110,6 +110,8 @@ export interface SavedState {
   useProxy: boolean
   autoFullscreen: boolean
   autoBestRate: boolean
+  /** 超快倍速（3.5~5x）是否解锁。可选：老状态里没有这个键，读的时候按 false 兜 */
+  turboRate?: boolean
   skipIntro: number
   skipOutro: number
   // 引擎当前生效的连接配置。存下来只为刷新后首屏能立刻显示上次的结论，

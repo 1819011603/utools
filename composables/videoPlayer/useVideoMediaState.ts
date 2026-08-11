@@ -61,6 +61,9 @@ export function useVideoMediaState() {
   // 反过来 import 就成环了。
   const isLocked = ref(false)
   const autoBestRate = ref(true)        // 自动最佳倍速：在 [1, 所选倍速] 内按带宽自动取值
+  // 超快倍速：倍速菜单里追加 3.5~5x（见 display.ts 的 TURBO_PLAYBACK_RATES）。
+  // 默认关——那几档要几倍码率的持续供给，且 4x 往上浏览器直接静音，不该是所有人的默认体验
+  const turboRate = ref(false)
 
   // ── 进度条 ──
   const progressPercent = computed(() => duration.value ? (currentTime.value / duration.value) * 100 : 0)
@@ -95,7 +98,7 @@ export function useVideoMediaState() {
     videoEl, playerContainer, progressBar, speedMenuRef,
     isPlaying, currentTime, duration, volume, isMuted, playbackRate, desiredRate, videoKey,
     isFullscreen, showControls, showPlayIcon, showSpeedMenu, showEpisodes,
-    showAdvancedProxy, autoFullscreen, pendingAutoFullscreen, autoMuted, autoBestRate, isLocked,
+    showAdvancedProxy, autoFullscreen, pendingAutoFullscreen, autoMuted, autoBestRate, turboRate, isLocked,
     progressPercent, bufferedPercent, seekPreviewTime, seekPreviewPercent, isSeeking, hoverTime, hoverPercent,
     skipIntro, skipOutro, hasSkippedIntro, savedProgress, isRestoringFromSaved,
     hlsConfig, hlsStats, playbackDiag,

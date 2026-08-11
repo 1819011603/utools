@@ -99,6 +99,7 @@ export function useVideoPlayerController() {
         useProxy: conn.useProxy.value,
         autoFullscreen: media.autoFullscreen.value,
         autoBestRate: media.autoBestRate.value,
+        turboRate: media.turboRate.value,
         skipIntro: media.skipIntro.value,
         skipOutro: media.skipOutro.value,
         requestOrigin: conn.requestOrigin.value,
@@ -125,6 +126,7 @@ export function useVideoPlayerController() {
     media.desiredRate.value = s.playbackRate ?? 1
     media.autoFullscreen.value = s.autoFullscreen ?? true
     media.autoBestRate.value = s.autoBestRate ?? true
+    media.turboRate.value = s.turboRate ?? false
     media.skipIntro.value = s.skipIntro ?? 0
     media.skipOutro.value = s.skipOutro ?? 0
     conn.useProxy.value = s.useProxy ?? false

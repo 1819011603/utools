@@ -21,7 +21,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   const { media, autoTune, playlist } = deps
   const {
     videoEl, playerContainer, progressBar, isPlaying, isVideoLoaded, duration,
-    volume, isMuted, desiredRate, autoBestRate, autoFullscreen, isFullscreen, showControls, showPlayIcon, showSpeedMenu,
+    volume, isMuted, desiredRate, autoBestRate, turboRate, autoFullscreen, isFullscreen, showControls, showPlayIcon, showSpeedMenu,
     pendingAutoFullscreen, autoMuted,
     seekPreviewTime, seekPreviewPercent, isSeeking, hoverTime, hoverPercent, preloadStrategy,
   } = media
@@ -139,6 +139,12 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     videoEl.value.muted = isMuted.value
   }
 
+  /**
+   * 倍速菜单与 `</>` 快捷键共用的档位表：开了「超快倍速」才把 3.5~5x 接上去。
+   * 一个来源供两处用——各写一遍的话快捷键会步进到菜单里根本没有的档位。
+   */
+  const rateOptions = computed(() => turboRate.value ? [...PLAYBACK_RATES, ...TURBO_PLAYBACK_RATES] : PLAYBACK_RATES)
+
   /** 用户选择的是「目标倍速」（自动模式下当上限），实际生效由 autoTune.applyEffectiveRate 决定 */
   const setPlaybackRate = (rate: number) => {
     desiredRate.value = rate
@@ -148,6 +154,12 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     autoTune.applyEffectiveRate()
     showSpeedMenu.value = false
   }
+
+  /**
+   * 关掉「超快倍速」时把已经选上的高档位收回到 3x：
+   * 否则开关关了倍速还停在 5x，而菜单里连这一档都不再显示——看着就是「关不掉」。
+   */
+  watch(turboRate, on => { if (!on && desiredRate.value > 3) setPlaybackRate(3) })
 
   // ── 全屏 / 画中画 ──
 
@@ -330,14 +342,18 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
         e.preventDefault(); void playlist.playPrev(); break
       case 'i': case 'I':
         togglePiP(); break
+      // 步进表跟菜单同一个来源（rateOptions）：写死 PLAYBACK_RATES 的话，
+      // 开了超快倍速也只能按到 3x，而菜单里明明还有几档
       case '<': case ',': {
-        const i = PLAYBACK_RATES.indexOf(desiredRate.value)
-        if (i > 0) setPlaybackRate(PLAYBACK_RATES[i - 1])
+        const rates = rateOptions.value
+        const i = rates.indexOf(desiredRate.value)
+        if (i > 0) setPlaybackRate(rates[i - 1])
         break
       }
       case '>': case '.': {
-        const i = PLAYBACK_RATES.indexOf(desiredRate.value)
-        if (i >= 0 && i < PLAYBACK_RATES.length - 1) setPlaybackRate(PLAYBACK_RATES[i + 1])
+        const rates = rateOptions.value
+        const i = rates.indexOf(desiredRate.value)
+        if (i >= 0 && i < rates.length - 1) setPlaybackRate(rates[i + 1])
         break
       }
     }
@@ -359,7 +375,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   return {
     supportsPiP, volumeIcon,
     togglePlay, skip, startSeek, updateSeekPreview, updateHoverTime,
-    setVolume, toggleMute, setPlaybackRate,
+    setVolume, toggleMute, setPlaybackRate, rateOptions,
     toggleFullscreen, togglePiP, handleMouseMove, hideControlsDelayed, keepControlsAlive, consumeAutoFullscreen, restoreSound,
     applyPreload, bindGlobalKeys, unbindGlobalKeys,
   }
