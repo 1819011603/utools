@@ -134,7 +134,17 @@ export function createFragLoaderFactory(deps: FragLoaderDeps) {
         }
 
         const tp = tier()   // 本次加载用当前档位的对冲/跳片超时（hedgeMs/skipMs/maxRacers）
-        // 起一条新竞速连接（换 lane、换连接，绕开卡死的那条）
+        /*
+         * 起一条新竞速连接（换 lane、换连接，绕开卡死的那条）。
+         *
+         * **`maxRacers` 管的是「同时几条」，不是「一共发几次」**（踩过：网络卡一下或切 Wi-Fi 之后
+         * 「完全不能加载」）。原来 `racers` 只加不减：离线时 fetch 是**立刻**失败的，
+         * 两三次快速失败在半秒内就把额度烧光，此后 `race()` 每次进来都直接 return——
+         * 一个请求都不再发，只能干等 skipMs（差档 20s）到点跳片，网络三秒后恢复也没人重试。
+         * 表现就是「网络恢复了画面还一直转圈」。
+         * 现在失败即归还额度（`racers--`），额度只约束在途条数，重试则一直按 500ms 续下去，
+         * 上限自然由 skipMs 那道硬超时兜住。
+         */
         const race = () => {
           if (settled || this.stats.aborted || racers >= tp.maxRacers) return
           racers++
@@ -148,6 +158,7 @@ export function createFragLoaderFactory(deps: FragLoaderDeps) {
             .then(buf => { releaseLane(lane); markLaneOk(lane); sampleSpeed(buf.byteLength, performance.now() - t, conc); win(buf) })
             .catch(() => {
               releaseLane(lane)
+              racers--   // 归还并发额度：额度是「同时几条」，别被顺序重试烧光（见上）
               // 主动取消（竞速已有赢家 / seek）不算这条 lane 的账
               if (!ctrl.signal.aborted) markLaneFail(lane, laneCount)
               if (!settled && !this.stats.aborted) timers.push(setTimeout(race, 500))   // 这条失败 → 快速换一条

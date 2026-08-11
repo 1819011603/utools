@@ -24,6 +24,15 @@ export interface LoadTimeoutDeps {
   onTimeout: () => void
 }
 
+/**
+ * 断网时**两档闹钟都要顺延**（每 2s 回来看一眼），不能到点就照常开火：
+ * 这两档判的是「地址死了」和「源站取不到」，而本机没网时它们的前提压根不成立——
+ * 重新取址那一发同样发不出去（还要吃掉每集仅一次的额度），第二档更是直接销毁播放器。
+ * 表现就是「进电梯十几秒出来，播放器已经报加载超时了」。
+ */
+const OFFLINE_RECHECK_MS = 2000
+const isOffline = () => typeof navigator !== 'undefined' && navigator.onLine === false
+
 export function useLoadTimeout(deps: LoadTimeoutDeps) {
   let loadTimeoutTimer: ReturnType<typeof setTimeout> | null = null
   let staleUrlTimer: ReturnType<typeof setTimeout> | null = null
@@ -43,13 +52,22 @@ export function useLoadTimeout(deps: LoadTimeoutDeps) {
     // 静默是硬要求：这一档**必然会误伤**——慢源的 manifest 本身就要十几秒，它没死。
     // 早先在这里写了句「正在重新获取播放地址」并拉起 isResolvingUrl，于是正常的慢加载
     // 也会盖上转圈遮罩，表现成「视频刚开始点下一集，一直显示获取中」（踩过）。
-    staleUrlTimer = setTimeout(() => {
-      if (hasReceivedData || !deps.isLoading()) return
-      deps.refetchUrl()
-    }, STALE_URL_TIMEOUT)
-    loadTimeoutTimer = setTimeout(() => {
-      if (!hasReceivedData && deps.isLoading()) deps.onTimeout()
-    }, LOAD_TIMEOUT)
+    const armStale = (ms: number) => {
+      staleUrlTimer = setTimeout(() => {
+        if (hasReceivedData || !deps.isLoading()) return
+        if (isOffline()) { armStale(OFFLINE_RECHECK_MS); return }   // 没网 → 顺延，见 OFFLINE_RECHECK_MS
+        deps.refetchUrl()
+      }, ms)
+    }
+    const armTimeout = (ms: number) => {
+      loadTimeoutTimer = setTimeout(() => {
+        if (hasReceivedData || !deps.isLoading()) return
+        if (isOffline()) { armTimeout(OFFLINE_RECHECK_MS); return } // 同上：断网不算源站超时
+        deps.onTimeout()
+      }, ms)
+    }
+    armStale(STALE_URL_TIMEOUT)
+    armTimeout(LOAD_TIMEOUT)
   }
   const markDataReceived = () => {
     hasReceivedData = true

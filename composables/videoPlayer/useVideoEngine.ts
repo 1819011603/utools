@@ -110,7 +110,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   const {
     getAheadBuffered, getCachedAhead, createHlsFragLoader, triggerAdaptivePrefetch,
     startOnePrefetch, strategy, resetStrategy, tick: prefetchTick, primePrefetch, getStuckSegment, laneDead,
-    purgePlayedSegments,
+    reviveLanes, purgePlayedSegments,
   } = prefetch
 
   // 双通道实际有没有跑起来：真实请求连续失败会把某条 lane 熔断（见 useHlsPrefetch 的 markLaneFail）。
@@ -199,11 +199,45 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   const tickHooks: Array<() => void> = []
   const registerTickHook = (fn: () => void) => { tickHooks.push(fn) }
 
+  /**
+   * ── 网络回来了 ──
+   *
+   * 切 Wi-Fi / 出电梯这一刻要做三件事，少一件就是「网络明明好了，画面还一直转圈」：
+   *   ① **lane 熔断记录整份作废**：出口 IP 一变，之前那些 403/超时的结论一条都不再成立
+   *      （熔断本身还有 30s 观察期自愈，但这里能立刻恢复双通道，不用干等）；
+   *   ② **让 hls.js 重新开始加载**：断网期间它多半已经报过 fatal NETWORK_ERROR 停在那儿了，
+   *      `startLoad()` 是唯一能把它叫起来的动作（离线那条分支就是把这一发留到现在）；
+   *   ③ **重开预取**：预取失败不重排队，只靠心跳补——`primePrefetch()` 立刻满上，不等下一拍。
+   *
+   * 只在真的没在播时才 `startLoad()`：正常播着的流被 startLoad 打断会白丢一次缓冲。
+   */
+  const onNetworkOnline = () => {
+    console.info('[net] 网络已恢复')
+    reviveLanes()
+    if (errorMessage.value.startsWith('网络已断开')) errorMessage.value = ''
+    const v = videoEl.value
+    const playing = !!v && !v.paused && v.readyState >= 3 && getAheadBuffered(v) > 0.5
+    if (hls && !playing) { try { hls.startLoad() } catch {} }
+    primePrefetch()
+  }
+  /** 断网只需说一句话：重试逻辑那边一律等 online，不在没网的时候烧额度（见 hlsErrors） */
+  const onNetworkOffline = () => {
+    console.info('[net] 网络已断开')
+    if (!errorMessage.value) errorMessage.value = '网络已断开，恢复后会自动继续'
+  }
+  /** 给错误处理层用的一次性 online 等待：断网时的重试全部收敛到这里 */
+  const waitForOnline = (resume: () => void) => {
+    const once = () => { window.removeEventListener('online', once); resume() }
+    window.addEventListener('online', once)
+  }
+
   // ── 实时心跳：每秒刷新缓冲读数 + 跑闭环预取控制（不依赖 FRAG_BUFFERED，卡顿时也持续工作） ──
   let hlsTickTimer: ReturnType<typeof setInterval> | null = null
   const startHlsTick = () => {
     if (hlsTickTimer) return
     document.addEventListener('visibilitychange', onVisibilityChange)
+    window.addEventListener('online', onNetworkOnline)
+    window.addEventListener('offline', onNetworkOffline)
     hlsTickTimer = setInterval(() => {
       // 转圈的兜底熄灯：以「真的在播」为地面真值，不指望事件齐全。
       // `isBuffering` 只由 playing/canplaythrough/seeked/FRAG_BUFFERED 熄，而正播着的视频
@@ -223,6 +257,8 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   const stopHlsTick = () => {
     if (hlsTickTimer) { clearInterval(hlsTickTimer); hlsTickTimer = null }
     document.removeEventListener('visibilitychange', onVisibilityChange)
+    window.removeEventListener('online', onNetworkOnline)
+    window.removeEventListener('offline', onNetworkOffline)
   }
 
   /**
@@ -447,7 +483,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     })
 
     // 致命错误处理（实现见 ./engine/hlsErrors.ts）：网络重试 → 重新取址 → 重探；媒体错误恢复带上限
-    const { onHlsError, resetErrorCounters } = useHlsErrorHandler({
+    const { onHlsError, resetErrorCounters, noteLoadOk } = useHlsErrorHandler({
       HlsLib,
       getHls: () => hls,
       setError: (msg: string) => { errorMessage.value = msg; return msg },
@@ -461,6 +497,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
       },
       refetchUrl: () => deps.refetchUrl(),
       escalateStrategy: () => conn.escalateStrategyAndReload(),
+      waitForOnline,
     })
     resetErrorCounters()
     hls.on(HlsLib.Events.ERROR, (_, data) => onHlsError(data))
@@ -470,6 +507,9 @@ export function useVideoEngine(deps: VideoEngineDeps) {
       updateHlsStats()
       cancelBufferingGate()
       isBuffering.value = false
+      // 成功一片就把网络重试额度还回去：额度的语义是「连续失败」，不是「本次播放累计」
+      // （见 hlsErrors.noteLoadOk——不还的话看久了任何一次抖动都直接走到销毁）
+      noteLoadOk()
       // sn 在 init segment 上是字符串 'initSegment'，那种片没有后续可预取，跳过
       const sn = data?.frag?.sn
       if (typeof sn === 'number') triggerAdaptivePrefetch(sn)

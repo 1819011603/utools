@@ -19,6 +19,16 @@
 import type { Ref } from 'vue'
 
 const LANE_TRIP_FAILS = 3   // 连续失败到这个数就熔断（首片偶发失败不算数）
+/**
+ * 熔断的**观察期**（ms）：过了这么久就把 lane 放回来试一次（失败再连续 3 次会重新熔断）。
+ *
+ * **熔断必须能自愈**（踩过：切 Wi-Fi / 网络卡一下之后「完全不能加载」）：熔断是永久的时候，
+ * 网络抖动那几秒里两条 lane 都在失败，先攒够 3 次的那条被判死——而它可能正是换网之后
+ * 唯一走得通的那条（出口 IP 一变，直连能不能通、代理会不会被 403 全都变了）。
+ * 之后它再也不会被取用，也就永远没有机会证明自己好了，`laneDead` 一路留到换视频。
+ * 观察期取 30s：比一次网络切换长，短到用户不会觉得「一直只用一条」。
+ */
+const LANE_PROBATION_MS = 30_000
 
 export interface LaneAllocation {
   lane: number
@@ -35,6 +45,11 @@ export interface LaneControl {
   markLaneFail: (lane: number, laneCount: number) => void
   /** 换视频/换策略时清空：新源的可达性与上一个源无关 */
   resetLanes: () => void
+  /**
+   * 把熔断记录整份作废（不动在途计数）。用在「网络环境变了」这一刻——
+   * 换 Wi-Fi / 切蜂窝之后出口 IP 全换，之前那些 403/超时的结论一条都不再成立。
+   */
+  reviveLanes: () => void
   /** 当前流的**可用** lane 数（排除熔断的），用于放宽并发上限 */
   getLaneCount: (sampleUrl?: string) => number
 }
@@ -43,9 +58,27 @@ export function useLaneControl(getLaneUrls: (url: string) => string[]): LaneCont
   const laneInflight: number[] = []
   const laneFails: number[] = []    // 各 lane 的连续失败数（成功即清零）
   const laneOks: number[] = []      // 各 lane 的累计成功数
+  const laneTrippedAt: number[] = [] // 各 lane 的熔断时刻（观察期到了就放回来试，见 LANE_PROBATION_MS）
   const laneDead = ref<boolean[]>([])
 
   const laneAlive = (i: number) => !laneDead.value[i]
+
+  /** 观察期已过的熔断 lane 就地复活（返回是否动过）。取用 lane 前先跑一遍，好让它有机会证明自己 */
+  const releaseProbation = (): boolean => {
+    if (!laneDead.value.some(Boolean)) return false
+    const now = Date.now()
+    const next = laneDead.value.slice()
+    let changed = false
+    next.forEach((dead, i) => {
+      if (!dead || now - (laneTrippedAt[i] ?? 0) < LANE_PROBATION_MS) return
+      next[i] = false
+      laneFails[i] = 0          // 归零，否则一进来就又满 3 次立刻二次熔断
+      changed = true
+      console.info(`[lane] 第 ${i} 条通道观察期已过，放回来再试`)
+    })
+    if (changed) laneDead.value = next
+    return changed
+  }
 
   const markLaneOk = (lane: number) => {
     laneFails[lane] = 0
@@ -60,18 +93,28 @@ export function useLaneControl(getLaneUrls: (url: string) => string[]): LaneCont
     if (aliveCount <= 1) return
     const next = laneDead.value.slice()
     next[lane] = true
+    laneTrippedAt[lane] = Date.now()
     laneDead.value = next
-    console.warn(`[lane] 第 ${lane} 条通道连续失败 ${laneFails[lane]} 次，已熔断（双通道降为单通道）`)
+    console.warn(`[lane] 第 ${lane} 条通道连续失败 ${laneFails[lane]} 次，已熔断（双通道降为单通道，${LANE_PROBATION_MS / 1000}s 后再试）`)
   }
 
   const resetLanes = () => {
     laneFails.length = 0
     laneOks.length = 0
     laneInflight.length = 0
+    laneTrippedAt.length = 0
+    laneDead.value = []
+  }
+
+  const reviveLanes = () => {
+    laneFails.length = 0
+    laneTrippedAt.length = 0
+    if (laneDead.value.some(Boolean)) console.info('[lane] 网络环境已变，熔断记录整份作废')
     laneDead.value = []
   }
 
   const acquireLane = (url: string): LaneAllocation => {
+    releaseProbation()
     const urls = getLaneUrls(url)
     // 熔断过的 lane 直接排除；万一全被熔断（不该发生，markLaneFail 保底留一条）就退回全体
     let pool = urls.map((_, i) => i).filter(laneAlive)
@@ -93,5 +136,5 @@ export function useLaneControl(getLaneUrls: (url: string) => string[]): LaneCont
   const getLaneCount = (sampleUrl?: string): number =>
     sampleUrl ? Math.max(1, getLaneUrls(sampleUrl).filter((_, i) => laneAlive(i)).length) : 1
 
-  return { laneDead, acquireLane, releaseLane, markLaneOk, markLaneFail, resetLanes, getLaneCount }
+  return { laneDead, acquireLane, releaseLane, markLaneOk, markLaneFail, resetLanes, reviveLanes, getLaneCount }
 }

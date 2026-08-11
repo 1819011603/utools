@@ -38,6 +38,8 @@ export interface HlsErrorDeps {
   refetchUrl: () => Promise<boolean>
   /** 重探连接方式（或退回线性阶梯）并重载。true = 已接手 */
   escalateStrategy: () => boolean
+  /** 网络恢复时重新开始加载（引擎登记一次性 online 监听） */
+  waitForOnline: (resume: () => void) => void
 }
 
 export function useHlsErrorHandler(deps: HlsErrorDeps) {
@@ -45,6 +47,22 @@ export function useHlsErrorHandler(deps: HlsErrorDeps) {
   const hlsRetryCount = ref(0)
   let mediaErrorRecovered = 0
   const resetErrorCounters = () => { hlsRetryCount.value = 0; mediaErrorRecovered = 0 }
+
+  /**
+   * **成功一片就把网络重试额度还回去**（`FRAG_BUFFERED` 时调）。
+   *
+   * 额度的语义只能是「连续失败几次」，不能是「本次播放一共失败几次」（踩过：
+   * 「网络卡顿之后完全不能加载」）。原来只在 `loadVideo` 里清一次，于是看片一小时里
+   * 攒够 3 次偶发失败之后，**下一次任何网络抖动都直接落到 `recoverFromNetworkFailure`**
+   * ——重新取址 + 重探通道全试完还是不行就 `giveUp()` 把 hls.js 整个销毁，
+   * 而那时网络可能只是断了两秒。中间一直在正常播放，那 3 次早就不能算「连续」了。
+   */
+  const noteLoadOk = () => {
+    if (hlsRetryCount.value) hlsRetryCount.value = 0
+    mediaErrorRecovered = 0
+  }
+
+  const isOffline = () => typeof navigator !== 'undefined' && navigator.onLine === false
 
   /**
    * 网络错误重试用尽后的恢复顺序：**重新取址 → 重探连接方式 → 才报错**。
@@ -68,6 +86,18 @@ export function useHlsErrorHandler(deps: HlsErrorDeps) {
     if (!data.fatal) return
     switch (data.type) {
       case HlsLib.ErrorTypes.NETWORK_ERROR:
+        /*
+         * **本机断网不消耗重试额度，也绝不 giveUp**（踩过：切 Wi-Fi / 进电梯之后彻底不加载）。
+         * 离线时 fetch 是立刻失败的，三次重试外加 1s 间隔一共两三秒就烧完，
+         * 而一次网络切换动辄十几秒——于是它必然走到「重新取址 → 重探通道 → 销毁」那条路，
+         * 每一步都在没有网的情况下白跑，最后把播放器拆了。而这跟源站、跟地址、跟通道全无关系。
+         * 正确的动作是什么都别做，只等 online 事件（引擎那边同时会把 lane 熔断记录作废）。
+         */
+        if (isOffline()) {
+          setError('网络已断开，恢复后会自动继续')
+          deps.waitForOnline(() => { getHls()?.startLoad() })
+          break
+        }
         hlsRetryCount.value++
         if (hlsRetryCount.value <= MAX_HLS_RETRY) {
           setError(`网络错误，正在重试 (${hlsRetryCount.value}/${MAX_HLS_RETRY})...`)
@@ -99,5 +129,5 @@ export function useHlsErrorHandler(deps: HlsErrorDeps) {
     }
   }
 
-  return { onHlsError, resetErrorCounters, hlsRetryCount }
+  return { onHlsError, resetErrorCounters, noteLoadOk, hlsRetryCount }
 }

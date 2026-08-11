@@ -183,7 +183,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   // ── 连接 lane：负载均衡 + 熔断（实现见 ./prefetch/lanes.ts）──
   // fLoader（hls.js 自身分片）与预取共用同一个均衡器，避免两者各自打满同一个 origin。
   const laneControl = useLaneControl(getLaneUrls)
-  const { laneDead, acquireLane, releaseLane, markLaneOk, markLaneFail, resetLanes, getLaneCount } = laneControl
+  const { laneDead, acquireLane, releaseLane, markLaneOk, markLaneFail, resetLanes, reviveLanes, getLaneCount } = laneControl
 
   // ── 在途下载计时（诊断「哪个分片卡住、下了多久」）──
   // url → 该分片本次下载的起始 performance.now()。发起时登记，成功/失败/中止时删除。
@@ -204,6 +204,9 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   const skipSegment = (frag: any): boolean => {
     const video = opts.getVideoEl()
     if (!video || !frag) return false
+    // 断网时跳片纯属有害：下一片同样下不来，跳一次就白扔一片缓存、画面还硬跳一下。
+    // 什么都不做，等网络回来（见 useVideoEngine 的 online 处理）才是对的
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return false
     const ahead = getAheadBuffered(video)
     if (ahead > 1.5) return false                               // 播放还没吃紧 → 不是真卡点，不跳
     // 抗卡阶梯「先降速再跳片」：倍速>1 时优先靠降速守卫救场，不急着跳；
@@ -742,5 +745,5 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     }
   }
 
-  return { getAheadBuffered, getCachedAhead, getAdaptivePrefetchCount, createHlsFragLoader, triggerAdaptivePrefetch, startOnePrefetch, strategy, resetStrategy, tick, primePrefetch, getStuckSegment, laneDead, purgePlayedSegments }
+  return { getAheadBuffered, getCachedAhead, getAdaptivePrefetchCount, createHlsFragLoader, triggerAdaptivePrefetch, startOnePrefetch, strategy, resetStrategy, tick, primePrefetch, getStuckSegment, laneDead, reviveLanes, purgePlayedSegments }
 }
