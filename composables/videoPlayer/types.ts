@@ -32,7 +32,13 @@ export const MSE_CEILING_SECS = 60
 
 /** HLS 可调配置（「HLS 配置」卡片直接绑定，随 SavedState 持久化） */
 export interface HlsTuning {
-  maxBufferLength: number      // 预加载时长（秒）——JS 预取深度，同时也是给 hls.js 的 MSE 窗口上界
+  /**
+   * 「预加载时长」（秒，**墙钟 / 够播几秒**）——JS 预取深度。
+   * **不是「缓存几秒视频」**：3x 下要缓存 90 秒视频才算「够播 30 秒」，换算在
+   * useHlsPrefetch 的 `effectivePrefetchTarget` 里做。与「存货保险线」同一把尺子。
+   * 它**不再参与 hls.js 的 MSE 窗口**（那是技术天花板，见 MSE_CEILING_SECS）。
+   */
+  maxBufferLength: number
   backBufferLength: number     // 后台缓冲（秒）
   maxBufferSizeMB: number      // 预取缓存内存上限（MB）——JS 侧缓存，非 MSE
   fragLoadingTimeOut: number   // 单个分片下载超时上限（ms）
@@ -61,8 +67,9 @@ export interface HlsTuning {
  * 内存却差 5 倍。要更深的人在「HLS 配置」卡片里自己调。
  */
 export const DEFAULT_HLS_TUNING: HlsTuning = {
-  maxBufferLength: 600,        // 预读深度：10 分钟（~200MB @1080p 3Mbps）。只有这一项决定内存
-  // 进 hls.js 前会被 Math.min 压到 30（见 engine/hlsConfig.ts），填多大都只是个上界
+  // 预读深度：**够播 60 秒**（1x 时 ~22MB @3Mbps，3x 时缓存 180 秒视频 ~67MB）。
+  // 只有这一项决定预取内存。单位是墙钟秒，不是视频秒——见 HlsTuning 上的说明
+  maxBufferLength: 60,
   backBufferLength: 300,
   maxBufferSizeMB: 1024,       // LRU 天花板，兜住高码率源；正常由上面的预读深度先到顶
   fragLoadingTimeOut: 300000,
@@ -86,7 +93,16 @@ export const DEFAULT_HLS_TUNING: HlsTuning = {
 export function migrateHlsTuning(saved: Partial<HlsTuning>): Partial<HlsTuning> {
   const out = { ...saved }
   const OLD_DEFAULT = 3600
-  if (out.maxBufferLength === OLD_DEFAULT) out.maxBufferLength = DEFAULT_HLS_TUNING.maxBufferLength
+  /**
+   * 「预加载时长」的**语义**变了：以前是「缓存几秒视频」，现在是「够播几秒」（墙钟）。
+   * 老默认值 600 按新语义读就是「够播 10 分钟」，3x 下等于要缓存 30 分钟视频——
+   * 比它原本的意思还夸张，正是当初调小 3600 时要治的那个毛病。
+   * 所以旧默认值 600 也一并迁到新默认值。**同样只认精确匹配**：
+   * 手填过别的数字是明确意图，悄悄改比不改更糟。
+   */
+  if (out.maxBufferLength === OLD_DEFAULT || out.maxBufferLength === 600) {
+    out.maxBufferLength = DEFAULT_HLS_TUNING.maxBufferLength
+  }
   if (out.backBufferLength === OLD_DEFAULT) out.backBufferLength = DEFAULT_HLS_TUNING.backBufferLength
   if (out.maxBufferSizeMB === OLD_DEFAULT) out.maxBufferSizeMB = DEFAULT_HLS_TUNING.maxBufferSizeMB
   return out

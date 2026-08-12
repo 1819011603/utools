@@ -154,8 +154,18 @@ export function useVideoAutoTune(deps: VideoAutoTuneDeps) {
   }
 
   // 倍速变化：立即顶格补取；若超出当前带宽可流畅倍速，提示（不拦截）
+  /**
+   * 倍速一变，**预取目标就跟着变**——「预加载时长」量的是「够播几秒」，
+   * 目标视频秒数 = 它 × 倍速（见 useHlsPrefetch.effectivePrefetchTarget）。
+   * 1x → 3x 那一刻目标直接翻三倍，缺口凭空多出两倍；
+   * 反过来 3x → 1x 目标缩到三分之一，手上多半立刻就够了、该停取。
+   *
+   * 所以这里用 `primePrefetch()`（按新目标一次填满自适应并发）而不是 `startOnePrefetch()`（只补一片）：
+   * 后者要靠每秒心跳 +1 地爬，而用户刚把倍速拉上去的那几秒正是最容易卡的时候。
+   * 停取那一侧不用管——目标缩小后闭环下一拍自己就不再补了。
+   */
   watch(playbackRate, (rate) => {
-    if (isHls.value) engine.startOnePrefetch()
+    if (isHls.value) engine.primePrefetch()
     if (autoBestRate.value) return  // 自动模式下不弹提示（本就按带宽取值）
     const max = strategy.value.maxFluentRate
     if (max > 0 && rate > max + 0.05) {

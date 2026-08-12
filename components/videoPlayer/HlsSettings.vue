@@ -1,12 +1,16 @@
 <template>
   <div class="space-y-4">
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-      <!-- 「预加载时长」管的是 JS 预取缓存的深度，不是 MSE。给 hls.js 的 MSE 上限被写死在 30/60s
-           （见 engine/hlsConfig.ts：append 几百 MB 会触发浏览器配额/驱逐），所以填 600 也不会让 MSE 窗口变深 -->
-      <UFormGroup label="预加载时长" help="预取缓存提前下多少秒（JS 侧；MSE 窗口固定 ≤60s）。缓存越接近它，预取线程越少">
+      <!-- 单位是「**够播几秒**」（墙钟）而不是「缓存几秒视频」：3x 下要缓存 90 秒视频才算够播 30 秒。
+           跟下面的「存货保险线」同一把尺子，用户不用在脑子里做倍速换算。
+           它只管 JS 预取缓存的深度；给 hls.js 的 MSE 窗口是写死的技术天花板（见 engine/hlsConfig.ts） -->
+      <UFormGroup
+        label="预加载时长"
+        help="提前备够播多少秒（按倍速换算：3x 下会缓存 3 倍视频秒数）。缓存越接近它，预取线程越少"
+      >
         <div class="flex items-center gap-2">
-          <UInput v-model.number="hlsConfig.maxBufferLength" type="number" :min="10" :max="7200" class="flex-1" />
-          <span class="text-sm text-gray-500">秒</span>
+          <UInput v-model.number="hlsConfig.maxBufferLength" type="number" :min="5" :max="1800" class="flex-1" />
+          <span class="text-sm text-gray-500">秒可播</span>
         </div>
       </UFormGroup>
       <!-- 这里曾有「最大缓冲时长」(maxMaxBufferLength)，已删：它和「预加载时长」是一回事

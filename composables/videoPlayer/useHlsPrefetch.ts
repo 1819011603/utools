@@ -173,9 +173,24 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   const getLaneUrls = opts.getLaneUrls ?? ((url: string) => [getProxyUrl(url)])
   // 档位参数：好/中/差预设，抗卡阈值/超时/安全系数全从这里取（默认中档）
   const tier = (): TierParams => opts.getTierParams?.() ?? SERVER_TIERS[DEFAULT_TIER]
-  // 有效预取深度：只认用户「预加载时长」（maxBufferLength）。档位不收窄它——
-  // 否则快源缓存一到档位深度就停、预取线程掉 0。想省内存请调小「预加载时长」。
-  const effectivePrefetchTarget = (): number => getPrefetchTargetSecs()
+  /**
+   * 有效预取深度（**视频秒**）。
+   *
+   * 用户填的「预加载时长」是**够播几秒**（墙钟），不是「缓存几秒视频」——两者差一个倍速：
+   * 3x 下缓存 90 秒视频才等于「够播 30 秒」。而这里所有比较对象（`cachedAhead`、
+   * `headroomConnCap` 的缺口）都是**视频秒**，所以在这一处、且只在这一处乘回去。
+   *
+   * 跟「存货保险线」用的是同一把尺子（见下面 `cachedAhead / Math.max(1, rate)`）：
+   * 两个输入框都以「够播几秒」计量，用户不用在脑子里做倍速换算——
+   * 而在此之前，同一个 600 在 1x 和 3x 下代表的实际余量差三倍，光看数字完全看不出来。
+   *
+   * 档位不收窄它——否则快源缓存一到档位深度就停、预取线程掉 0。想省内存请调小这个值。
+   */
+  const effectivePrefetchTarget = (): number => {
+    const wall = getPrefetchTargetSecs()
+    if (!Number.isFinite(wall)) return Infinity   // 0/负数视为不限，别被倍速乘成 NaN
+    return wall * Math.max(1, getPlaybackRate())
+  }
 
   // 预取锚点：起播定位未到位时用 pendingStartPos，否则用真实播放头。所有「从哪往后预取」的判断都基于它。
   const anchorTime = (video: HTMLVideoElement): number => Math.max(video.currentTime, getStartPosition())
@@ -229,7 +244,12 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   const bw = useBandwidthModel()
   const { sampleSpeed, sampleBitrate, getAggregateScales } = bw
 
-  const strategy = ref<StrategySnapshot>({ perConnKBps: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0, aggregateScales: true, healthZone: 'healthy', playableSecs: 0 })
+  // 初值与 resetStrategy 里那份保持一致（漏字段 tsc 会直接报，别只补一处）
+  const strategy = ref<StrategySnapshot>({
+    perConnKBps: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0,
+    aggregateScales: true, healthZone: 'healthy', playableSecs: 0,
+    avgSegLoadMs: 0, aggKneeConn: 0,
+  })
 
   // 并发上限：默认单 host 6；多 CDN（分片跨多个 host）时按 host 数放宽（每 host 6，封顶 12）
   let hostConcurrencyCap = MAX_CONN

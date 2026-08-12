@@ -113,8 +113,9 @@ const {
   dualChannel, dualChannelUnavailable, purgePlayedSegments,
 } = useVideoPlayerCtx()
 
-// MSE 窗口上限：与 engine/hlsConfig.ts 给 hls.js 的 maxMaxBufferLength 同一个算式（那边是 append 的硬闸）
-const mseCeilingSecs = computed(() => Math.min(MSE_CEILING_SECS, hlsConfig.value.maxBufferLength))
+// MSE 窗口上限：就是 engine/hlsConfig.ts 交给 hls.js 的 maxMaxBufferLength（append 的硬闸）。
+// 它**不再跟着「预加载时长」变**——那个旋钮现在量的是「够播几秒」，单位不同，见 hlsConfig 的说明
+const mseCeilingSecs = MSE_CEILING_SECS
 
 const cacheMB = computed(() => (prefetchInfo.value.bytes / 1024 / 1024).toFixed(0))
 

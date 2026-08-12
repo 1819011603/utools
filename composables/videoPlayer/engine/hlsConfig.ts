@@ -24,9 +24,18 @@ export function buildHlsConfig(input: HlsConfigInput): Record<string, any> {
     // 产生缓冲空洞导致明明缓冲很多却卡在原地。真正的大量预读放在 JS 预取缓存里
     //（容量 = maxBufferSizeMB），hls.js 只在 MSE 里留 ~30s，随播随取。
     // Math.min 兼容并迁移旧的超大配置。
-    maxBufferLength: Math.min(30, hlsConfigValue.maxBufferLength),
-    // 上界同样从「预加载时长」推：它们本来就是一回事，独立的「最大缓冲时长」已删（见 MSE_CEILING_SECS）
-    maxMaxBufferLength: Math.min(MSE_CEILING_SECS, hlsConfigValue.maxBufferLength),
+    /*
+     * **MSE 窗口不再跟着用户的「预加载时长」走**。
+     *
+     * 那个旋钮的单位已经改成「**够播几秒**」（墙钟，随倍速换算），而 hls.js 这两项要的是
+     * **视频秒**——直接喂过去等于喂错单位（3x 下用户填 30 会被当成 30 秒视频，只有该有的三分之一）。
+     * 而且它本来也几乎没生效过：原来是 `Math.min(30, 用户值)`，用户填 600 也只是 30。
+     *
+     * MSE 窗口是**技术天花板**不是偏好：append 几百 MB 会触发浏览器配额/驱逐，
+     * 产生缓冲空洞。大量预读放在 JS 预取缓存里（深度 = 那个旋钮），hls.js 只留这么点随播随取。
+     */
+    maxBufferLength: 30,
+    maxMaxBufferLength: MSE_CEILING_SECS,
     backBufferLength: Math.min(30, hlsConfigValue.backBufferLength),
     maxBufferSize: 60 * 1000 * 1000,   // MSE 最多 ~60MB，其余交给 JS 预取缓存
     /*
