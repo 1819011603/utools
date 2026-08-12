@@ -14,6 +14,7 @@ import { buildHlsConfig } from './engine/hlsConfig'
 import { useLoadTimeout } from './engine/loadTimeout'
 import { useHlsErrorHandler, failMessageOf } from './engine/hlsErrors'
 import { useStallRecovery } from './engine/stallRecovery'
+import { probeMp4Head } from './engine/mp4Duration'
 
 export interface VideoEngineDeps {
   media: VideoMediaState
@@ -568,6 +569,30 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     if (!videoEl.value) throw new Error('视频元素未初始化，请刷新页面重试')
     videoEl.value.src = finalUrl
     videoEl.value.load()
+
+    /**
+     * 顺手自己读一次真实时长与平均码率（约 2.5KB 两发小请求，见 engine/mp4Duration.ts）。
+     *
+     * 安卓 Chrome 在这类整片 MP4 上**读不出总时长** → 进度条钉在最左边、拖不动
+     *（实测 `01:04 / 00:00`），而时长明明就写在 `moov/mvhd` 里。
+     * 不 await：它跟起播没有先后关系，读到了再补上去。
+     */
+    media.mp4ProbedDuration.value = 0
+    media.mp4AvgMbps.value = 0
+    media.mp4Kbps.value = 0
+    void probeMp4Head(finalUrl).then(({ durationSecs, mediaBytes }) => {
+      // 期间可能已经切集了，别把上一集的读数写到这一集头上
+      if (!durationSecs || videoUrl.value.trim() !== url) return
+      media.mp4ProbedDuration.value = durationSecs
+      media.mp4AvgMbps.value = mediaBytes
+        ? Math.round((mediaBytes * 8 / durationSecs / 1e6) * 100) / 100
+        : 0
+      const own = videoEl.value?.duration
+      const browserKnows = typeof own === 'number' && Number.isFinite(own) && own > 0
+      console.log(`[mp4] 自读时长 ${durationSecs.toFixed(1)}s / 码率 ${media.mp4AvgMbps.value} Mbps`
+        + `（浏览器${browserKnows ? `读到 ${own!.toFixed(1)}s` : '没读出来 → 用我们这份'}）`)
+      if (!browserKnows) duration.value = durationSecs
+    })
   }
 
   // MANIFEST_PARSED 之后要触发的起播预缓冲，由 useVideoEvents 登记（避免引擎依赖它）

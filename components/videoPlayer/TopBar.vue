@@ -44,6 +44,20 @@
           :class="dualChannel ? 'text-emerald-300/90' : 'text-white/70'"
           :title="`聚合下载速度 ≈ 单连接 ${formatSpeed(strategy.perConnKBps)} × ${strategy.targetConn} 并发`"
         >{{ formatSpeed(aggregateKBps) }}</span>
+        <!--
+          整片 MP4 的下载速度，与 HLS 那枚同一个位置。
+          **要摆成「实测 / 需要」**：单看一个速度读不出问题，只有跟「码率 × 倍速」对着看
+          才知道是不是物理上喂不动（3x 要 3 倍码率的持续供给）。喂不动标红。
+          全屏时页面上那行信息条整个看不见，而这恰恰是卡的时候最想知道的一件事。
+        -->
+        <span
+          v-else-if="mp4AvgMbps > 0"
+          class="text-xs font-medium drop-shadow"
+          :class="mp4Feedable ? 'text-emerald-300/90' : 'text-rose-300'"
+          :title="`实测下载 ${formatSpeed(mp4Kbps)}；维持 ${playbackRate}x 需要 ${formatSpeed(mp4NeedKBps)}`
+            + `（码率 ${mp4AvgMbps} Mbps × ${playbackRate}）`
+            + (mp4Feedable ? '' : ' —— 喂不动，降低倍速或换线路')"
+        >{{ formatSpeed(mp4Kbps) }} / {{ formatSpeed(mp4NeedKBps) }}</span>
         <span class="text-sm font-medium drop-shadow">{{ clock }}</span>
         <!-- 电量画成一枚小电池而不是写个数字：形状本身就传达「还剩多少」，扫一眼不用读数。
              拿不到电量的浏览器（Safari/Firefox）整块不渲染 -->
@@ -88,9 +102,15 @@ const {
   playlistTitle, currentVideoName, playlist, currentIndex,
   showEpisodes, isFullscreen, controlsVisible,
   toggleFullscreen, keepControlsAlive,
-  // 全屏顶栏那枚聚合速度（时间/电量左边）
+  // 全屏顶栏那枚速度（时间/电量左边）：HLS 用聚合速度，整片 MP4 用「实测 / 需要」
   isHls, aggregateKBps, strategy, dualChannel,
+  mp4AvgMbps, mp4Kbps, playbackRate,
 } = useVideoPlayerCtx()
+
+// 维持**当前倍速**需要多少 KB/s。倍速是乘上去的：3x 要 3 倍码率的持续供给
+const mp4NeedKBps = computed(() => (mp4AvgMbps.value * 1e6 / 8 / 1024) * playbackRate.value)
+// 还没测出速率时不先扣红帽子（起播头几秒 mp4Kbps 恒为 0）
+const mp4Feedable = computed(() => !mp4Kbps.value || mp4Kbps.value >= mp4NeedKBps.value)
 
 // 时钟/电量**不进 ctx**：它只服务这一个组件，进 ctx 就得跟别的模块抢键名
 // （「各模块返回的键名不能重复」那条约束），而它跟播放逻辑没有半点关系

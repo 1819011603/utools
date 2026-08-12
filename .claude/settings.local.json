@@ -65,7 +65,8 @@
       "Bash(sed -i '' \"s|http://localhost:3000/__hls/index.m3u8|https://demo.unified-streaming.com/k8s/features/stable/video/tears-of-steel/tears-of-steel.ism/.m3u8|\" agg.mjs infoline.mjs)",
       "Bash(sed -i '' 's/waitForTimeout\\(9000\\)/waitForTimeout\\(20000\\)/' agg.mjs infoline.mjs)",
       "Bash(node agg.mjs)",
-      "Bash(node infoline.mjs)"
+      "Bash(node infoline.mjs)",
+      "Bash(git stash *)"
     ],
     "ask": [
       "Bash(rm *)",
@@ -81,7 +82,8 @@
     ],
     "additionalDirectories": [
       "/tmp",
-      "/private/tmp"
+      "/private/tmp",
+      "/private/tmp/nbw/keep"
     ]
   }
 }

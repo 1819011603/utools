@@ -92,6 +92,20 @@ export function useVideoMediaState() {
   // ── MP4 预加载 ──
   // 类型对齐 <video>.preload，免得赋值时要 as 一下
   const preloadStrategy = ref<'none' | 'metadata' | 'auto'>('auto')
+  /**
+   * 我们自己从 `moov/mvhd` 里读出来的整片 MP4 时长（秒）。0 = 没读到。
+   * 安卓 Chrome 在这类文件上读不出总时长（进度条因此拖不动），而时长本来就在文件里，
+   * 所以自己读一份兜底。见 engine/mp4Duration.ts
+   */
+  const mp4ProbedDuration = ref(0)
+  /** 整片 MP4 的平均码率（Mbps）= mdat 字节 ÷ 时长。速度徽标的分母靠它 */
+  const mp4AvgMbps = ref(0)
+  /**
+   * 整片 MP4 的实测下载速率（KB/s）。
+   * 原生播放的请求是浏览器自己发的、`fetch` 拿不到，所以按
+   * 「已缓冲末尾每秒往前走了几秒 × 平均字节率」估——误差只来自码率不均匀，判读够用。
+   */
+  const mp4Kbps = ref(0)
 
   return {
     videoUrl, videoUrlInput, isVideoLoaded, isHls, errorMessage, isLoading, isBuffering, isResolvingUrl, resolveStage,
@@ -102,7 +116,7 @@ export function useVideoMediaState() {
     progressPercent, bufferedPercent, seekPreviewTime, seekPreviewPercent, isSeeking, hoverTime, hoverPercent,
     skipIntro, skipOutro, hasSkippedIntro, savedProgress, isRestoringFromSaved,
     hlsConfig, hlsStats, playbackDiag,
-    preloadStrategy,
+    preloadStrategy, mp4ProbedDuration, mp4AvgMbps, mp4Kbps,
   }
 }
 

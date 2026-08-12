@@ -51,6 +51,8 @@
         playsinline
         @timeupdate="onTimeUpdate"
         @loadedmetadata="onLoadedMetadata"
+        @durationchange="onDurationChange"
+        @progress="onProgress"
         @loadeddata="onLoadedData"
         @play="isPlaying = true"
         @pause="onPause"
@@ -248,6 +250,19 @@
         {{ currentVideoName }}
       </UBadge>
       <UBadge :color="isHls ? 'violet' : 'blue'" variant="soft" size="xs">{{ isHls ? 'HLS/M3U8' : 'MP4' }}</UBadge>
+      <!--
+        整片 MP4 的「实测 / 需要」。单看一个速度读不出问题，只有跟「码率 × 倍速」对着看
+        才知道是不是物理上喂不动（3x 要 3 倍码率的持续供给）。全屏里同一份数据画在顶栏（见 TopBar）。
+      -->
+      <UBadge
+        v-if="!isHls && mp4AvgMbps > 0"
+        :color="mp4Feedable ? 'green' : 'red'" variant="soft" size="xs"
+        :title="`实测下载 ${formatSpeed(mp4Kbps)}；维持 ${playbackRate}x 需要 ${formatSpeed(mp4NeedKBps)}`
+          + `（码率 ${mp4AvgMbps} Mbps × ${playbackRate}）`
+          + (mp4Feedable ? '' : ' —— 喂不动，降低倍速或换线路')"
+      >
+        {{ formatSpeed(mp4Kbps) }} / 需 {{ formatSpeed(mp4NeedKBps) }}
+      </UBadge>
       <UBadge v-if="hlsStats" color="green" variant="soft" size="xs">缓冲 {{ hlsStats.buffered.toFixed(1) }}s</UBadge>
       <!-- 预取线程：并发是自适应的（存货阶梯 / 缺口上限 / 闭环三方钳制），摆在这里才看得出
            「现在到底开了几条」。颜色跟统计面板同一套阈值：≥5 红、≥3 黄、其余绿。
@@ -291,6 +306,29 @@
         换线路
       </UButton>
 
+      <!--
+        去源站看这一集：换线路解决不了的事（片源本身有问题、想看源站的评论/更新情况、
+        或者干脆用站点自己的播放器）只能回源站。用 <a>（UButton 的 :to + external）
+        而不是 window.open：后者只能在用户手势的调用栈里同步调，还会被拦截器吃掉。
+        **文案要跟着精度走**——不精确到当前集时说成「当前集」就是骗人。
+      -->
+      <UButton
+        v-if="currentSourceLink.url"
+        :to="currentSourceLink.url"
+        target="_blank"
+        rel="noopener noreferrer"
+        external
+        size="xs"
+        variant="soft"
+        color="gray"
+        icon="i-heroicons-arrow-top-right-on-square"
+        :title="currentSourceLink.exact
+          ? `在新标签打开当前这一集的源站播放页：${currentSourceLink.url}`
+          : `在新标签打开源站播放页：${currentSourceLink.url}（这份列表只记得解析入口那一集，不一定是当前集）`"
+      >
+        {{ currentSourceLink.exact ? '源站本集' : '源站' }}
+      </UButton>
+
       <!-- 连接策略点一下展开页面下方那节设置（showAdvancedProxy 一个 ref 两处用） -->
       <UBadge
         :color="isProbing ? 'gray' : 'sky'" variant="soft" size="xs"
@@ -315,7 +353,9 @@ const {
   hlsStats, prefetchInfo, playlist, playlistTitle, currentIndex, strategyLabel, showAdvancedProxy,
   // 聚合速度那枚徽标要的：实测策略快照 + 两个换算值 + 双通道状态（配色跟统计面板一致）
   strategy, aggregateKBps, aggregateMbps, dualChannel, dualChannelUnavailable,
-  playlistSource, backToParseSource,
+  playlistSource, backToParseSource, currentSourceLink,
+  // 整片 MP4 的速度徽标（与全屏顶栏那枚同源）
+  mp4AvgMbps, mp4Kbps, playbackRate,
   // 选集按钮在顶部信息条里（VideoPlayerTopBar），这里只留抽屉本身要用的状态
   currentVideoName, volumeIcon,
   togglePlay,
@@ -326,9 +366,14 @@ const {
   videoTransform,
   onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onMouseMove, onClick, onDblClick,
   boostActive, boostRate,
-  onTimeUpdate, onLoadedMetadata, onLoadedData, onVideoEnded, onWaiting, onCanPlay,
+  onTimeUpdate, onLoadedMetadata, onDurationChange, onProgress, onLoadedData, onVideoEnded, onWaiting, onCanPlay,
   onCanPlayThrough, onSeeking, onSeeked, onPlaying, onPause, onVolumeChange, onVideoError,
 } = useVideoPlayerCtx()
+
+// 维持**当前倍速**需要多少 KB/s。倍速是乘上去的：3x 要 3 倍码率的持续供给
+const mp4NeedKBps = computed(() => (mp4AvgMbps.value * 1e6 / 8 / 1024) * playbackRate.value)
+// 还没测出速率时不先扣红帽子（起播头几秒 mp4Kbps 恒为 0）
+const mp4Feedable = computed(() => !mp4Kbps.value || mp4Kbps.value >= mp4NeedKBps.value)
 
 // 锁定按钮「未锁定时小窗不出」要用它。**曾经漏了这行声明**：模板里读不存在的属性只是一条
 // Vue warn，取值恒 undefined（= 假），于是那个条件悄悄变成「任何尺寸都显示」，界面上看不出错

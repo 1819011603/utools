@@ -204,8 +204,25 @@ export function useVideoDeepLink(deps: VideoDeepLinkDeps) {
     return navigateTo(`/video-parse?${q.toString()}`)
   }
 
+  /**
+   * 当前这一集在源站的播放页（`https://4kvm.org/play/ch4fj1bv7` 这种），供「去源站看」用。
+   *
+   * 两种精度，UI 要如实说清楚是哪一种（说成「当前集」却跳到第 1 集比不给这颗按钮更糟）：
+   *   · 按需取址的列表里存的**就是**源站播放页占位地址 → 天然精确到当前集；
+   *   · 其余列表只知道「从哪一页解析来的」，那是解析入口那一集。
+   *
+   * 判据用 `lazyIndexByUrl` 而不是 `lazyTask`：它按 URL 存、与列表天然对齐，
+   * 列表被整份替换（刷新链接）时也不会把真实 m3u8 地址错当成播放页。
+   */
+  const currentSourceLink = computed(() => {
+    const cur = playlist.playlist.value[playlist.currentIndex.value]
+    if (cur && handoff.lazyIndexByUrl.value[cur] !== undefined) return { url: cur, exact: true }
+    return { url: handoff.playlistSource.value?.pageUrl ?? '', exact: false }
+  })
+
   return {
-    backToParseSource, parseQueryVideoParams, syncUrlToQuery, copyDeepLink, deepLinkCopied }
+    backToParseSource, currentSourceLink,
+    parseQueryVideoParams, syncUrlToQuery, copyDeepLink, deepLinkCopied }
 }
 
 export type VideoDeepLink = ReturnType<typeof useVideoDeepLink>

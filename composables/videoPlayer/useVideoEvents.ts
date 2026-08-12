@@ -210,10 +210,64 @@ export function useVideoEvents(deps: VideoEventsDeps) {
     }
   }
 
+  /**
+   * 读总时长。三个来源按可信度排：
+   *   ① `video.duration` 有限值 —— 浏览器自己解出来的，最准；
+   *   ② 我们从 `moov/mvhd` 里自读的那份（`mp4ProbedDuration`）—— **安卓 Chrome 在整片 MP4 上
+   *      读不出总时长时靠它**（实测 `01:04 / 00:00`、进度条拖不动，而时长明明写在文件里）；
+   *   ③ 都没有 → 记 0。
+   *
+   * 非有限值绝不能直接赋进去：`Infinity`（源长度未知）会让进度条看着能拖、
+   * 实际 seek 到 Infinity，比老老实实显示 00:00 更糟。
+   *
+   * 而且**不能只在 loadedmetadata 读一次**：整片 MP4 的 moov 常在文件尾，
+   * 时长晚到几秒甚至一直不来，晚到的那一份走 `durationchange` 补。
+   */
+  const readDuration = () => {
+    const own = videoEl.value?.duration
+    if (typeof own === 'number' && Number.isFinite(own) && own > 0) { duration.value = own; return }
+    duration.value = media.mp4ProbedDuration.value || 0
+  }
+  const onDurationChange = () => readDuration()
+
+  /**
+   * 整片 MP4 的下载速率采样。
+   *
+   * 原生播放的请求是**浏览器自己发的**，`fetch` 层拿不到，所以没有真实的网络读数。
+   * 但「已缓冲末尾」每秒往前走了几秒 × 平均字节率 就是吞吐量，误差只来自码率不均匀，
+   * 判读「够不够喂当前倍速」完全够用。
+   *
+   * 挂在 `progress` 上而不是自己起定时器：这个事件恰好在「元素确实在收数据」时触发，
+   * 缓冲期间也来，正是要采样的时刻。EWMA 平滑——`buffered` 是一段段跳着长的。
+   */
+  let lastBufEnd = -1
+  let lastBufAt = 0
+  const onProgress = () => {
+    const v = videoEl.value
+    if (!v || isHls.value) return
+    const now = performance.now()
+    const end = v.buffered.length ? v.buffered.end(v.buffered.length - 1) : 0
+    const dt = (now - lastBufAt) / 1000
+    if (lastBufEnd >= 0 && dt > 0.2 && media.mp4AvgMbps.value > 0) {
+      const kbps = (Math.max(0, end - lastBufEnd) / dt) * media.mp4AvgMbps.value * 1e6 / 8 / 1024
+      media.mp4Kbps.value = Math.round(media.mp4Kbps.value ? media.mp4Kbps.value * 0.7 + kbps * 0.3 : kbps)
+    }
+    if (lastBufEnd < 0 || dt > 0.2) { lastBufEnd = end; lastBufAt = now }
+  }
+
   const onLoadedMetadata = () => {
     if (!videoEl.value) return
     engine.markDataReceived()
-    duration.value = videoEl.value.duration
+    readDuration()
+    lastBufEnd = -1   // 换了一集，缓冲末尾的采样基准要重来
+    // 出问题时最该看的三个读数：浏览器解出的时长、可 seek 区间、就绪等级。
+    // 「拖不动」几乎一定是 seekable 为空或只到已缓冲处，光看时长看不出来
+    if (!isHls.value) {
+      const v = videoEl.value
+      const sk = Array.from({ length: v.seekable.length }, (_, i) =>
+        `${v.seekable.start(i).toFixed(0)}~${v.seekable.end(i).toFixed(0)}`).join(', ') || '(空)'
+      console.log(`[mp4] loadedmetadata: duration=${v.duration} seekable=[${sk}] readyState=${v.readyState}`)
+    }
     outroFired = false   // 换了一集，片尾闩重新上膛
 
     // HLS 已经通过 hls.js 的 startPosition 直接从目标位置起播，这里不用再 seek 一次
@@ -429,7 +483,7 @@ export function useVideoEvents(deps: VideoEventsDeps) {
   }
 
   return {
-    onTimeUpdate, onLoadedMetadata, onVolumeChange, onVideoError,
+    onTimeUpdate, onLoadedMetadata, onDurationChange, onProgress, onVolumeChange, onVideoError,
     onCanPlay, onLoadedData, onWaiting, onCanPlayThrough,
     onSeeking, onSeeked, onPlaying, onPause, onVideoEnded,
     scheduleAutoPlay, disposeEvents,
