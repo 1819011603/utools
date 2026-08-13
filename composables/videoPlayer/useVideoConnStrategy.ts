@@ -374,7 +374,20 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
       probeResult.value = null
       lastStrategyUrl = url
     }
-    if (ladderMode.value || !isProbeable(url)) {
+    /**
+     * **MP4 一律先直连**（不探测、不伪装）。
+     *
+     * 探测那一套是为 HLS 写的：两根轴（清单/分片）、按「取回来的清单里解析出几个分片」判可达。
+     * 整片 MP4 压根没有清单，这套判据对它只会给出误判——实测 4kvm 的天翼云盘直链
+     * （`*.ctyunxs.cn`，预签名 + `Content-Disposition: attachment`）被判成直连不可达、
+     * 于是按到代理·伪装上：几百 MB 的整片全程绕一跳服务端，还赔上探测那一两秒。
+     * 而这类直链本来就是「拿到就能播」的，浏览器原生播放也不需要 CORS（我们已经不加
+     * `crossorigin` 了，见 Stage.vue）。
+     *
+     * 直连播不了的 MP4（防盗链、mixed content）仍有出路：加载失败会走
+     * `escalateStrategyAndReload` 的线性阶梯，第 1 级起就是代理。
+     */
+    if (ladderMode.value || !isProbeable(url) || !isHlsUrl(url)) {
       applyReachabilityStep(autoStrategyStep.value)
       return
     }
@@ -406,7 +419,8 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     // 那么同一条地址再测一遍必然是同样的结论，纯粹白等一整轮（单轮硬顶 12s，加起来就是用户
     // 看到的那「24s 才报错」）。地址真换了的话 url 会变，`reprobedFor !== url` 自然放行重探。
     const provenDead = probedUrl === url && diagnoseProbe(probeResult.value).severity === 'fatal'
-    if (url && isProbeable(url) && !ladderMode.value && reprobedFor !== url && !provenDead) {
+    // MP4 不探测（见 applyStrategy），失败直接爬阶梯：对它重探只是白等一轮再得出同一个误判
+    if (url && isProbeable(url) && isHlsUrl(url) && !ladderMode.value && reprobedFor !== url && !provenDead) {
       reprobedFor = url
       console.log('加载失败，重新探测连接方式')
       errorMessage.value = '加载失败，正在重新探测连接方式...'

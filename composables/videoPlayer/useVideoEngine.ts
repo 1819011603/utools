@@ -15,6 +15,7 @@ import { useLoadTimeout } from './engine/loadTimeout'
 import { useHlsErrorHandler, failMessageOf } from './engine/hlsErrors'
 import { useStallRecovery } from './engine/stallRecovery'
 import { probeMp4Head } from './engine/mp4Duration'
+import { holdPiP, reclaimPiP, releasePiPHolder, isPiPHeld } from './engine/pipHandoff'
 
 export interface VideoEngineDeps {
   media: VideoMediaState
@@ -348,49 +349,29 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   let pipRestoreOff: (() => void) | null = null
 
   /**
-   * 切集后把画中画「关掉再开一次」（等价于替用户点两下那颗按钮）。
+   * 切集第二段：新流元信息一到，就把小窗从占位元素手里要回来（第一段是 `holdPiP`，见 engine/pipHandoff）。
    *
-   * 换流必然要给 `<video>` 换一次 src（hls.js 的 attachMedia 挂的是新 MediaSource 的 blob URL），
-   * 而 Chrome 的画中画小窗绑的是换掉之前那个播放器 → **小窗停在上一集的最后一帧再也不更新**，
-   * 页面里的画面却是好的（踩过）。同一个元素**没法**在脚本里重新绑：
-   * `requestPictureInPicture()` 对已经在画中画里的元素直接原样返回，什么都不做。
-   * 所以只能退出再申请。
+   * 挂 `loadedmetadata` 而不是 `loadeddata`：`readyState` 一过 HAVE_NOTHING 就允许申请，越早接手
+   * 占位画面停留越短；`loadeddata` 留作备胎（谁先到谁算，`reclaimPiP` 里已经把占位收干净了）。
    *
-   * 而这一发申请要「用户激活」（Chrome 的激活窗口是最后一次点击后约 5 秒）→ 越早越好：
-   * 挂在 `loadedmetadata`（`readyState` 一过 HAVE_NOTHING 就能申请了）上，`loadeddata` 只是备胎，
-   * 谁先到谁算。点「下一集」到这里通常一两秒。播完自动切集、或慢源加载超过那个窗口时会被拒，
-   * 那就让小窗关掉——关掉是看得懂的，停在上一集最后一帧只会让人以为切集压根没生效。
-   *
-   * **不能用「小窗还绑在这个元素上」当前提**（踩过，这是第一版没生效的原因）：
-   * 我们自己那句 `removeAttribute('src') + load()` 加上 hls.js detach 时的同款动作，
-   * 会把元素的播放器整个拆掉，Chrome 顺手就把 `document.pictureInPictureElement` 清空了
-   * （小窗却还开着、还停在旧画面上）。所以判据只能是切集**之前**记下的 `wasPiP`，
-   * 到点时不管当前绑没绑都照样申请一发。
+   * 接不住也不重试：这时占位已经停掉、小窗跟着关，是看得懂的结果——
+   * 停在上一集最后一帧才是最坏的那种，会让人以为切集压根没生效。
    */
   const armPiPRestore = () => {
     pipRestoreOff?.()
     const el = videoEl.value
     if (!el) return
-    const reenter = (from: string) => {
+    const reclaim = () => {
       pipRestoreOff?.()
-      void (async () => {
-        try {
-          // 还绑着就先退出（同一个元素直接再申请是空操作，见上），已经被浏览器解绑的直接申请
-          if (document.pictureInPictureElement) await document.exitPictureInPicture()
-          await el.requestPictureInPicture()
-          console.log(`[pip] 切集后已重开画中画（${from}）`)
-        } catch (e) {
-          console.log(`[pip] 切集后重开画中画失败（${from}，多半是没有用户激活了）:`, e)
-        }
-      })()
+      // 用户可能在这一两秒里自己把小窗关了 → 占位已经不在画中画里，别硬塞回去
+      if (!isPiPHeld()) { releasePiPHolder(); return }
+      void reclaimPiP(el)
     }
-    const onMeta = () => reenter('loadedmetadata')
-    const onData = () => reenter('loadeddata')
-    el.addEventListener('loadedmetadata', onMeta, { once: true })
-    el.addEventListener('loadeddata', onData, { once: true })
+    el.addEventListener('loadedmetadata', reclaim, { once: true })
+    el.addEventListener('loadeddata', reclaim, { once: true })
     pipRestoreOff = () => {
-      el.removeEventListener('loadedmetadata', onMeta)
-      el.removeEventListener('loadeddata', onData)
+      el.removeEventListener('loadedmetadata', reclaim)
+      el.removeEventListener('loadeddata', reclaim)
       pipRestoreOff = null
     }
   }
@@ -429,9 +410,14 @@ export function useVideoEngine(deps: VideoEngineDeps) {
      * `videoTransform` 也不再被重建冲掉（见 forceRecomposite）。
      */
     const reuseEl = !!videoEl.value && isVideoLoaded.value && nextIsHls && isHls.value
-    // 小窗绑的播放器马上就要被换掉（复用元素）或元素本身要被重建（HLS ↔ MP4）→ 先记一笔，
-    // 新流的元信息一到就替用户关掉再开一次（见 armPiPRestore）。
+    /**
+     * 画中画接力**第一段**，必须赶在下面 `destroyHls` / `removeAttribute('src')` 之前：
+     * 那两步一执行，Chrome 就把 `document.pictureInPictureElement` 清空（小窗还开着但已经没主），
+     * 「已有元素在画中画里 → 申请免用户激活」那条豁免随之消失，播完自动切集就再也开不回来。
+     * 详见 engine/pipHandoff.ts。
+     */
     const wasPiP = !!videoEl.value && document.pictureInPictureElement === videoEl.value
+    const pipHeld = wasPiP ? await holdPiP('正在切换到下一集…') : false
     if (!reuseEl) videoKey.value++
     isVideoLoaded.value = true
     destroyHls()
@@ -448,7 +434,9 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     // 可达性探测可能阻塞（首访该 host 时约 0.5-3s）——必须在 startLoadTimeout 之前 await，
     // 否则探测耗时会被算进加载超时，慢源直接被误判成「加载超时」。
     await conn.applyStrategy(url)
-    if (videoUrl.value.trim() !== url) return   // 探测期间用户切了地址 → 放弃本次加载
+    // 探测期间用户切了地址 → 放弃本次加载。占位画面要一起收掉，否则小窗永远停在「正在切换…」
+    // （新的那一发 loadVideo 会自己重新接力）
+    if (videoUrl.value.trim() !== url) { if (pipHeld) releasePiPHolder(); return }
 
     startLoadTimeout()
     isHls.value = nextIsHls
@@ -461,12 +449,10 @@ export function useVideoEngine(deps: VideoEngineDeps) {
       else await loadNativeVideo(url)
       // 挂在这里而不是更早：src 刚设上（重建元素那条路新元素也已挂好），元信息事件还没可能派发，
       // 一次都不会漏
-      if (wasPiP) {
-        console.log('[pip] 切集前画中画开着 → 等新流元信息到位后关掉再开')
-        armPiPRestore()
-      }
+      if (pipHeld) armPiPRestore()
     } catch (e) {
       console.error('加载视频失败:', e)
+      if (pipHeld) releasePiPHolder()   // 这一集起不来了，别让小窗一直停在「正在切换…」
       errorMessage.value = '加载视频失败: ' + (e instanceof Error ? e.message : String(e))
       isLoading.value = false
       isBuffering.value = false

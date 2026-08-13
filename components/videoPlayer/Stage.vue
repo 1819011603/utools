@@ -32,7 +32,10 @@
       @contextmenu.prevent
     >
       <!--
-        播放器已移除本地文件，只放网络地址，crossorigin 恒为 anonymous。
+        **不加 `crossorigin`**：HLS 走 MSE（src 是 blob，这属性对它毫无意义），而整片 MP4 直连时
+        它是**致命的**——加了就把媒体请求变成 CORS 模式，源站不回 ACAO 就整个播不了。
+        实测 4kvm 天翼云盘直链（`*.ctyunxs.cn`）一个 CORS 头都不给，表现就是「这一集无法播放」。
+        原生播放本来不需要 CORS；我们也没有 canvas 抽帧之类需要「CORS 干净」的用法。
         非全屏也要**限高 78vh**：手机横屏时通栏宽度算出来的 16:9 高度（56.25vw）会超过视口短边，
         画面顶出屏幕、下面的信息行完全看不到。超过就由 max-h 接管，画面按 contain 居中
         （跟全屏一样左右留黑边），高度始终在一屏之内。
@@ -47,7 +50,6 @@
           // 恒非空：让 <video> 常驻合成层，forceRecomposite 才能只重画不闪（见 useVideoEngine）
           transform: videoTransform,
         }"
-        crossorigin="anonymous"
         playsinline
         @timeupdate="onTimeUpdate"
         @loadedmetadata="onLoadedMetadata"
