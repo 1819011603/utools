@@ -141,12 +141,20 @@ UI 分块：`SourceCard` / `PlaylistPanel` / `Stage` / `SettingsMenu` / `ConnSet
   再等 400ms×n、以及**画面立刻变黑**——切集体感「慢」有一半来自那一下黑屏。
   复用后上一集最后一帧留到新流出画面，**全屏也不会掉**（实测切集全程 `fullscreenElement` 不变）。
   复用前要 `removeAttribute('src') + load()`，否则残留 src 会让元素先对旧地址发一次请求
-- **切集要替用户把画中画「关掉再开一次」**（`armPiPRestore`）：换流必然给 `<video>` 换一次 src
-  （hls.js 的 attachMedia 挂新 MediaSource 的 blob），而 Chrome 的小窗绑的是换掉之前那个播放器
-  → **小窗停在上一集最后一帧再也不更新**，页面里的画面却是好的。同一个元素**没法**脚本重新绑
-  （`requestPictureInPicture()` 对已在画中画的元素原样返回），只能退出再申请。而申请要用户激活
-  （Chrome 约 5 秒窗口）→ 赶在 `loadeddata` 那一刻做；播完自动切集/慢源超窗会被拒，那就让小窗关掉
-  （关掉看得懂，停在上一集只会让人以为切集没生效）
+- **切集要靠「占位元素接力」保住画中画**（`engine/pipHandoff.ts`）：换流必然给 `<video>` 换一次 src
+  （hls.js 的 attachMedia 挂新 MediaSource 的 blob；MP4 直接改 src），而 Chrome 的小窗绑的是换掉之前
+  那个播放器 → **小窗停在上一集最后一帧再也不更新**，页面里的画面却是好的。同一个元素**没法**脚本
+  重新绑（`requestPictureInPicture()` 对已在画中画的元素直接原样返回），只能退出再申请，
+  而申请要**用户激活**。于是：
+  · 先试过「`exit()` 然后 `request()`」——**只在最近一次点击的激活窗口里成立**（Chrome 约 5s），
+    **播完自动切下一集压根没有点击** → 小窗被关掉再也开不回来（踩过，用户报的就是这一版）
+  · 规范那条豁免是「`document.pictureInPictureElement` **非空**时申请免用户激活」（Chrome 74+）
+    → 只要全程让小窗**有主**，一次激活都不用。做成两段接力：换流**前**把小窗交给一个占位 `<video>`
+    （canvas 抓流画一句「正在切换到下一集…」）→ 新流 `loadedmetadata` 时从占位手上要回来
+  · **第一段必须赶在 `destroyHls` / `removeAttribute('src')` 之前**：那两步一执行 Chrome 就把
+    `pictureInPictureElement` 清空（小窗还开着但已经没主），豁免随之消失
+  · 占位不能 `display:none`（浏览器不给它解码器），挪出视口 + 1px；`captureStream` 只在有新帧时推流，
+    所以要定时重绘；握不到 30s 自己撒手（新一集压根起不来时，小窗永远停在「正在切换…」比关掉更像坏了）
 - **起播门槛的单位是「够播几秒」不是「缓冲几秒」**（`autoPlayTarget`）：定位类（切集/拖进度/重载）
   要够播 2 秒，冷启动至少 6 秒缓冲；一律 × 倍速（3x 下缓存 6 秒才等于播 2 秒）。
   轮询起手那 500ms 固定延迟已删（预热命中时它就是全部的等待时间），粒度 300ms → 100ms
@@ -311,6 +319,16 @@ ddys.ai 当年正是这么发现的。
 分片可直连 → manifest 取自己最优的那条，靠 `noseg=1` 保住直连。故「manifest 直连 + 分片代理」不实现。
 
 **已知不支持**：manifest 只能直连 + 分片只能代理（两个方向相反的不对称同时出现）→ `resolveConnConfig` 返回 null → 退回线性阶梯。
+
+**整片 MP4 一律先直连，不探测**（`applyStrategy` 里 `!isHlsUrl(url)` 直接走阶梯 step 0）：
+探测那套是给 HLS 写的（两根轴 + 按「清单里解析出几个分片」判可达），MP4 压根没有清单，
+这套判据对它只会误判。实测 4kvm 天翼云盘直链（`*.ctyunxs.cn`，预签名 + `Content-Disposition: attachment`）
+被判成直连不可达 → 按到代理·伪装上：几百 MB 整片全程绕一跳服务端，还先赔上探测那一两秒。
+配套两条，缺一条这类源就是「这一集无法播放」：
+① **`<video>` 不加 `crossorigin`**（Stage.vue）——加了就把媒体请求变成 CORS 模式，
+   而这些网盘直链一个 ACAO 都不给。HLS 走 MSE（src 是 blob），这属性对它本来毫无意义；
+② 直连播不了的 MP4（防盗链 / mixed content）仍有出路：加载失败走 `escalateStrategyAndReload`
+   的线性阶梯，第 1 级起就是代理（对 MP4 也**不重探**，重探只是白等一轮再得出同一个误判）。
 
 ### 探测的关键约束（改之前先看）
 
