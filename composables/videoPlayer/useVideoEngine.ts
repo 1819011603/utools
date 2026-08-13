@@ -356,30 +356,43 @@ export function useVideoEngine(deps: VideoEngineDeps) {
    * `requestPictureInPicture()` 对已经在画中画里的元素直接原样返回，什么都不做。
    * 所以只能退出再申请。
    *
-   * 而这一发申请要「用户激活」（Chrome 的激活窗口是最后一次点击后约 5 秒）→ 必须赶在
-   * `loadeddata`（新流第一帧就绪、小窗一开就有画面）那一刻做，点「下一集」到这里通常一两秒。
-   * 播完自动切集、或慢源加载超过那个窗口时会被拒，那就让小窗关掉——关掉是看得懂的，
-   * 停在上一集最后一帧只会让人以为切集压根没生效。
+   * 而这一发申请要「用户激活」（Chrome 的激活窗口是最后一次点击后约 5 秒）→ 越早越好：
+   * 挂在 `loadedmetadata`（`readyState` 一过 HAVE_NOTHING 就能申请了）上，`loadeddata` 只是备胎，
+   * 谁先到谁算。点「下一集」到这里通常一两秒。播完自动切集、或慢源加载超过那个窗口时会被拒，
+   * 那就让小窗关掉——关掉是看得懂的，停在上一集最后一帧只会让人以为切集压根没生效。
+   *
+   * **不能用「小窗还绑在这个元素上」当前提**（踩过，这是第一版没生效的原因）：
+   * 我们自己那句 `removeAttribute('src') + load()` 加上 hls.js detach 时的同款动作，
+   * 会把元素的播放器整个拆掉，Chrome 顺手就把 `document.pictureInPictureElement` 清空了
+   * （小窗却还开着、还停在旧画面上）。所以判据只能是切集**之前**记下的 `wasPiP`，
+   * 到点时不管当前绑没绑都照样申请一发。
    */
   const armPiPRestore = () => {
     pipRestoreOff?.()
     const el = videoEl.value
     if (!el) return
-    const reenter = () => {
-      pipRestoreOff = null
+    const reenter = (from: string) => {
+      pipRestoreOff?.()
       void (async () => {
-        // 这期间用户可能自己关了小窗，别硬塞回去
-        if (document.pictureInPictureElement !== el) return
         try {
-          await document.exitPictureInPicture()
+          // 还绑着就先退出（同一个元素直接再申请是空操作，见上），已经被浏览器解绑的直接申请
+          if (document.pictureInPictureElement) await document.exitPictureInPicture()
           await el.requestPictureInPicture()
+          console.log(`[pip] 切集后已重开画中画（${from}）`)
         } catch (e) {
-          console.log('切集后重开画中画失败（多半是没有用户激活了）:', e)
+          console.log(`[pip] 切集后重开画中画失败（${from}，多半是没有用户激活了）:`, e)
         }
       })()
     }
-    el.addEventListener('loadeddata', reenter, { once: true })
-    pipRestoreOff = () => { el.removeEventListener('loadeddata', reenter); pipRestoreOff = null }
+    const onMeta = () => reenter('loadedmetadata')
+    const onData = () => reenter('loadeddata')
+    el.addEventListener('loadedmetadata', onMeta, { once: true })
+    el.addEventListener('loadeddata', onData, { once: true })
+    pipRestoreOff = () => {
+      el.removeEventListener('loadedmetadata', onMeta)
+      el.removeEventListener('loadeddata', onData)
+      pipRestoreOff = null
+    }
   }
 
   const loadVideo = async () => {
@@ -416,9 +429,9 @@ export function useVideoEngine(deps: VideoEngineDeps) {
      * `videoTransform` 也不再被重建冲掉（见 forceRecomposite）。
      */
     const reuseEl = !!videoEl.value && isVideoLoaded.value && nextIsHls && isHls.value
-    // 复用元素时画中画小窗还在，但它绑的播放器马上就要被换掉 → 记一笔，新流出画面后重开（见 armPiPRestore）。
-    // 重建元素那条路（HLS ↔ MP4）小窗会被浏览器直接关掉，没有可挽救的东西。
-    const wasPiP = reuseEl && document.pictureInPictureElement === videoEl.value
+    // 小窗绑的播放器马上就要被换掉（复用元素）或元素本身要被重建（HLS ↔ MP4）→ 先记一笔，
+    // 新流的元信息一到就替用户关掉再开一次（见 armPiPRestore）。
+    const wasPiP = !!videoEl.value && document.pictureInPictureElement === videoEl.value
     if (!reuseEl) videoKey.value++
     isVideoLoaded.value = true
     destroyHls()
@@ -446,8 +459,12 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     try {
       if (isHls.value) await loadHlsVideo(url, reuseEl)
       else await loadNativeVideo(url)
-      // 挂在这里而不是更早：src 刚设上、loadeddata 还没可能派发，一次都不会漏
-      if (wasPiP) armPiPRestore()
+      // 挂在这里而不是更早：src 刚设上（重建元素那条路新元素也已挂好），元信息事件还没可能派发，
+      // 一次都不会漏
+      if (wasPiP) {
+        console.log('[pip] 切集前画中画开着 → 等新流元信息到位后关掉再开')
+        armPiPRestore()
+      }
     } catch (e) {
       console.error('加载视频失败:', e)
       errorMessage.value = '加载视频失败: ' + (e instanceof Error ? e.message : String(e))
