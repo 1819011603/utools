@@ -344,6 +344,44 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     tier.guardRateCeiling.value = Infinity   // 解除抗卡降速守卫
   }
 
+  /** 上一次挂的画中画重开监听（切集可能连着来，别叠着挂） */
+  let pipRestoreOff: (() => void) | null = null
+
+  /**
+   * 切集后把画中画「关掉再开一次」（等价于替用户点两下那颗按钮）。
+   *
+   * 换流必然要给 `<video>` 换一次 src（hls.js 的 attachMedia 挂的是新 MediaSource 的 blob URL），
+   * 而 Chrome 的画中画小窗绑的是换掉之前那个播放器 → **小窗停在上一集的最后一帧再也不更新**，
+   * 页面里的画面却是好的（踩过）。同一个元素**没法**在脚本里重新绑：
+   * `requestPictureInPicture()` 对已经在画中画里的元素直接原样返回，什么都不做。
+   * 所以只能退出再申请。
+   *
+   * 而这一发申请要「用户激活」（Chrome 的激活窗口是最后一次点击后约 5 秒）→ 必须赶在
+   * `loadeddata`（新流第一帧就绪、小窗一开就有画面）那一刻做，点「下一集」到这里通常一两秒。
+   * 播完自动切集、或慢源加载超过那个窗口时会被拒，那就让小窗关掉——关掉是看得懂的，
+   * 停在上一集最后一帧只会让人以为切集压根没生效。
+   */
+  const armPiPRestore = () => {
+    pipRestoreOff?.()
+    const el = videoEl.value
+    if (!el) return
+    const reenter = () => {
+      pipRestoreOff = null
+      void (async () => {
+        // 这期间用户可能自己关了小窗，别硬塞回去
+        if (document.pictureInPictureElement !== el) return
+        try {
+          await document.exitPictureInPicture()
+          await el.requestPictureInPicture()
+        } catch (e) {
+          console.log('切集后重开画中画失败（多半是没有用户激活了）:', e)
+        }
+      })()
+    }
+    el.addEventListener('loadeddata', reenter, { once: true })
+    pipRestoreOff = () => { el.removeEventListener('loadeddata', reenter); pipRestoreOff = null }
+  }
+
   const loadVideo = async () => {
     if (!videoUrl.value.trim()) return
 
@@ -378,6 +416,9 @@ export function useVideoEngine(deps: VideoEngineDeps) {
      * `videoTransform` 也不再被重建冲掉（见 forceRecomposite）。
      */
     const reuseEl = !!videoEl.value && isVideoLoaded.value && nextIsHls && isHls.value
+    // 复用元素时画中画小窗还在，但它绑的播放器马上就要被换掉 → 记一笔，新流出画面后重开（见 armPiPRestore）。
+    // 重建元素那条路（HLS ↔ MP4）小窗会被浏览器直接关掉，没有可挽救的东西。
+    const wasPiP = reuseEl && document.pictureInPictureElement === videoEl.value
     if (!reuseEl) videoKey.value++
     isVideoLoaded.value = true
     destroyHls()
@@ -405,6 +446,8 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     try {
       if (isHls.value) await loadHlsVideo(url, reuseEl)
       else await loadNativeVideo(url)
+      // 挂在这里而不是更早：src 刚设上、loadeddata 还没可能派发，一次都不会漏
+      if (wasPiP) armPiPRestore()
     } catch (e) {
       console.error('加载视频失败:', e)
       errorMessage.value = '加载视频失败: ' + (e instanceof Error ? e.message : String(e))

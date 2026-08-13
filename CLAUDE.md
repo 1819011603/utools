@@ -141,6 +141,12 @@ UI 分块：`SourceCard` / `PlaylistPanel` / `Stage` / `SettingsMenu` / `ConnSet
   再等 400ms×n、以及**画面立刻变黑**——切集体感「慢」有一半来自那一下黑屏。
   复用后上一集最后一帧留到新流出画面，**全屏也不会掉**（实测切集全程 `fullscreenElement` 不变）。
   复用前要 `removeAttribute('src') + load()`，否则残留 src 会让元素先对旧地址发一次请求
+- **切集要替用户把画中画「关掉再开一次」**（`armPiPRestore`）：换流必然给 `<video>` 换一次 src
+  （hls.js 的 attachMedia 挂新 MediaSource 的 blob），而 Chrome 的小窗绑的是换掉之前那个播放器
+  → **小窗停在上一集最后一帧再也不更新**，页面里的画面却是好的。同一个元素**没法**脚本重新绑
+  （`requestPictureInPicture()` 对已在画中画的元素原样返回），只能退出再申请。而申请要用户激活
+  （Chrome 约 5 秒窗口）→ 赶在 `loadeddata` 那一刻做；播完自动切集/慢源超窗会被拒，那就让小窗关掉
+  （关掉看得懂，停在上一集只会让人以为切集没生效）
 - **起播门槛的单位是「够播几秒」不是「缓冲几秒」**（`autoPlayTarget`）：定位类（切集/拖进度/重载）
   要够播 2 秒，冷启动至少 6 秒缓冲；一律 × 倍速（3x 下缓存 6 秒才等于播 2 秒）。
   轮询起手那 500ms 固定延迟已删（预热命中时它就是全部的等待时间），粒度 300ms → 100ms
