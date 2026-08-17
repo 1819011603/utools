@@ -141,8 +141,9 @@ export function useVideoDeepLink(deps: VideoDeepLinkDeps) {
       q.push('index=' + idx)
       const epName = handoff.playlistNames.value[urls[idx]]
       if (epName) q.push('ep=' + encodeURIComponent(epName))
-      // 槽照写不误：本机刷新/回退时能直接读回来，省掉一次重新解析（几秒）
-      handoff.writeHandoff(urls, idx)
+      // 这里曾经顺手 writeHandoff 一份，给「本机刷新/回退时直接读回来、省掉一次重新解析」用。
+      // 那条捷径已经从 mount() 里删掉，没人再读这一份 → 一并去掉，别留个写了没人看的槽
+      //（留着更坏：槽里那份会随着切集持续过期，将来谁误读一次就是拿旧列表当实况）
       const search = '?' + q.join('&')
       if (window.location.search !== search) {
         window.history.replaceState(window.history.state, '', window.location.pathname + search + window.location.hash)

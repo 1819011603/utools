@@ -9,7 +9,6 @@
  */
 import type { Ref } from 'vue'
 import type { ProbeResult, ConnConfig } from './useReachabilityProbe'
-import { saveProbe, loadProbe } from './probeStore'
 import type { VideoMediaState } from './useVideoMediaState'
 import type { VideoServerTier } from './useVideoServerTier'
 
@@ -298,7 +297,6 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   const warmProbes = new Map<string, ProbeResult>()
 
   const rememberWarmProbe = (url: string, r: ProbeResult) => {
-    saveProbe(url, r)                      // 同时落一份到跨页缓存（解析页/新标签页的播放器共用）
     warmProbes.delete(url)                 // 重新插到队尾，维持 LRU 顺序
     warmProbes.set(url, r)
     while (warmProbes.size > WARM_PROBE_MAX) {
@@ -308,17 +306,16 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     }
   }
 
-  /** 取一条还没过期的近期结论；**取用即删**（同一份结论不重复吃第二次） */
+  /**
+   * 取一条还没过期的近期结论；**取用即删**（同一份结论不重复吃第二次）。
+   *
+   * 只认**本实例内存里**这份 Map。曾经在 miss 时还去读一份 localStorage 跨页缓存
+   * （解析页「可达性检测」刚测过的地址 → 播放器新标签页免掉整轮重测），已整块删除：
+   * 现在播放器每次起播一律当场实测，代价是多等一轮探测（单通道 8s / 整轮 12s 硬顶）。
+   */
   const takeWarmProbe = (url: string): ProbeResult | null => {
     const r = warmProbes.get(url)
-    if (!r) {
-      // 本实例内存里没有 → 试跨页缓存。**播放器现在开新标签页**，解析页那一轮
-      // 「可达性检测」刚测过的同一条地址，在这个实例里是全冷的（Map 跨不过标签页）。
-      // 按完整 URL 严格匹配 + 取用即删，跟 warmProbes 同规格（见 probeStore）
-      const shared = loadProbe(url)
-      if (shared) console.log('用跨页缓存的探测结论，跳过本轮探测')
-      return shared
-    }
+    if (!r) return null
     warmProbes.delete(url)
     return Date.now() - r.at < WARM_PROBE_TTL ? r : null
   }

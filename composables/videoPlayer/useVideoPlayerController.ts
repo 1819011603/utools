@@ -181,38 +181,19 @@ export function useVideoPlayerController() {
     }
 
     if (queryParams.parseUrl) {
-      // 分享进来的链接：列表由「源站播放页 + 线路」现场解析。
-      // 但从 /video-parse 点进来、或本机刷新时，交接槽里就是同一份列表——
-      // 直接用，省掉一次好几秒的重新解析（这是最常走的路径，不能每次都重解析）。
+      // 分享进来的链接：列表一律由「源站播放页 + 线路」**现场解析**。
+      //
+      // 这里曾经有一条捷径：从 /video-parse 点进来或本机刷新时，交接槽里就是同一份列表
+      //（按 pageUrl + 线路名比对），直接用它装列表、跳过整轮解析。已按需求删除——
+      // 现在每次进播放器都重解析一遍，代价是慢站几秒、按需取址的站点还可能撞上限流；
+      // 换来的是「列表永远是当前源站的实况」，作业单/集名/线路表都是新的。
+      // 按需取址的站点不受影响：loadFromParseSource 自己会 setLazyTask 拿到新作业单。
       const line = queryParams.line ?? 0
-      const p = handoff.readHandoff()
-      // 槽算不算「同一份列表」：线路有名字就按名字比，序号只是兜底
-      //（源站增删线路后序号会漂，光比序号会把另一条线路的列表当成这一份用上）
-      const sameLine = queryParams.lineName
-        ? p?.source?.lineName === queryParams.lineName
-        : (p?.source?.line ?? 0) === line
-      const fromSlot = !!p && p.source?.pageUrl === queryParams.parseUrl && sameLine
-      // 槽里的 index 只有在槽确实是这份列表时才能用。
-      // 否则分享链接（不带 index，本该从第 1 集起播）会跳到本机上一部剧看到的集数——
-      // 收到链接的人完全不知道为什么开在第 5 集（实测抓到过）
-      const idx = queryParams.index ?? (fromSlot ? p!.index ?? 0 : 0)
-
-      if (fromSlot && p) {
-        handoff.applyHandoffMeta(p)
-        playlist.playlist.value = p.urls
-        media.videoUrlInput.value = p.urls.join('\n')
-        // 集数也按名字认（槽里存了集名），下标只是兜底：源站往中间插集后下标会挪位
-        const byName = queryParams.ep
-          ? p.urls.findIndex(u => handoff.playlistNames.value[u] === queryParams.ep)
-          : -1
-        playlist.currentIndex.value = byName >= 0 ? byName : Math.min(Math.max(idx, 0), p.urls.length - 1)
-        await nextTick()
-        media.isRestoringFromSaved.value = true
-        await playlist.playByIndex(playlist.currentIndex.value)
-      } else {
-        await nextTick()
-        await playlist.loadFromParseSource(queryParams.parseUrl, line, idx, queryParams.lineName, queryParams.ep)
-      }
+      // 集数只认 query。槽里那份 index 一并弃用——它本来就只在「槽确实是这份列表」时才敢用
+      //（否则分享链接会跳到收链接的人本机上一部剧的集数，实测抓到过）
+      const idx = queryParams.index ?? 0
+      await nextTick()
+      await playlist.loadFromParseSource(queryParams.parseUrl, line, idx, queryParams.lineName, queryParams.ep)
     } else if (queryParams.urls.length) {
       media.videoUrlInput.value = queryParams.urls.join('\n')
       await nextTick()

@@ -102,10 +102,9 @@ const run = async () => {
       origin: props.origin, referer: props.referer, signal: ctrl.signal,
     })
     if (mine !== seq) return
+    // 结论只服务本页这块 UI（进播放器前先知道能不能播）。**不再落一份给播放器复用**——
+    // 那份跨页缓存已按需求删掉，播放器起播时一律自己当场实测一轮
     result.value = r
-    // 存给播放器用：点「播放」会开新标签页，那边的 warmProbes 是全冷的，
-    // 不存的话同一条地址马上又要整轮重测一遍（见 probeStore）
-    saveProbe(props.url, r)
   } catch (e: any) {
     if (mine !== seq) return
     error.value = '检测失败：' + (e?.message || String(e))
