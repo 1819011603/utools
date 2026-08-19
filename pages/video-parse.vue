@@ -480,9 +480,9 @@ const result = ref<ParseResult | null>(null)
 const powTried = ref(0)
 const powPercent = computed(() => Math.min(95, Math.round((powTried.value / 65536) * 100)))
 
-// 解出的 cookie 在本次会话内复用：实测同站不同影片页共用同一挑战常量，
-// 只有第一次解析需要算 PoW
-const powCookie = ref('')
+// 解出的 cookie 在本次会话内复用（实测同站不同影片页共用同一挑战常量，只有第一次要算 PoW），
+// 缓存与「令牌被拒就重算一轮」都收在 usePowCookie 里——播放器的按需取址也要用同一份，
+// 各页留一份必然漂移
 const lastParsedUrl = ref('')
 
 const userRules = ref<ParseRule[]>([])
@@ -733,15 +733,13 @@ const startResolve = async (line?: number) => {
 
   try {
     // 工作量证明 + 分批续拉都在 useResolvePlaylist 里，与播放器的「刷新链接」共用同一套
-    const { result: res, cookie } = await resolvePlaylist({
+    const { result: res } = await resolvePlaylist({
       pageUrl: url,
       line,
-      cookie: powCookie.value,
       rules: userRules.value,
       onStage: t => { stage.value = t },
       onPow: n => { powTried.value = n },
     })
-    powCookie.value = cookie
     result.value = res
 
     // 传进来的是**详情页**时（搜索结果、或用户自己粘的），服务端会换成第 1 集的播放页，
@@ -779,13 +777,7 @@ const startResolve = async (line?: number) => {
     syncUrlToQuery()   // 地址栏跟着当前地址+线路走，随时可复制分享
     saveResultCache()  // 从播放器返回时直接摆回来，省掉一次几秒的重解析
   } catch (e: any) {
-    // 409 = 服务端说 cookie 失效：丢掉重算一轮，只重试一次避免死循环
-    const status = e?.statusCode || e?.response?.status
-    if (status === 409 && powCookie.value) {
-      powCookie.value = ''
-      busy.value = false
-      return startResolve(line)
-    }
+    // 409（令牌失效）已由 resolvePlaylist 内部重算一轮，到这里说明重算也没过
     error.value = e?.statusMessage || e?.data?.statusMessage || e?.message || '解析失败'
   } finally {
     busy.value = false

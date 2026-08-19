@@ -1367,3 +1367,12 @@ localStorage 自己确实不过期，但**没拿到持久化授权时它随时�
 - **两个 compatibilityDate 是两回事**：`nuxt.config.ts` 的是 Nitro 特性门控（构建日志打印的就是它）；
   真正决定 CF 运行时行为的是 `wrangler.json` 的。看到日志里是 2024-07-01 不代表线上就是它
 - **`crossorigin="anonymous"`** 只对远程源加，本地 blob 要设 `undefined`
+- **服务端的 module 级缓存在 CF Pages 上只活在当前 isolate 里**，下一个请求换个 isolate 就是空的
+  ——**本地 Node 单进程反而一直命中，所以这类 bug 只在线上偶发**。凡是「服务端记着、客户端不带」的东西
+  都踩得到。实测 ncat22 的反爬令牌（`server/parsers/cookieStore.ts`）：解析页刚算完 PoW，
+  播放器按需取址那一发 `/api/resolve?step=extract&only=1` 不带令牌、读不到缓存 → **409**，
+  而这条路径自身走不到 `step=challenge`，没有算 PoW 的出路，只能落成「校验未通过」那一集播不了；
+  刷新恰好命中同一 isolate 就好了 = **「从 parse 进 player 报错，刷新又好了」**。
+  修法不是给缓存续命，是**让浏览器持有令牌、每一发都自己带上**（`composables/usePowCookie.ts`：
+  按 host 存 + 409 就现算一轮重试一次 + 同 host 的 PoW 计算去重——按需取址有 3 条并发，
+  令牌一过期就是三发同时 409）。服务端那份缓存留着当便车，但**任何逻辑都不许依赖它命中**

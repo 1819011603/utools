@@ -51,9 +51,26 @@ const callApi = (
     },
   })
 
+/**
+ * 解析一轮；令牌没过（409）就丢掉重来一轮。
+ *
+ * 重试那一轮**必须把 cookie 清空**：清空才会从 step=challenge 起手，
+ * 也才有机会重算 PoW——带着同一个已被拒的令牌再发一次只会再 409。
+ */
 export async function resolvePlaylist(opts: ResolveOptions): Promise<ResolveOutcome> {
+  try {
+    return await resolveOnce(opts)
+  } catch (e) {
+    if (!isPowRejected(e)) throw e
+    dropPowToken(opts.pageUrl)
+    return await resolveOnce({ ...opts, cookie: '' })
+  }
+}
+
+async function resolveOnce(opts: ResolveOptions): Promise<ResolveOutcome> {
   const { pageUrl, line, rules, onStage, onPow } = opts
-  let cookie = opts.cookie ?? ''
+  // 令牌由浏览器持有（见 usePowCookie）：服务端那份缓存在 CF Pages 上换个 isolate 就没了
+  let cookie = opts.cookie ?? readPowToken(pageUrl)
 
   onStage?.('正在获取页面…')
   let res = await callApi(pageUrl, cookie ? 'extract' : 'challenge', cookie, line, 0, rules)
@@ -63,6 +80,7 @@ export async function resolvePlaylist(opts: ResolveOptions): Promise<ResolveOutc
     onStage?.('正在计算站点校验…')
     const pow = await solvePow(res.c, res.n1, res.target, { onProgress: n => onPow?.(n) })
     cookie = pow.cookie
+    savePowToken(pageUrl, cookie)  // 同站后续请求（按需取址、刷新链接）直接复用，不再重算
     onStage?.(`校验通过（${pow.tried} 次 / ${pow.ms}ms），正在解析选集…`)
     res = await callApi(pageUrl, 'extract', cookie, line, 0, rules)
   } else {

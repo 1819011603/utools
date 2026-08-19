@@ -41,7 +41,7 @@ export interface SiteSearchState {
   powTried?: number
 }
 
-/** 反爬令牌，按 host 存。解析页有它自己那份（powCookie），这里不去打通——两边都只是缓存，各自算一次的代价可接受 */
+/** 反爬令牌，按 host 存。解析链路有它自己那份（usePowCookie），这里不去打通——两边都只是缓存，各自算一次的代价可接受 */
 const powTokens = new Map<string, string>()
 
 /**

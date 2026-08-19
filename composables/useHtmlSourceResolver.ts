@@ -32,16 +32,20 @@ export async function runHtmlSourceResolve(
     const ep = episodes[i]
     if (!pageUrl || !ep) return
     try {
-      const res = await $fetch<any>('/api/resolve', {
+      // 反爬令牌必须**自己带上**：服务端那份按 host 的缓存是 module 级 Map，
+      // 在 Cloudflare Pages 上换个 isolate 就是空的，而这条 only=1 的路径自身走不到
+      // step=challenge，服务端只能回 409。表现就是「解析页好好的，播放器切集报校验未通过，
+      // 刷新又好了」（踩过）。withPowRetry 负责 409 时现算一轮再重试一次。
+      const res = await withPowRetry(pageUrl, token => $fetch<any>('/api/resolve', {
         query: {
           step: 'extract',
           url: pageUrl,
           only: '1',
+          ...(token ? { cookie: token } : {}),
           ...(rules.length ? { rules: JSON.stringify(rules) } : {}),
         },
-      })
-      // 站点的反爬 cookie 由服务端按 host 缓存，这里不必也拿不到，
-      // 真过期了服务端会自己重取；只有它彻底要不到地址时才落到 error
+      }))
+      // 拿到地址就算这一集成功；只有它彻底要不到地址时才落到 error
       if (res?.currentVideoUrl) ep.videoUrl = res.currentVideoUrl
       else ep.error = '该集未给出直链'
       // 防盗链域名是服务端从站点播放器配置里现取的，会变——每集取址都把最新值带回去，
