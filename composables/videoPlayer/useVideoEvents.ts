@@ -43,6 +43,18 @@ const AUTOPLAY_MAX_WAIT_MS = 8000
  * 真慢的源线性爬要卡七八次才够，指数两三次就到位。
  */
 const STALL_ESCALATION_CAP = 8
+/**
+ * 门槛归零要的「连续流畅」秒数。
+ *
+ * **原来是 20s，太长了**：断网 / 换 Wi-Fi 必然制造卡顿，而那些卡顿**不是这条源不争气**，
+ * 却一样把门槛翻上去。于是网络一恢复，`onWaiting` 就主动 pause 去攒 `2^stalls` 的门槛
+ * ——1x 下 stalls=2 就是 24s，实际必然吃满 `AUTOPLAY_MAX_WAIT_MS` 的 8s 封顶。
+ * 也就是说**网络早通了，画面还要再等 8 秒**，而 20s 的下坡路让这个惩罚在整段恢复期里一直挂着。
+ *
+ * 5s 是「一次抖动过去了」的量级：真慢的源 5 秒内一定会再卡一次（门槛照样涨回去，
+ * 抗锯齿那个初衷不受影响），而一次性的网络事件则很快被放过。
+ */
+const STALL_DECAY_SMOOTH_SECS = 5
 
 /** 起播门槛（秒缓冲）。relocating = 切集/拖进度/重载那一档；stalls = 近期卡顿次数 */
 const autoPlayTarget = (rate: number, relocating: boolean, stalls = 0): number => {
@@ -121,7 +133,7 @@ export function useVideoEvents(deps: VideoEventsDeps) {
 
   // ── 起播预缓冲 ──
   /**
-   * 近期卡顿次数（供门槛递增用）。**连续流畅 20s 就清零**——门槛涨上去容易，
+   * 近期卡顿次数（供门槛递增用）。**连续流畅 `STALL_DECAY_SMOOTH_SECS` 就清零**——门槛涨上去容易，
    * 不给它一条下坡路的话，源恢复正常之后每次拖进度还得干等十几秒（比卡顿更烦）。
    * 计数只认 stallTracker 的真实停顿（排除 seek 与用户 pause），不认我们自己的加载等待。
    */
@@ -130,7 +142,7 @@ export function useVideoEvents(deps: VideoEventsDeps) {
   const refreshStallEscalation = () => {
     const n = engine.stall.stallCount.value
     if (n > lastSeenStallCount) { recentStalls += n - lastSeenStallCount; lastSeenStallCount = n }
-    if (engine.stall.smoothSecs.value >= 20) recentStalls = 0
+    if (engine.stall.smoothSecs.value >= STALL_DECAY_SMOOTH_SECS) recentStalls = 0
     return recentStalls
   }
   engine.registerTickHook(refreshStallEscalation)   // 每秒心跳刷新一次

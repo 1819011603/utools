@@ -53,7 +53,10 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
   而自动切集没有点击。规范豁免是「`pictureInPictureElement` 非空时申请免激活」→ 换流**前**交给占位 `<video>`，
   新流 `loadedmetadata` 时要回来。第一段必须赶在 `destroyHls` / `removeAttribute('src')` **之前**
 - **起播门槛的单位是「够播几秒」不是「缓冲几秒」**（`autoPlayTarget`，一律 × 倍速），且随近期卡顿次数翻倍
-  （慢源上「五次一秒的卡」远比「一次四秒的等」难受）
+  （慢源上「五次一秒的卡」远比「一次四秒的等」难受）。**但下坡路要短（`STALL_DECAY_SMOOTH_SECS` = 连续流畅 5s
+  就归零，原来是 20s）**：断网/换网必然制造卡顿，而那些卡顿不是源站的错，却一样把门槛翻上去 →
+  网络一恢复 `onWaiting` 就主动 pause 去攒 `2^stalls`（1x 下 stalls=2 就要 24s，必然吃满 8s 封顶）
+  → **「网络早通了画面还要再等 8 秒」**。5s 不影响抗锯齿的初衷：真慢的源 5 秒内一定会再卡一次
 - **跳过片头走 hls.js 的 `startPosition`**，不在 `loadedmetadata` 里手动 seek。进度优先于片头
 - **探测顺手下载的 m3u8 原文喂给 hls.js**（`pLoader` + `takeSeededManifest`）：**回调必须延到下一个宏任务**，
   同步回会赶在 MediaSource `sourceopen` 之前 →「分片一个接一个 200、缓冲恒 0、一直转圈」。
