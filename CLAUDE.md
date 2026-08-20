@@ -52,11 +52,17 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
 - **切集靠占位元素接力保住画中画**（`engine/pipHandoff.ts`）：换流必然换 src，小窗绑的是换掉之前那个；退出再申请要用户激活，
   而自动切集没有点击。规范豁免是「`pictureInPictureElement` 非空时申请免激活」→ 换流**前**交给占位 `<video>`，
   新流 `loadedmetadata` 时要回来。第一段必须赶在 `destroyHls` / `removeAttribute('src')` **之前**。
-  **占位画面的比例不能写死 16:9**（`lockedAspect`，取开头那一集的固有比例）：小窗比例跟着当前在画中画里的
-  那个元素走，占位一塞进去窗口就被拉一次 → 放 2.40:1 的片子（实测 1920×800）时每切一集
-  「2.4:1 → 16:9 高度长一截 → 2.4:1 宽度又长一截」，**一集净胖一圈且只增不减**（缩小方向浏览器不给）。
-  **标准 PiP API 没有任何尺寸/比例参数**，能控的只有占位这一段；真要锁死比例只能 canvas letterbox
-  或换 Document PiP（`requestWindow({width,height})`，Safari 没有）
+  **占位画面的比例默认跟着小窗，不能写死 16:9**（`currentAspect()`）：小窗比例跟着当前在画中画里的
+  那个元素走，占位一塞进去窗口就被顶一次。**比例只能从 `PictureInPictureWindow` 的 `width/height` 读**
+  ——`videoWidth/videoHeight` 是视频固有尺寸，窗口被拖过就不是一回事了；而它**只能在 `enterpictureinpicture`
+  那一刻拿**（DOM 里没有 `document.pictureInPictureWindow`），且要挂在 **`document` 捕获阶段**
+  （事件不冒泡、`<video>` 会被 `videoKey++` 换掉、原生控件进小窗不走 `togglePiP`）
+- **画中画小窗只会自己变大，绝不自己变小**（实测日志）：一部 2.40:1 的片子（1920×800）里 ABR 切到
+  16:9 那档（1920×1080），小窗当场 384×160 → 384×216（**宽度不动只长高**）；比例切回 2.40:1 后
+  **小窗赖在 384×216 不动**。**标准 PiP API 没有任何尺寸/比例参数**，唯一能让浏览器重算尺寸的动作是「重进一次」
+  → `resyncPiPAspect`（听 `<video>` 的 `resize`）。**绝不能真的 `exitPictureInPicture()`**：一 exit
+  豁免就没了，而比例变化是自动发生的、手上没有点击 → 必被 `NotAllowedError` 拒，小窗关掉再也开不回来。
+  走**两跳**（占位进 → 真视频要回来，全程「有主」）实测有效，且要有冷却（比例会来回抖，每次重开都闪一下黑）
 - **起播门槛的单位是「够播几秒」不是「缓冲几秒」**（`autoPlayTarget`，一律 × 倍速），且随近期卡顿次数翻倍
   （慢源上「五次一秒的卡」远比「一次四秒的等」难受）。**但下坡路要短（`STALL_DECAY_SMOOTH_SECS` = 连续流畅 5s
   就归零，原来是 20s）**：断网/换网必然制造卡顿，而那些卡顿不是源站的错，却一样把门槛翻上去 →

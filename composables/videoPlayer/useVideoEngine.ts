@@ -15,7 +15,7 @@ import { useLoadTimeout } from './engine/loadTimeout'
 import { useHlsErrorHandler, failMessageOf } from './engine/hlsErrors'
 import { useStallRecovery } from './engine/stallRecovery'
 import { probeMp4Head } from './engine/mp4Duration'
-import { holdPiP, reclaimPiP, releasePiPHolder, isPiPHeld } from './engine/pipHandoff'
+import { holdPiP, reclaimPiP, releasePiPHolder, isPiPHeld, startPiPTracking, resyncPiPAspect } from './engine/pipHandoff'
 import { onNetChange, isRecovering } from './engine/netWatch'
 import { clearDirectDead } from './probeStore'
 
@@ -293,13 +293,28 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   }
 
   // ── 实时心跳：每秒刷新缓冲读数 + 跑闭环预取控制（不依赖 FRAG_BUFFERED，卡顿时也持续工作） ──
+  /**
+   * `<video>` 的固有尺寸变了（ABR 换到比例不同的画质档，或流里拼了不同分辨率的片段）。
+   * 画中画小窗只会自己变大、不会自己变小 → 交给 resyncPiPAspect 重开一次（见那边的说明）。
+   *
+   * 挂在 `document` 捕获阶段：`resize` 不冒泡，而 `<video>` 会被 `videoKey++` 整个换掉。
+   */
+  const onIntrinsicResize = (e: Event) => {
+    const v = e.target as HTMLVideoElement | null
+    if (!v || !v.videoWidth || v !== videoEl.value) return
+    void resyncPiPAspect(v)
+  }
+
   let hlsTickTimer: ReturnType<typeof setInterval> | null = null
   let unsubscribeNet: (() => void) | null = null
+  let unsubscribePiP: (() => void) | null = null
   const startHlsTick = () => {
     if (hlsTickTimer) return
     document.addEventListener('visibilitychange', onVisibilityChange)
     // 「网络变了」的三个信号（断网恢复 / 换网 / 回前台）统一由 netWatch 归并成一个
     unsubscribeNet = onNetChange(onNetChanged)
+    unsubscribePiP = startPiPTracking()   // 小窗尺寸只能在「进入那一刻」拿到，得先挂上
+    document.addEventListener('resize', onIntrinsicResize, true)
     window.addEventListener('offline', onNetworkOffline)   // 断网只用来写那句提示，不是恢复动作
     hlsTickTimer = setInterval(() => {
       // 转圈的兜底熄灯：以「真的在播」为地面真值，不指望事件齐全。
@@ -323,6 +338,8 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     if (hlsTickTimer) { clearInterval(hlsTickTimer); hlsTickTimer = null }
     document.removeEventListener('visibilitychange', onVisibilityChange)
     unsubscribeNet?.(); unsubscribeNet = null
+    unsubscribePiP?.(); unsubscribePiP = null
+    document.removeEventListener('resize', onIntrinsicResize, true)
     window.removeEventListener('offline', onNetworkOffline)
   }
 
