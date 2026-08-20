@@ -108,8 +108,22 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
 自定义 hls.js `fLoader`，命中预取缓存即时返回。同 host 只给 6 条连接 → 有**双通道**（同一分片给出直连与代理两个 origin）。
 
 - **每一个「失败额度」都必须是「连续失败」，断网期间一律不计数**：`maxRacers` 管「同时几条」不是「一共几次」；
-  lane 熔断要能自愈；`hlsRetryCount` 必须由加载成功归零；`onLine === false` 时错误不计数、超时闹钟顺延、不跳片。
-  否则症状全是「网络早恢复了画面还转圈」。`online` 事件要做三件事：作废熔断 → `startLoad()`（**只在没在播时**）→ `primePrefetch()`
+  lane 熔断要能自愈；`hlsRetryCount` 必须由加载成功归零；离线时错误不计数、超时闹钟顺延（含 `skipMs`）、不跳片。
+  否则症状全是「网络早恢复了画面还转圈」
+- **网络变化的信号只有 `engine/netWatch.ts` 一个来源，绝不各自读 `navigator.onLine`**：
+  **换 Wi-Fi / 切蜂窝时 `onLine` 全程是 `true`**，`online`/`offline` 一个都不发 → 熔断记录不作废（干等 30s）、
+  重试额度 3×1s 飞快烧完 → 掉进「重新取址（30s）→ 重探通道（12s）→ 销毁播放器」，**每一步都跟源站/地址/通道无关**。
+  所以并成三个信号：`online`/`offline` + `navigator.connection` 的 `change`（**只认 `type`/`effectiveType` 变了**，
+  `downlink`/`rtt` 一直在抖）+ 回前台（后台期间 `change` 会被吞）。对外只有「有没有网」和
+  **「刚刚变过没有」（`isRecovering()`，8s 窗口）**：窗口内 fatal 网络错误**不计额度、快退重试 300/600/1200ms、
+  不进重新取址与重探**，`hedgeMs` 对折、换连接间隔 500→200ms，两档加载闹钟各让路一次。
+  **不做主动 ping**——`startLoad()` 本身就是最好的探针
+- **网络变了要做的事**：作废熔断 → 作废可达性结论（`invalidateReachCache` + `clearDirectDead`，它们是**上一个网络**
+  测出来的）→ `startLoad(currentTime)`（**只在没在播时**，且**必须带位置**：不带就按断网前的 `nextLoadPosition` 挑片）
+  → `primePrefetch()`。**且要补枪**：刚重连那一两秒请求常常还发不出去，只开一枪打空就又落回慢路径 →
+  心跳在恢复窗口内每秒复查、最多 4 次
+- **等网络的回调必须幂等 + 一次性 + 「已经有网就直接跑」**（`waitForNet`）：老的 `waitForOnline` 每次 fatal 挂一个
+  不去重的一次性监听，`online` 若恰好在挂之前发生，那一发 `startLoad` **永远不会来**
 - **搭在途预取的便车时，那趟车翻了必须当场自己上**：`spawnPrefetch` 失败 resolve 的是**空 ArrayBuffer 而不是 reject**，
   漏了 `else` 就只能干等 `hedgeMs` → **「预取缓存还有几十秒，拖完进度却转两三秒圈」**
 - **存货不够时少开线程**（反直觉）：判据 = 缓存秒数 ÷ 倍速（`SAFE_WALL_SECS`），阶梯 2/3/4/6 → 放开。

@@ -5,6 +5,7 @@ import { useLaneControl } from './prefetch/lanes'
 import { useBandwidthModel } from './prefetch/bandwidth'
 import { createFragLoaderFactory } from './prefetch/fragLoader'
 import { useBufferMeter } from './prefetch/bufferMeter'
+import { isOffline } from './engine/netWatch'
 
 export type HealthZone = 'panic' | 'low' | 'healthy'
 
@@ -221,7 +222,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     if (!video || !frag) return false
     // 断网时跳片纯属有害：下一片同样下不来，跳一次就白扔一片缓存、画面还硬跳一下。
     // 什么都不做，等网络回来（见 useVideoEngine 的 online 处理）才是对的
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) return false
+    if (isOffline()) return false
     const ahead = getAheadBuffered(video)
     if (ahead > 1.5) return false                               // 播放还没吃紧 → 不是真卡点，不跳
     // 抗卡阶梯「先降速再跳片」：倍速>1 时优先靠降速守卫救场，不急着跳；

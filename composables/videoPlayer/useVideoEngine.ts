@@ -16,7 +16,7 @@ import { useHlsErrorHandler, failMessageOf } from './engine/hlsErrors'
 import { useStallRecovery } from './engine/stallRecovery'
 import { probeMp4Head } from './engine/mp4Duration'
 import { holdPiP, reclaimPiP, releasePiPHolder, isPiPHeld } from './engine/pipHandoff'
-import { onNetChange, waitForNet, isOffline, isRecovering } from './engine/netWatch'
+import { onNetChange, isRecovering } from './engine/netWatch'
 import { clearDirectDead } from './probeStore'
 
 export interface VideoEngineDeps {
@@ -243,23 +243,30 @@ export function useVideoEngine(deps: VideoEngineDeps) {
    *
    * **一枪打不中就补枪**（`recoverShots`）：刚重连那一两秒请求常常还发不出去，
    * 老代码在这里只 `startLoad()` 一次，打空之后就再没人管，最终仍旧落回
-   * 「重新取址 → 重探通道 → 销毁」那条慢路径。所以在恢复窗口里由心跳每秒复查一次。
+   * 「重新取址 → 重探通道 → 销毁」那条慢路径。所以在恢复窗口里由心跳复查。
+   *
+   * 但**补枪必须以「一点进展都没有」为条件**：`startLoad(pos)` 会把在途的分片请求全丢掉重排，
+   * 慢源上每秒补一枪等于永远下不完第一片——那是把「恢复慢」换成「恢复不了」。
+   * 所以三道闩：至少隔 `RECOVER_SHOT_GAP_MS`、缓冲和播放头都没动过、总共不超过 4 枪。
    */
   let recoverShots = 0
+  let lastShotAt = 0
+  let lastShotAhead = -1
+  let lastShotTime = -1
   /** 补枪次数上限：同一招重复十次无效就该换招（同 stallRecovery 的阶梯那条教训） */
   const MAX_RECOVER_SHOTS = 4
-  /** 需要 hls.js 从播放头重排一次吗（没在播 + 播放头处没货） */
-  const needsRestart = (): HTMLVideoElement | null => {
-    const v = videoEl.value
-    if (!v || !hls) return null
-    const playing = !v.paused && v.readyState >= 3 && getAheadBuffered(v) > 0.5
-    return playing ? null : v
-  }
+  /** 两枪之间至少隔这么久：给上一枪的请求留出真正跑完一片的时间 */
+  const RECOVER_SHOT_GAP_MS = 2000
   const shootStartLoad = () => {
-    const v = needsRestart()
-    if (!v) return
+    const v = videoEl.value
+    if (!v || !hls) return
+    // 已经播起来了 → 别打断（正常播着的流被 startLoad 打断会白丢一次缓冲）
+    if (!v.paused && v.readyState >= 3 && getAheadBuffered(v) > 0.5) return
     recoverShots++
-    try { hls!.startLoad(v.currentTime) } catch {}
+    lastShotAt = Date.now()
+    lastShotAhead = getAheadBuffered(v)
+    lastShotTime = v.currentTime
+    try { hls.startLoad(v.currentTime) } catch {}
   }
   const onNetChanged = () => {
     reviveLanes()
@@ -270,9 +277,14 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     shootStartLoad()
     primePrefetch()
   }
-  /** 心跳里的补枪：恢复窗口内还缺货就再叫一次，见上面 recoverShots 那段 */
+  /** 心跳里的补枪：恢复窗口内**毫无进展**才再叫一次，见上面 recoverShots 那段 */
   const recoverTick = () => {
     if (!isRecovering() || recoverShots >= MAX_RECOVER_SHOTS) return
+    if (Date.now() - lastShotAt < RECOVER_SHOT_GAP_MS) return
+    const v = videoEl.value
+    if (!v) return
+    // 缓冲涨了、或播放头动了 = 上一枪正在见效，别打断它
+    if (getAheadBuffered(v) > lastShotAhead + 0.05 || Math.abs(v.currentTime - lastShotTime) > 0.05) return
     shootStartLoad()
   }
   /** 断网时说一句话就够：重试逻辑那边一律等 netWatch，不在没网的时候烧额度（见 hlsErrors） */
