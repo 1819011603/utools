@@ -6,6 +6,7 @@
  *
  * 从 useVideoEngine 拆出来（那边超了 500 行）。内部实现模块，走显式相对 import。
  */
+import { isOffline, isRecovering } from './netWatch'
 
 // 加载超时：走服务端代理时需要更长，统一 15s
 //（代理要先请求远端再返回，3s 往往不够，会误触 destroyHls 取消所有请求）
@@ -31,7 +32,12 @@ export interface LoadTimeoutDeps {
  * 表现就是「进电梯十几秒出来，播放器已经报加载超时了」。
  */
 const OFFLINE_RECHECK_MS = 2000
-const isOffline = () => typeof navigator !== 'undefined' && navigator.onLine === false
+/**
+ * 刚换过网时也各顺延一次（同上一段的道理）：换网那一刻起算 10s 就去重新取址，
+ * 多半是白吃掉「每集一次」的取址额度——那时候取址那一发同样发不出去。
+ * 只顺延**一次**，避免恢复窗口被反复续着而把真正的死链一直拖着不报。
+ */
+const RECOVER_DEFER_MS = 5000
 
 export function useLoadTimeout(deps: LoadTimeoutDeps) {
   let loadTimeoutTimer: ReturnType<typeof setTimeout> | null = null
@@ -52,10 +58,12 @@ export function useLoadTimeout(deps: LoadTimeoutDeps) {
     // 静默是硬要求：这一档**必然会误伤**——慢源的 manifest 本身就要十几秒，它没死。
     // 早先在这里写了句「正在重新获取播放地址」并拉起 isResolvingUrl，于是正常的慢加载
     // 也会盖上转圈遮罩，表现成「视频刚开始点下一集，一直显示获取中」（踩过）。
+    let staleDeferred = false, timeoutDeferred = false   // 恢复窗口只让路一次，见 RECOVER_DEFER_MS
     const armStale = (ms: number) => {
       staleUrlTimer = setTimeout(() => {
         if (hasReceivedData || !deps.isLoading()) return
         if (isOffline()) { armStale(OFFLINE_RECHECK_MS); return }   // 没网 → 顺延，见 OFFLINE_RECHECK_MS
+        if (isRecovering() && !staleDeferred) { staleDeferred = true; armStale(RECOVER_DEFER_MS); return }
         deps.refetchUrl()
       }, ms)
     }
@@ -63,6 +71,7 @@ export function useLoadTimeout(deps: LoadTimeoutDeps) {
       loadTimeoutTimer = setTimeout(() => {
         if (hasReceivedData || !deps.isLoading()) return
         if (isOffline()) { armTimeout(OFFLINE_RECHECK_MS); return } // 同上：断网不算源站超时
+        if (isRecovering() && !timeoutDeferred) { timeoutDeferred = true; armTimeout(RECOVER_DEFER_MS); return }
         deps.onTimeout()
       }, ms)
     }

@@ -16,6 +16,8 @@ import { useHlsErrorHandler, failMessageOf } from './engine/hlsErrors'
 import { useStallRecovery } from './engine/stallRecovery'
 import { probeMp4Head } from './engine/mp4Duration'
 import { holdPiP, reclaimPiP, releasePiPHolder, isPiPHeld } from './engine/pipHandoff'
+import { onNetChange, waitForNet, isOffline, isRecovering } from './engine/netWatch'
+import { clearDirectDead } from './probeStore'
 
 export interface VideoEngineDeps {
   media: VideoMediaState
@@ -223,44 +225,70 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   const registerTickHook = (fn: () => void) => { tickHooks.push(fn) }
 
   /**
-   * ── 网络回来了 ──
+   * ── 网络变了（断网恢复 / 换 Wi-Fi / 切蜂窝 / 回前台发现换过网，见 engine/netWatch）──
    *
-   * 切 Wi-Fi / 出电梯这一刻要做三件事，少一件就是「网络明明好了，画面还一直转圈」：
+   * 这一刻要做四件事，少一件就是「网络明明好了，画面还一直转圈」：
    *   ① **lane 熔断记录整份作废**：出口 IP 一变，之前那些 403/超时的结论一条都不再成立
    *      （熔断本身还有 30s 观察期自愈，但这里能立刻恢复双通道，不用干等）；
-   *   ② **让 hls.js 重新开始加载**：断网期间它多半已经报过 fatal NETWORK_ERROR 停在那儿了，
-   *      `startLoad()` 是唯一能把它叫起来的动作（离线那条分支就是把这一发留到现在）；
-   *   ③ **重开预取**：预取失败不重排队，只靠心跳补——`primePrefetch()` 立刻满上，不等下一拍。
+   *   ② **可达性结论也一起作废**：`warmProbes` 和「直连是黑洞」都是**上一个网络**测出来的，
+   *      换网之后它们不但过期，还会把本可直连的源按在代理上（或反过来）。这两份都只影响
+   *      「等多久 / 用哪条」，清掉最多是多探一轮，留着却可能整轮判错；
+   *   ③ **让 hls.js 从播放头重新开始加载**：断网期间它多半已经报过 fatal NETWORK_ERROR
+   *      停在那儿了，`startLoad()` 是唯一能把它叫起来的动作。**必须带位置**——
+   *      不带的话它按断网前的 `nextLoadPosition` 挑片，那个位置早就不是播放头了；
+   *   ④ **重开预取**：预取失败不重排队，只靠心跳补——`primePrefetch()` 立刻满上，不等下一拍。
    *
-   * 只在真的没在播时才 `startLoad()`：正常播着的流被 startLoad 打断会白丢一次缓冲。
+   * 只在真的没在播时才 `startLoad()`：正常播着的流被 startLoad 打断会白丢一次缓冲
+   * （回前台那条信号尤其要靠这个判断兜住，切走 30s 回来时缓冲往往是满的）。
+   *
+   * **一枪打不中就补枪**（`recoverShots`）：刚重连那一两秒请求常常还发不出去，
+   * 老代码在这里只 `startLoad()` 一次，打空之后就再没人管，最终仍旧落回
+   * 「重新取址 → 重探通道 → 销毁」那条慢路径。所以在恢复窗口里由心跳每秒复查一次。
    */
-  const onNetworkOnline = () => {
-    console.info('[net] 网络已恢复')
-    reviveLanes()
-    if (errorMessage.value.startsWith('网络已断开')) errorMessage.value = ''
+  let recoverShots = 0
+  /** 补枪次数上限：同一招重复十次无效就该换招（同 stallRecovery 的阶梯那条教训） */
+  const MAX_RECOVER_SHOTS = 4
+  /** 需要 hls.js 从播放头重排一次吗（没在播 + 播放头处没货） */
+  const needsRestart = (): HTMLVideoElement | null => {
     const v = videoEl.value
-    const playing = !!v && !v.paused && v.readyState >= 3 && getAheadBuffered(v) > 0.5
-    if (hls && !playing) { try { hls.startLoad() } catch {} }
+    if (!v || !hls) return null
+    const playing = !v.paused && v.readyState >= 3 && getAheadBuffered(v) > 0.5
+    return playing ? null : v
+  }
+  const shootStartLoad = () => {
+    const v = needsRestart()
+    if (!v) return
+    recoverShots++
+    try { hls!.startLoad(v.currentTime) } catch {}
+  }
+  const onNetChanged = () => {
+    reviveLanes()
+    conn.invalidateReachCache()
+    try { clearDirectDead(new URL(videoUrl.value, location.href).hostname) } catch {}
+    if (errorMessage.value.startsWith('网络已断开')) errorMessage.value = ''
+    recoverShots = 0
+    shootStartLoad()
     primePrefetch()
   }
-  /** 断网只需说一句话：重试逻辑那边一律等 online，不在没网的时候烧额度（见 hlsErrors） */
-  const onNetworkOffline = () => {
-    console.info('[net] 网络已断开')
-    if (!errorMessage.value) errorMessage.value = '网络已断开，恢复后会自动继续'
+  /** 心跳里的补枪：恢复窗口内还缺货就再叫一次，见上面 recoverShots 那段 */
+  const recoverTick = () => {
+    if (!isRecovering() || recoverShots >= MAX_RECOVER_SHOTS) return
+    shootStartLoad()
   }
-  /** 给错误处理层用的一次性 online 等待：断网时的重试全部收敛到这里 */
-  const waitForOnline = (resume: () => void) => {
-    const once = () => { window.removeEventListener('online', once); resume() }
-    window.addEventListener('online', once)
+  /** 断网时说一句话就够：重试逻辑那边一律等 netWatch，不在没网的时候烧额度（见 hlsErrors） */
+  const onNetworkOffline = () => {
+    if (!errorMessage.value) errorMessage.value = '网络已断开，恢复后会自动继续'
   }
 
   // ── 实时心跳：每秒刷新缓冲读数 + 跑闭环预取控制（不依赖 FRAG_BUFFERED，卡顿时也持续工作） ──
   let hlsTickTimer: ReturnType<typeof setInterval> | null = null
+  let unsubscribeNet: (() => void) | null = null
   const startHlsTick = () => {
     if (hlsTickTimer) return
     document.addEventListener('visibilitychange', onVisibilityChange)
-    window.addEventListener('online', onNetworkOnline)
-    window.addEventListener('offline', onNetworkOffline)
+    // 「网络变了」的三个信号（断网恢复 / 换网 / 回前台）统一由 netWatch 归并成一个
+    unsubscribeNet = onNetChange(onNetChanged)
+    window.addEventListener('offline', onNetworkOffline)   // 断网只用来写那句提示，不是恢复动作
     hlsTickTimer = setInterval(() => {
       // 转圈的兜底熄灯：以「真的在播」为地面真值，不指望事件齐全。
       // `isBuffering` 只由 playing/canplaythrough/seeked/FRAG_BUFFERED 熄，而正播着的视频
@@ -271,6 +299,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
         isBuffering.value = false
       }
       stall.tick()   // 绑定/改绑卡顿监听（幂等）+ 刷新连续流畅读数
+      recoverTick()   // 刚换过网/刚恢复而还没播起来 → 补一枪 startLoad（见 onNetChanged）
       stallRecovery.tick()   // 播放头冻住而手上有货 → 跳空洞 / 从播放头重拉（bufferStalledError 不一定每次都来）
       prefetchTick()
       refreshCacheStats()   // 面板上的「预取缓存 N 片 / X MB」
@@ -281,7 +310,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   const stopHlsTick = () => {
     if (hlsTickTimer) { clearInterval(hlsTickTimer); hlsTickTimer = null }
     document.removeEventListener('visibilitychange', onVisibilityChange)
-    window.removeEventListener('online', onNetworkOnline)
+    unsubscribeNet?.(); unsubscribeNet = null
     window.removeEventListener('offline', onNetworkOffline)
   }
 
@@ -567,7 +596,6 @@ export function useVideoEngine(deps: VideoEngineDeps) {
       },
       refetchUrl: () => deps.refetchUrl(),
       escalateStrategy: () => conn.escalateStrategyAndReload(),
-      waitForOnline,
       onBufferStalled: stallRecovery.onBufferStalled,
     })
     resetErrorCounters()

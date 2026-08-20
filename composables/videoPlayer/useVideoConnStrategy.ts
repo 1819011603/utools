@@ -528,6 +528,9 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     applyStrategy, escalateStrategyAndReload, applyReachabilityStep, prewarmProbe, takeSeededManifest,
     // 展示 / 操作
     strategyLabel, probeRows, probeVerdict, reprobeNow,
+    // 换网之后引擎要作废旧结论：warmProbes 是上一个网络环境测出来的，
+    // 留着会把本可直连的源按在代理上（或反过来）。见 useVideoEngine.onNetChanged
+    invalidateReachCache,
   }
 }
 

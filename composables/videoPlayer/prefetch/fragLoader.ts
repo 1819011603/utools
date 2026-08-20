@@ -11,6 +11,19 @@
 import type { TierParams } from '../../videoSiteRules'
 import type { LaneControl } from './lanes'
 import type { useSegmentCache } from '../useSegmentCache'
+import { isOffline, isRecovering } from '../engine/netWatch'
+
+/** 单条失败后换一条重试的间隔（ms）。恢复窗口内压到 200：那时「快点再试一下」几乎必然有收益 */
+const RETRY_MS = 500
+const RETRY_MS_RECOVERING = 200
+/**
+ * 离线时 `skipMs` 那道硬超时**顺延**而不是照常开火（每 2s 回来看一眼，同 loadTimeout 的写法）。
+ *
+ * 老代码里 `skipSegment` 只在真跳的那一刻查 `navigator.onLine`，而超时本身照样到点：
+ * 于是那一片以 `fail()` 收场、交回 hls.js 变成一次网络错误，白烧一次重试额度。
+ * 没网时跳片和报错都毫无意义——下一片同样下不来。
+ */
+const OFFLINE_RECHECK_MS = 2000
 
 export interface FragLoaderDeps {
   cache: ReturnType<typeof useSegmentCache>
@@ -186,7 +199,9 @@ export function createFragLoaderFactory(deps: FragLoaderDeps) {
               racers--   // 归还并发额度：额度是「同时几条」，别被顺序重试烧光（见上）
               // 主动取消（竞速已有赢家 / seek）不算这条 lane 的账
               if (!ctrl.signal.aborted) markLaneFail(lane, laneCount)
-              if (!settled && !this.stats.aborted) timers.push(setTimeout(race, 500))   // 这条失败 → 快速换一条
+              // 这条失败 → 快速换一条。刚换过网那几秒压到 200ms：那时的失败只是「网还没通」，
+              // 而按常态 500ms 慢慢试，恢复的那一刻恰好被拖成好几秒的转圈
+              if (!settled && !this.stats.aborted) timers.push(setTimeout(race, isRecovering() ? RETRY_MS_RECOVERING : RETRY_MS))
             })
         }
 
@@ -205,15 +220,24 @@ export function createFragLoaderFactory(deps: FragLoaderDeps) {
         if (pf) pf.then(buf => { if (buf && buf.byteLength > 0) win(buf); else pfFailed() }).catch(pfFailed)
         else race()
 
-        timers.push(setTimeout(race, tp.hedgeMs))         // 还没赢 → 加一条并行（对冲死连接）
-        timers.push(setTimeout(race, tp.hedgeMs * 2))     // 再加一条
-        timers.push(setTimeout(() => {                    // 硬超时 → 跳过，别冻结
-          if (settled || this.stats.aborted) return
-          settled = true
-          cleanup()
-          const skipped = skipSegment(context?.frag)
-          fail(new Error(skipped ? 'segment skipped (too slow)' : 'segment fetch timeout'))
-        }, tp.skipMs))
+        // 还没赢 → 隔一段加一条并行（对冲死连接）。刚换过网时对折：那时「多开一条抢」的收益
+        // 远大于常态（差档 hedgeMs 是 3s，等满一拍恢复就白慢三秒）。`maxRacers` 不动——
+        // 它管的是同时几条，不是一共发几次（见上面 race() 那段）
+        const hedge = isRecovering() ? Math.max(300, Math.round(tp.hedgeMs / 2)) : tp.hedgeMs
+        timers.push(setTimeout(race, hedge))
+        timers.push(setTimeout(race, hedge * 2))          // 再加一条
+        // 硬超时 → 跳过，别冻结。但**没网时顺延**：跳片和报错在离线期间都毫无意义（见 OFFLINE_RECHECK_MS）
+        const armSkip = (ms: number) => {
+          timers.push(setTimeout(() => {
+            if (settled || this.stats.aborted) return
+            if (isOffline()) { armSkip(OFFLINE_RECHECK_MS); return }
+            settled = true
+            cleanup()
+            const skipped = skipSegment(context?.frag)
+            fail(new Error(skipped ? 'segment skipped (too slow)' : 'segment fetch timeout'))
+          }, ms))
+        }
+        armSkip(tp.skipMs)
       }
 
       private _cancelHedge: (() => void) | null = null
