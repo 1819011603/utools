@@ -51,7 +51,12 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
   `play()` 撞 attach 变 `AbortError`、**画面立刻变黑**四笔账。复用前要 `removeAttribute('src') + load()`
 - **切集靠占位元素接力保住画中画**（`engine/pipHandoff.ts`）：换流必然换 src，小窗绑的是换掉之前那个；退出再申请要用户激活，
   而自动切集没有点击。规范豁免是「`pictureInPictureElement` 非空时申请免激活」→ 换流**前**交给占位 `<video>`，
-  新流 `loadedmetadata` 时要回来。第一段必须赶在 `destroyHls` / `removeAttribute('src')` **之前**
+  新流 `loadedmetadata` 时要回来。第一段必须赶在 `destroyHls` / `removeAttribute('src')` **之前**。
+  **占位画面的比例不能写死 16:9**（`lockedAspect`，取开头那一集的固有比例）：小窗比例跟着当前在画中画里的
+  那个元素走，占位一塞进去窗口就被拉一次 → 放 2.40:1 的片子（实测 1920×800）时每切一集
+  「2.4:1 → 16:9 高度长一截 → 2.4:1 宽度又长一截」，**一集净胖一圈且只增不减**（缩小方向浏览器不给）。
+  **标准 PiP API 没有任何尺寸/比例参数**，能控的只有占位这一段；真要锁死比例只能 canvas letterbox
+  或换 Document PiP（`requestWindow({width,height})`，Safari 没有）
 - **起播门槛的单位是「够播几秒」不是「缓冲几秒」**（`autoPlayTarget`，一律 × 倍速），且随近期卡顿次数翻倍
   （慢源上「五次一秒的卡」远比「一次四秒的等」难受）。**但下坡路要短（`STALL_DECAY_SMOOTH_SECS` = 连续流畅 5s
   就归零，原来是 20s）**：断网/换网必然制造卡顿，而那些卡顿不是源站的错，却一样把门槛翻上去 →

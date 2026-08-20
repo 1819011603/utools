@@ -21,9 +21,36 @@
  * Chrome 就把 `pictureInPictureElement` 清空了（小窗还开着但已经没主），豁免随之消失。
  */
 
-/** 占位画面尺寸：只是给小窗一帧字，不需要清晰 */
-const W = 480
-const H = 270
+/**
+ * 占位画面高度：只是给小窗一帧字，不需要清晰。宽度按锁定比例算（见 lockedAspect）。
+ */
+const HOLDER_HEIGHT = 270
+/**
+ * 锁定的小窗比例（宽 ÷ 高），取**开头那一集**的固有比例，之后一律照它画占位。
+ *
+ * **占位画面的比例必须跟着小窗，不能写死 16:9**（踩过，就是「小窗只会越变越大」的真凶）：
+ * Chrome 的小窗比例跟着当前在画中画里的那个元素走，而切集接力会**把占位元素塞进去**。
+ * 于是放一部 2.40:1 的片子（实测 1920×800）时，每切一集都是
+ * 「2.4:1 → 占位 16:9（高度长一截）→ 真视频 2.4:1（宽度又长一截）」，一集净胖一圈，
+ * 而且**只增不减**（缩小方向浏览器不给）。
+ *
+ * 用「开头那一集」而不是每次现读：小窗尺寸是用户自己拖出来的，比例来回变本身就是打扰，
+ * 定死一个反而稳。0 = 还没量到，退回 16:9。
+ */
+let lockedAspect = 0
+
+/** 量一次固有比例（只认第一次，之后不再改）。拿不到尺寸的元素直接跳过 */
+const noteAspect = (el: HTMLVideoElement | null) => {
+  if (lockedAspect || !el?.videoWidth || !el?.videoHeight) return
+  lockedAspect = el.videoWidth / el.videoHeight
+  console.log(`[pip] 小窗比例锁定为 ${el.videoWidth}x${el.videoHeight}（${lockedAspect.toFixed(3)}）`)
+}
+
+/** 占位画布尺寸。宽度取偶数：奇数宽在部分编码器/抓流实现上会被悄悄补一列 */
+const holderSize = () => {
+  const aspect = lockedAspect || 16 / 9
+  return { w: Math.round(HOLDER_HEIGHT * aspect / 2) * 2, h: HOLDER_HEIGHT }
+}
 /** 占位画面重绘间隔：captureStream 只在有新帧时推流，静止画面会被小窗认成卡住 */
 const REPAINT_MS = 500
 /** 拿到占位元素的第一帧最多等这么久——它落在切集的关键路径上，宁可放弃接力也不能拖住换流 */
@@ -49,14 +76,14 @@ const stopHolder = () => {
   holder = null
 }
 
-const paint = (ctx: CanvasRenderingContext2D, text: string) => {
+const paint = (ctx: CanvasRenderingContext2D, text: string, w: number, h: number) => {
   ctx.fillStyle = '#000'
-  ctx.fillRect(0, 0, W, H)
+  ctx.fillRect(0, 0, w, h)
   ctx.fillStyle = '#fff'
   ctx.font = '24px system-ui, sans-serif'
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
-  ctx.fillText(text, W / 2, H / 2)
+  ctx.fillText(text, w / 2, h / 2)
 }
 
 /**
@@ -67,12 +94,16 @@ export async function holdPiP(text = '正在切换…'): Promise<boolean> {
   if (!document.pictureInPictureEnabled || !document.pictureInPictureElement) return false
   stopHolder()   // 上一次没收干净的残留（切集连着来）
 
+  // 正在小窗里的就是**这一集**的 <video>，趁它还没被拆掉量一次比例（只第一次算）
+  noteAspect(document.pictureInPictureElement as HTMLVideoElement)
+
+  const { w, h } = holderSize()
   const canvas = document.createElement('canvas')
-  canvas.width = W
-  canvas.height = H
+  canvas.width = w
+  canvas.height = h
   const ctx = canvas.getContext('2d')
   if (!ctx || !canvas.captureStream) return false
-  paint(ctx, text)
+  paint(ctx, text, w, h)
 
   const el = document.createElement('video')
   el.muted = true
@@ -82,7 +113,7 @@ export async function holdPiP(text = '正在切换…'): Promise<boolean> {
   document.body.appendChild(el)
   holder = el
   el.srcObject = canvas.captureStream(2)
-  repaintTimer = setInterval(() => paint(ctx, text), REPAINT_MS)
+  repaintTimer = setInterval(() => paint(ctx, text, w, h), REPAINT_MS)
 
   try {
     await el.play()   // 纯视频轨、静音，不需要用户激活
@@ -113,6 +144,8 @@ export async function holdPiP(text = '正在切换…'): Promise<boolean> {
  */
 export async function reclaimPiP(el: HTMLVideoElement): Promise<boolean> {
   try {
+    // 第一次进小窗就直接切集的话，holdPiP 那次可能还没量到（旧元素已被拆）→ 在这儿补一次
+    noteAspect(el)
     // 占位还在画中画里 → 这一发申请免用户激活（规范那条豁免）。
     // 注意不能先 exit：一 exit 豁免就没了，而这条路径上通常没有任何点击可用。
     await el.requestPictureInPicture()

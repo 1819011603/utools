@@ -575,7 +575,18 @@ export function useVideoEngine(deps: VideoEngineDeps) {
      * 那时还没有人订阅，`autoPlayHook` 一辈子不会被调，画面永远停在「加载中…」（踩过）。
      */
     hls.on(HlsLib.Events.MANIFEST_PARSED, (_, data) => {
-      console.log('HLS manifest 解析完成，画质数:', data.levels.length)
+      /*
+       * **画质档要连分辨率一起打出来**（一行字符串，不是对象——控制台默认把对象折成 `{…}`）。
+       * 「档数 5」这个读数分不清一件要紧的事：**各档的宽高比一致吗**。
+       * 实测遇到同一条流里 1920x800（2.40:1 裁过的）和 1920x1080（16:9 烧了黑边的）并存，
+       * ABR 一换档，`<video>` 的固有比例就变 → 画中画小窗被浏览器跟着改尺寸（且只增不减，
+       * 缩小方向浏览器不给）。没有这一行的话，现场只能看到「小窗自己越变越大」。
+       */
+      const levelBrief = data.levels
+        .map((l: any, i: number) => `${i}:${l.width || '?'}x${l.height || '?'}`
+          + `${l.width && l.height ? `(${(l.width / l.height).toFixed(2)})` : ''}`)
+        .join(' ')
+      console.log(`HLS manifest 解析完成，画质数: ${data.levels.length} → ${levelBrief}`)
       markDataReceived()
       isLoading.value = false
       startPrefetchCleanup()  // 启动周期清理过期缓存
@@ -631,7 +642,13 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     // 所在缓冲段的前向（拖进度后最后一段常整段落在播放头后面，两者差十几秒），且不该立刻亮
     hls.on(HlsLib.Events.FRAG_LOADING, () => armBufferingGate())
 
-    hls.on(HlsLib.Events.LEVEL_SWITCHED, () => updateHlsStats())
+    hls.on(HlsLib.Events.LEVEL_SWITCHED, (_, data: any) => {
+      updateHlsStats()
+      // 换档要留一行痕迹：`<video>` 的固有比例跟着当前档走，比例一变画中画小窗就被浏览器改尺寸。
+      // 没这行的话，「小窗自己越变越大」和「流里拼了不同分辨率的片段」这两件事在现场分不开
+      const l: any = hls?.levels?.[data?.level]
+      if (l?.width && l?.height) console.log(`[level] 切到档 ${data.level}：${l.width}x${l.height} = ${(l.width / l.height).toFixed(3)}`)
+    })
 
     // 全部事件登记完毕，这才开始加载（见上面 MANIFEST_PARSED 处的说明）
     /**
