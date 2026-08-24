@@ -42,15 +42,27 @@
       </div>
 
       <!--
-        搜索框不套 UCard：卡片的白底 + 边框会把它压成一个普通表单区块，
-        而它是这一页唯一的入口。做成一条悬浮的玻璃条（半透明 + backdrop-blur + 柔光投影），
-        聚焦时外面那圈渐变光晕亮起来 —— 「高级感」是这么来的，不是靠把粉色调重
+        搜完（compact）之后页面已经变宽，搜索框、结果摘要、搜索历史三样各占一整行居中摆着
+        全是浪费——页面两侧一大片空白。改成三栏：搜索框仍居中，摘要挪去左边、历史挪去右边，
+        `lg:` 才生效——窄屏三样宽度都不够分栏，退回原来的纵向堆叠（先搜索框，摘要和历史跟着）。
+        用 grid-template-columns 显式分栏而不是 flex + margin，是因为要「两侧宽度相等地把
+        搜索框夹在正中间」，flex 只能做到「谁占的空间大小取决于内容」，两侧文字长度一长一短
+        就会把搜索框顶偏
       -->
       <div
-        class="relative wf-fade-up mx-auto w-full transition-all duration-500 ease-out"
-        :class="compact ? 'max-w-2xl' : 'max-w-none'"
-        style="animation-delay: 60ms"
+        class="wf-fade-up transition-all duration-500 ease-out"
+        :class="compact ? 'grid grid-cols-1 lg:grid-cols-[1fr_auto_1fr] items-center gap-x-4 gap-y-3' : 'flex flex-col items-center gap-3'"
       >
+        <!--
+          搜索框不套 UCard：卡片的白底 + 边框会把它压成一个普通表单区块，
+          而它是这一页唯一的入口。做成一条悬浮的玻璃条（半透明 + backdrop-blur + 柔光投影），
+          聚焦时外面那圈渐变光晕亮起来 —— 「高级感」是这么来的，不是靠把粉色调重
+        -->
+        <div
+          class="relative w-full transition-all duration-500 ease-out"
+          :class="compact ? 'max-w-md lg:max-w-sm lg:col-start-2 lg:row-start-1 lg:justify-self-center' : 'max-w-none'"
+          style="animation-delay: 60ms"
+        >
         <!--
           这里**没有**外发光。试过在框外糊一圈渐变光晕，但 input 带 autofocus，
           一进页面它就恒亮，整条搜索框糊成一片粉，反倒像没做完的样式。
@@ -117,8 +129,15 @@
       <!-- 只数真正会去搜的站：manual 的那几个（源站有人机校验）压根不发请求，
            算进去会让人以为它们也在搜、然后奇怪为什么永远没结果 -->
       <!-- 搜之前讲规则（哪些站会搜、哪些只能去源站），搜之后只报结果：
-           「N 个站点并发搜索」这句话在结果已经摆在眼前时没有任何用处，还占一行 -->
-      <p class="text-xs text-center text-gray-500 dark:text-gray-400 wf-fade-up" style="animation-delay: 120ms">
+           「N 个站点并发搜索」这句话在结果已经摆在眼前时没有任何用处，还占一行。
+           **必须是搜索框的兄弟节点，不能再套一层公共容器**：套了一层的话这一整块只算
+           网格里的一个格子，摘要和历史会被挤在同一个格子里自己换行，压根到不了另一侧
+           （踩过：摘要和历史贴在一起飘在搜索框左边，看着比之前更乱） -->
+      <p
+        class="shrink-0 text-xs text-gray-500 dark:text-gray-400 wf-fade-up"
+        :class="compact ? 'lg:col-start-1 lg:row-start-1 lg:justify-self-start' : 'w-full text-center'"
+        style="animation-delay: 120ms"
+      >
         <template v-if="compact">
           「<span class="text-gray-700 dark:text-gray-200">{{ keyword }}</span>」·
           {{ autoCount }} 站合计 <span class="font-semibold text-rose-500">{{ totalFound }}</span> 个结果
@@ -133,7 +152,12 @@
         而历史的用处只有一个——**点一下重搜**（追剧就是天天搜同一个名字）。
         限 12 条：一行扫得完，再多就成了另一块要读的东西
       -->
-      <div v-if="kwHistory.length" class="wf-fade-up flex items-center justify-center gap-1.5 flex-wrap" style="animation-delay: 140ms">
+      <div
+        v-if="kwHistory.length"
+        class="wf-fade-up flex items-center gap-1.5 flex-wrap"
+        :class="compact ? 'lg:col-start-3 lg:row-start-1 lg:justify-self-end' : 'w-full justify-center'"
+        style="animation-delay: 140ms"
+      >
         <UIcon name="i-heroicons-clock" class="w-3.5 h-3.5 shrink-0 text-gray-400" />
         <button
           v-for="h in kwHistory.slice(0, 12)"
@@ -152,6 +176,8 @@
           title="清空搜索历史"
           @click="clearKwHistory"
         >清空</button>
+      </div>
+
       </div>
 
       <div

@@ -66,7 +66,9 @@
       "Bash(sed -i '' 's/waitForTimeout\\(9000\\)/waitForTimeout\\(20000\\)/' agg.mjs infoline.mjs)",
       "Bash(node agg.mjs)",
       "Bash(node infoline.mjs)",
-      "Bash(git stash *)"
+      "Bash(git stash *)",
+      "Bash(kill %1)",
+      "Bash(HTTPS_PROXY=http://127.0.0.1:7897 MEDIA_NO_PROXY=1 nohup npm run dev)"
     ],
     "ask": [
       "Bash(rm *)",

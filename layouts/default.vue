@@ -12,8 +12,13 @@
   -->
   <div class="min-h-screen overflow-x-clip bg-gradient-to-b from-rose-50/70 via-white to-violet-50/60
               dark:from-[#1a1520] dark:via-[#141119] dark:to-[#16121d]">
-    <header class="sticky top-0 z-40 bg-white/70 dark:bg-[#171320]/70 backdrop-blur-xl
-                   border-b border-rose-100/70 dark:border-white/5">
+    <!-- /video-search 自己有一套「站点按钮 + 结果」的紧凑版式，顶部品牌栏在这一页纯属占地方
+         （屏幕就那么高，多留一行给它，海报网格就得少露半行）——这一页单独不出这层 header -->
+    <header
+      v-if="showHeader"
+      class="sticky top-0 z-40 bg-white/70 dark:bg-[#171320]/70 backdrop-blur-xl
+             border-b border-rose-100/70 dark:border-white/5"
+    >
       <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div class="flex justify-between items-center h-16">
           <NuxtLink to="/" class="flex items-center space-x-2">
@@ -28,7 +33,7 @@
               <span class="text-[10px] tracking-[0.3em] text-gray-400 dark:text-gray-500 mt-0.5">EVENING BREEZE</span>
             </span>
           </NuxtLink>
-          
+
           <nav class="hidden md:flex items-center space-x-1">
             <UDropdown
               v-for="category in toolCategories"
@@ -131,6 +136,8 @@ interface Category {
 
 const route = useRoute()
 const mobileMenuOpen = ref(false)
+
+const showHeader = computed(() => route.path !== '/video-search')
 
 const toolCategories: Category[] = [
   {
