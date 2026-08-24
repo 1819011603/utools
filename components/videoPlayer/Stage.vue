@@ -380,17 +380,23 @@ const mp4NeedKBps = computed(() => (mp4AvgMbps.value * 1e6 / 8 / 1024) * playbac
 // 还没测出速率时不先扣红帽子（起播头几秒 mp4Kbps 恒为 0）
 const mp4Feedable = computed(() => !mp4Kbps.value || mp4Kbps.value >= mp4NeedKBps.value)
 
-// 清晰度徽标：HLS 场景用 hls.js 当前档（随 ABR 切档自动更新，见 useVideoEngine 里写 hlsStats）；
-// MP4 没有档位概念，只能等 loadedmetadata 拿一次解码后的固有尺寸——之后画面大小不会再变，不用监听 resize
-const mp4Res = ref('')
+/**
+ * 清晰度徽标：优先用清单里声明的档（HLS 场景，`hlsStats.level` 里连码率都有，信息量更大），
+ * 声明不了就退回 `<video>` 解码后的实际像素尺寸——**不少源的 m3u8 是纯分片列表，
+ * 压根没有 EXT-X-STREAM-INF，`hls.levels[0]` 只有一条没有宽高的空档**（实测「蓝光1」这条线路）。
+ * 解码尺寸是浏览器吐出来的实测值，不管清单声不声明都拿得到，还比清单里的「标称值」更准。
+ * MP4 没有档位这回事，直接就是这条路径。
+ */
+const decodedRes = ref('')
 const handleLoadedMetadata = () => {
   onLoadedMetadata()
   const v = videoEl.value
-  if (v?.videoWidth && v?.videoHeight) mp4Res.value = `${v.videoHeight}p`
+  if (v?.videoWidth && v?.videoHeight) decodedRes.value = `${v.videoHeight}p`
 }
 const videoRes = computed(() => {
-  if (isHls.value) return hlsStats.value?.level && hlsStats.value.level !== '自动' ? hlsStats.value.level : ''
-  return mp4Res.value
+  const declared = isHls.value ? hlsStats.value?.level : ''
+  if (declared && declared !== '自动') return declared
+  return decodedRes.value
 })
 
 // 锁定按钮「未锁定时小窗不出」要用它。**曾经漏了这行声明**：模板里读不存在的属性只是一条

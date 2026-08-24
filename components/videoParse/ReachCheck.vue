@@ -22,13 +22,15 @@
       </div>
       <ProbeMatrix :rows="rows" :total-ms="result.totalMs" />
       <!--
-        清晰度只在清单是 master 列表时才有——分辨率/码率写在 EXT-X-STREAM-INF 的 variant 属性上，
-        探测已经顺手把它读出来了（下钻到媒体列表前摘的），不用再额外发一轮请求。
-        媒体列表本身没有这个字段，测不出就不显示，不摆一个「未知」占位
+        清晰度：清单是 master 列表时探测顺手就读出来了（`result.variantRes`，带码率，信息量更大）；
+        不少源的 m3u8 是纯分片列表，压根没有 EXT-X-STREAM-INF，这种测不出就退回 `decodedRes`
+        ——拉起一个隐藏播放器把清单真的解码一帧，读 `<video>` 的实际像素尺寸（见 runDecodeProbe）
       -->
-      <p v-if="result.variantRes" class="text-xs text-gray-500 dark:text-gray-400">
-        清晰度：<span class="font-medium text-gray-700 dark:text-gray-200">{{ result.variantRes }}</span>
+      <p v-if="result.variantRes || decodedRes" class="text-xs text-gray-500 dark:text-gray-400">
+        清晰度：<span class="font-medium text-gray-700 dark:text-gray-200">{{ result.variantRes || decodedRes }}</span>
+        <span v-if="!result.variantRes" class="text-gray-400">（解码实测，清单未声明）</span>
       </p>
+      <p v-else-if="decodingRes" class="text-xs text-gray-400">清晰度：解码中…</p>
       <!-- 把实测的那条地址摊开：一条线路里各集可能不同源（实测 4kvm 最新一集走网盘直链），
            不写清测的是哪条，结论就没法归因 -->
       <p class="text-xs text-gray-400 break-all">测的是：{{ url }}</p>
@@ -50,7 +52,7 @@
  * 各写一遍必然和播放器的结论对不上。
  */
 import {
-  probeReachability, diagnoseProbe, probeMatrixRows,
+  probeReachability, diagnoseProbe, probeMatrixRows, buildChannelUrl, resolveConnConfig,
   type ProbeResult, type ProbeVerdict,
 } from '~/composables/videoPlayer/useReachabilityProbe'
 
@@ -96,10 +98,67 @@ const verdictIcon = computed(() => ({
 let seq = 0
 let inflight: AbortController | null = null
 
+/**
+ * 清单没声明分辨率时的兜底：拉起一个隐藏的 <video> + hls.js，跟真播放器走同一套连接配置
+ * （`resolveConnConfig` 算出来的通道/防盗链头），让它把第一个分片真的解出一帧，
+ * 读 `<video>` 的 videoWidth/videoHeight——这是浏览器吐出来的实测像素，不管清单声不声明都拿得到。
+ *
+ * 只在探测已经给出「清单可达 + 分片可达」结论时才做，且已经有 `variantRes` 就不用再费这一遍——
+ * 拉一次真播放器要多下一小段视频，是「锦上添花」不是「必须」，别在探测阶段的快速判断上加负担。
+ */
+const decodedRes = ref('')
+const decodingRes = ref(false)
+let probeHls: any = null
+let probeVideoEl: HTMLVideoElement | null = null
+
+const cleanupDecodeProbe = () => {
+  if (probeHls) { try { probeHls.destroy() } catch {} probeHls = null }
+  if (probeVideoEl) { try { probeVideoEl.remove() } catch {} probeVideoEl = null }
+}
+
+const runDecodeProbe = async (r: ProbeResult, mine: number) => {
+  if (!r.isHls || r.variantRes || !r.manifestChannel || !r.segmentChannel) return
+  decodingRes.value = true
+  try {
+    const { default: Hls } = await import('hls.js')
+    if (mine !== seq || !Hls.isSupported()) return
+    // selfOrigin 只是没记 hdrOrigin 时的兜底（老缓存场景），probeReachability 当场测出的
+    // 结论恒带 hdrOrigin，这里传什么基本不影响，不用再解析一遍
+    const cfg = resolveConnConfig(r, props.origin?.trim() ?? '')
+    if (!cfg) return
+    const manifestUrl = buildChannelUrl(props.url, r.manifestChannel, {
+      origin: cfg.requestOrigin, referer: cfg.requestReferer, noseg: cfg.manifestOnly,
+    })
+    const video = document.createElement('video')
+    video.muted = true
+    video.playsInline = true
+    // 挂进 DOM 但完全不可见：部分浏览器对没挂进文档的 <video> 不给解码资源
+    video.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:-9999px;top:-9999px'
+    document.body.appendChild(video)
+    if (mine !== seq) { video.remove(); return }
+    probeVideoEl = video
+    const hls = new Hls({ maxBufferLength: 2, maxMaxBufferLength: 4, startFragPrefetch: true })
+    probeHls = hls
+    hls.attachMedia(video)
+    hls.loadSource(manifestUrl)
+    await new Promise<void>(resolve => {
+      const done = () => { video.removeEventListener('loadedmetadata', done); resolve() }
+      video.addEventListener('loadedmetadata', done)
+      setTimeout(resolve, 6000)   // 兜底：拿不到就算了，别让检测卡在这一步
+    })
+    if (mine === seq && video.videoWidth && video.videoHeight) decodedRes.value = `${video.videoHeight}p`
+  } catch { /* 解码测清晰度是锦上添花，失败就算了，不影响可达性结论本身 */ } finally {
+    cleanupDecodeProbe()
+    if (mine === seq) decodingRes.value = false
+  }
+}
+
 const run = async () => {
   if (!props.url) return
   const mine = ++seq
   inflight?.abort()
+  cleanupDecodeProbe()
+  decodedRes.value = ''
   const ctrl = new AbortController()
   inflight = ctrl
   probing.value = true
@@ -113,6 +172,7 @@ const run = async () => {
     // 结论只服务本页这块 UI（进播放器前先知道能不能播）。**不再落一份给播放器复用**——
     // 那份跨页缓存已按需求删掉，播放器起播时一律自己当场实测一轮
     result.value = r
+    void runDecodeProbe(r, mine)
   } catch (e: any) {
     if (mine !== seq) return
     error.value = '检测失败：' + (e?.message || String(e))
@@ -128,7 +188,7 @@ const run = async () => {
 // 还要多点一下的话多数时候就直接跳过了
 watch(() => props.url, () => { void run() }, { immediate: true })
 // 组件卸下（换成内嵌线路 / 离开本页）时把还在跑的那轮收掉，别留一串没人要的请求
-onUnmounted(() => inflight?.abort())
+onUnmounted(() => { inflight?.abort(); cleanupDecodeProbe() })
 
 // 上报用 watchEffect 而不是在 run() 里手动 emit：状态有三处会变（开始探、拿到结论、换线路清空），
 // 漏一处页面就会拿着过期结论放行播放

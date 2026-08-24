@@ -370,9 +370,16 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     const q = video.getVideoPlaybackQuality?.()
     hlsStats.value = {
       buffered: getCachedAhead(video),   // 含预取缓存的有效已缓冲，不只 MSE 的 ~60s
-      // `currentLevel` 只在切过档之后才有效——单档流（只有一条 EXT-X-STREAM-INF）
-      // 没有切档这回事，`currentLevel` 会一直停在 -1，退回 `loadLevel`（正在下载/已下载的档）
-      level: describeLevel(hls.levels[hls.currentLevel >= 0 ? hls.currentLevel : hls.loadLevel]),
+      /*
+       * 档位索引三级兜底：
+       * · 只有一档时不存在「选哪档」的问题，直接就是它——不用等 currentLevel/loadLevel 落定，
+       *   刚切集、一片都还没请求时（0 线程 0 KB/s）这两个都还是 -1，会晚好几拍才亮出清晰度
+       * · `currentLevel` 只在切过档之后才有效，多档流没切过档时也是 -1
+       * · `loadLevel` 是「正在下载/已下载的档」，比 currentLevel 更早有值
+       */
+      level: describeLevel(hls.levels[
+        hls.levels.length === 1 ? 0 : hls.currentLevel >= 0 ? hls.currentLevel : hls.loadLevel
+      ]),
       dropped: q?.droppedVideoFrames ?? 0,
       total: q?.totalVideoFrames ?? 0,
     }
