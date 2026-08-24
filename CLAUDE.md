@@ -220,18 +220,23 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
   fallback 不需要代码。三个坑：**键必须复用 `useWatchHistory` 的 `showKeyOf`**（各写一套归一化 =
   「续看记在这部剧、设置记在另一部」，只在标题多个空格时发作）；**套用必须 `flush: 'sync'`**
   （`skipIntro` 就是 `startPosition`，晚一步则本剧第一集拿着上一部剧的片头秒数起播，切到第二集又正常）；
-  **`hydrate()` 之后要补一次 `applyShowPrefs()`**（`?handoff=` 那条路剧名在 hydrate 之前就读进来了，
-  否则刚套上的又被全局值盖回去）。写回不需要标志位：值与记录一致就跳过，继承来的值压根没变也就不落库
+  **全局那份（`hydrate()`）必须排在按剧那份之前**，否则把本剧的设置盖回去——`mount()` 里 hydrate 之后
+  补一发 `applyShowPrefs()` 就是把这个顺序钉死（眼下没有哪条路会更早拿到剧名，是给将来留的）。
+  写回不需要标志位：值与记录一致就跳过，继承来的值压根没变也就不落库
 
 ### URL 参数直链
 
 **解析来的列表一律用 `?parseUrl=…&line=N&lineName=…&index=M&ep=…`**，链接里不带视频地址（另两种表达都不能分享）。
-**线路和集数各写两份：序号是位置，名字是身份**，打开时先按名字认；`index` 恒写；这条路上一律重解析、不吃交接槽。
+**线路和集数各写两份：序号是位置，名字是身份**，打开时先按名字认；`index` 恒写；这条路上一律重解析、不吃任何缓存。
+**「交接槽」（`video-player-handoff`：解析页写 localStorage + 跳 `?handoff=1`）已整套删除**——`parseUrl` 分支恒命中，
+那个槽写了没人读，两条读它的分支（长列表 / 按需取址）也因此永远走不到。`handoff` 只剩个**留在 `PAGE_QUERY_KEYS` 里
+被忽略的历史键**（不认它，老书签上的 `&handoff=1` 会被当成视频地址的尾巴接上去）。
 
 - **入向关键坑**：视频地址自带 query 时未编码的 `&` 会被路由拆散 → 从 `window.location.search` **原始串**手工解析，
   非 `PAGE_QUERY_KEYS` 的片段回写进最近的视频地址。只做 percent 解码，**不把 `+` 当空格**（签名里常有裸 `+`）。
   `origin`/`referer` 收作候选值，`proxy`/`noref`/`manifestOnly` 忽略，**但仍必须留在 `PAGE_QUERY_KEYS` 里**
-- **出向**用原生 `history.replaceState`；连接策略一概不写；超 2000 字符或按需取址时转存交接槽
+- **出向**用原生 `history.replaceState`；连接策略一概不写；手工贴的列表超 2000 字符就**地址栏什么都不写**
+  （刷新靠 `video-player-state` 里那份完整 playlist 恢复，效果一样）
 - **解析那几秒页面上必须有东西**（Stage 是 `v-if="isVideoLoaded"`），文案走 `resolveStage`
 
 ## 按片名搜索（/video-search）
@@ -266,7 +271,8 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
   **我们只调用站点公开导出的函数，不复刻算法**
 - **按需取址（`lazy`）：新加的 htmlRule 站点默认就该开**。**「整张线路×集数表一次拿到」不等于地址也一次拿到**
   （ncat 因此长期误判没开，点一下线路 7.8s → 0.5s）。列表里存的是**播放页地址占位、不替换成真实地址**
-  （真实地址带签名，存下来下次就是死链；占位地址还天然当了进度和集名的稳定键），因此**必须走交接槽**
+  （真实地址带签名，存下来下次就是死链；占位地址还天然当了进度和集名的稳定键），因此**作业单必须跟着列表走**
+  （`?parseUrl=` 那条路上由播放器重解析时现拿，刷新时从 `video-player-state` 的 `lazyTask` 回来）
 - **选集用网格不用列表**；**能不能点不能按 `videoUrl` 判**（内嵌线路和按需取址的列表里压根没有真实地址）
 - **分批解析**：单请求最多 40 集（CF 50 subrequest 硬顶），超出用 `offset` 分批不截断；**未解析完时禁用播放按钮**
 - **可达性检测按钮**（`ReachCheck.vue`）：**解析出地址 ≠ 播得动**。喂给它的 Origin/Referer **必须与送进播放器的完全一致**；
@@ -300,7 +306,7 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
 ## 状态持久化（localStorage）
 
 `video-player-state` · `video-probe-dead-direct`（按 host 记「直连是黑洞」）· `video-player-learned-profiles` ·
-`video-player-handoff`（交接槽 1 天）· `video-player-origin-history` / `-referer-history` · `video-parse-rules` /
+`video-player-origin-history` / `-referer-history` · `video-parse-rules` /
 `-embed-sandbox` / `video-parse-last-result`（1 小时）· `video-watch-history`（**看到第几集**，按剧名存）·
 `video-show-prefs`（**倍速与片头片尾**，按剧名存）· 各页 `*-settings` · `utools-history-<page>`。
 

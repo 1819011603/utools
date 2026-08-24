@@ -21,7 +21,7 @@ export function useVideoPlayerController() {
   const media = useVideoMediaState()
   const handoff = useVideoHandoff()
 
-  // 按剧记住倍速与片头片尾。只吃裸状态 + 交接槽（剧名从那儿来），不碰 playlist，
+  // 按剧记住倍速与片头片尾。只吃裸状态 + handoff（剧名从那儿来），不碰 playlist，
   // 所以放在最前面装：它靠 watch 剧名工作，装配顺序对它没有要求
   const showPrefs = useShowPrefs({ media, handoff })
 
@@ -163,8 +163,8 @@ export function useVideoPlayerController() {
     // proxy/noref/manifestOnly 直接忽略：它们是引擎的中间态，固化下来只会让探测绕远。
     // 注意这几个键仍留在 PAGE_QUERY_KEYS 里，否则 `&origin=` 这段会被当成视频地址的一部分回写。
     //
-    // 必须放在所有加载分支**之前**：走 ?parseUrl= 且命中交接槽时不会重新解析，
-    // 那条路上这对候选头只能从 query 来，漏了就只剩探测硬碰，防盗链站点直接一片红。
+    // 必须放在所有加载分支**之前**：解析失败/超时那条路上不会有 applyHints，
+    // 这对候选头只能从 query 来，漏了就只剩探测硬碰，防盗链站点直接一片红。
     if (queryParams.origin !== undefined || queryParams.referer !== undefined) {
       if (queryParams.origin !== undefined) conn.originHint.value = queryParams.origin
       if (queryParams.referer !== undefined) conn.refererHint.value = queryParams.referer
@@ -173,9 +173,10 @@ export function useVideoPlayerController() {
     const savedState = loadSavedState()
     if (savedState) {
       hydrate(savedState)
-      // hydrate 装的是「上一次」那份全局值，而 ?handoff= 那条路在这之前就把剧名读进来了
-      // （parseQueryVideoParams 在上面），换剧监听器早就跑过 → 会被这里原样盖回去。
-      // 所以补一次：有本剧记录就再套一遍，没有就什么都不做
+      // hydrate 装的是「上一次」那份全局值，**必须排在按剧那份之前**，否则把本剧的设置盖回去。
+      // 眼下没有哪条路会在 hydrate 之前拿到剧名（交接槽删掉之后，剧名只在解析成功时才有），
+      // 所以这一发通常什么都不做；留着是为了把顺序钉死——将来谁再往 mount 前面加一条
+      // 「先认出是哪部剧」的路径（比如从 savedState 里也存剧名），不补这一发就会静默失效
       showPrefs.applyShowPrefs()
       // 没有 URL 参数时才恢复保存的视频地址（parseUrl 也算——那条路自己会装好列表，
       // 先恢复上一份只会让旧作业单短暂串进来）
@@ -191,8 +192,8 @@ export function useVideoPlayerController() {
     if (queryParams.parseUrl) {
       // 分享进来的链接：列表一律由「源站播放页 + 线路」**现场解析**。
       //
-      // 这里曾经有一条捷径：从 /video-parse 点进来或本机刷新时，交接槽里就是同一份列表
-      //（按 pageUrl + 线路名比对），直接用它装列表、跳过整轮解析。已按需求删除——
+      // 这里曾经有一条捷径：从 /video-parse 点进来或本机刷新时，localStorage 的「交接槽」里
+      //（`video-player-handoff`，整套已删）就是同一份列表，直接用它装列表、跳过整轮解析。已按需求删除——
       // 现在每次进播放器都重解析一遍，代价是慢站几秒、按需取址的站点还可能撞上限流；
       // 换来的是「列表永远是当前源站的实况」，作业单/集名/线路表都是新的。
       // 按需取址的站点不受影响：loadFromParseSource 自己会 setLazyTask 拿到新作业单。

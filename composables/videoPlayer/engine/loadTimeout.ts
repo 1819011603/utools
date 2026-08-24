@@ -12,7 +12,7 @@ import { isOffline, isRecovering } from './netWatch'
 //（代理要先请求远端再返回，3s 往往不够，会误触 destroyHls 取消所有请求）
 const LOAD_TIMEOUT = 15000
 // 到这个点还没收到任何数据，先怀疑「地址本身死了」而不是通道选错了：
-// 预热/交接槽里的签名地址会过期，过期后换哪条通道都是 403。比 LOAD_TIMEOUT 早，
+// 预热或按需取址拿到的签名地址会过期，过期后换哪条通道都是 403。比 LOAD_TIMEOUT 早，
 // 这样重新取址那一次还能落在用户耐心之内（重取成功会把两个计时器一起重置）。
 const STALE_URL_TIMEOUT = 10000
 

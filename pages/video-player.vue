@@ -17,7 +17,7 @@
     <!--
       「上次看到第 N 集」。紧贴播放器下面，因为它要回答的是「我现在该从哪儿看」——
       解析页那条同样的提示只覆盖「重新搜一遍再解析」这一条路，而用户也可能直接点「播放全部」、
-      拿着分享链接或交接槽进来，那时播放器不说话，续看记录就白记了一场
+      拿着分享链接进来，那时播放器不说话，续看记录就白记了一场
     -->
     <VideoPlayerResumeBar v-if="isVideoLoaded" />
 
@@ -128,7 +128,7 @@
  * 本页只做三件事：建控制器、provide 给子组件、接生命周期。
  * 全部业务逻辑在 composables 里按功能分模块（见 CLAUDE.md「视频播放器」一节）：
  *   useVideoMediaState      裸状态（打断模块间依赖环）
- *   useVideoHandoff         交接槽 / 剧名集名 / 按需取址作业单
+ *   useVideoHandoff         剧名集名 / 列表来源 / 按需取址作业单
  *   useVideoServerTier      服务器档位与抗卡参数
  *   useVideoConnStrategy    可达性探测 / 线性阶梯兜底 / 代理 URL
  *   useVideoPlaylistCtl     播放列表 / 进度记忆 / 刷新链接

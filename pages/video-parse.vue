@@ -971,8 +971,8 @@ const confirmPlay = () => {
  * 播放器**开新标签页**。看片是个长时间停留的动作，而解析页上还有整张线路表——
  * 同标签跳走的话想换条线路就得按返回键（还要重跑一遍解析，见 video-parse-last-result 那份缓存）。
  *
- * 交接槽走的是 localStorage，同源新标签照样读得到，长列表/按需取址的站点不受影响。
- * 弹窗被拦（返回 null）时退回同标签跳转：宁可跳走也别让按钮点了没反应。
+ * 要带的东西全在 query 里（`?parseUrl=…&line=…&index=…`），新标签打开即自己解析一遍，
+ * 不依赖本机存的任何东西。弹窗被拦（返回 null）时退回同标签跳转：宁可跳走也别让按钮点了没反应。
  */
 const openPlayer = (qs: string) => {
   const href = '/video-player?' + qs
@@ -995,32 +995,13 @@ const playAll = (startIndex = 0) => {
 
   const params = new URLSearchParams()
 
-  // 交接槽始终写：长列表靠它整份传过去，短列表靠它把集名带过去
-  // （短列表的地址仍走 urls=，那样的链接可以直接复制给别人；交接槽是本机 localStorage，分享不了）
-  let handoffOk = true
-  try {
-    // 剧名一起带过去，播放器用它顶掉「播放器」「播放列表」这两个泛标题；
-    // source 让播放器能在链接过期时就地重新解析（带签名的地址活不久）
-    const title = result.value?.title
-    // 线路名一并带走：播放器判断「槽里是不是这份列表」时按名字比，光比序号会在
-    // 源站增删线路后把另一条线路的列表错当成这一份用上
-    const source = result.value
-      ? { pageUrl: result.value.pageUrl, line: result.value.activeLineIndex, lineName: currentLine.value?.name }
-      : undefined
-    // 按需取址的站点必须把作业单一起交接：列表里是占位地址，没有它播放器一集都取不到
-    const lazy = isLazy.value ? result.value?.clientTask : undefined
-    localStorage.setItem(HANDOFF_KEY, JSON.stringify({ urls, names, title, source, lazy, index: idx, at: Date.now() }))
-  } catch (e) {
-    handoffOk = false
-    console.error('写入播放列表交接槽失败:', e)
-  }
-
-  // 首选「从哪解析的 + 哪条线路 + 第几集」：链接短、可以直接分享，且不怕地址过期——
-  // 打开的人（包括本机）都由播放器拿这三个参数自己解析一遍。
-  // 早先本机走这条路时会命中交接槽、跳过解析，那条捷径已删：现在一律重解析，
-  // 慢站要多等几秒，换来的是列表/作业单永远是源站实况。
-  // 早先解析来的列表只有两种表达，都不能分享：?handoff=1（列表在本机 localStorage 里，
-  // 别人打开一片空白）、urls=a|b|c（几十集顶爆地址栏，带签名的地址过几小时还会变死链）。
+  // 「从哪解析的 + 哪条线路 + 第几集」：链接短、可以直接分享，且不怕地址过期——
+  // 打开的人（包括本机）都由播放器拿这三个参数自己解析一遍，列表/作业单永远是源站实况。
+  //
+  // 解析成功必然有 pageUrl（`resolve.ts` 直接回填请求地址），所以这条路是恒定的；
+  // 下面那个 urls= 分支只是防御性兜底。**这里原来还写一份 localStorage 交接槽**
+  // （`video-player-handoff`）给「长列表 / 按需取址」两条分支用，而那两条分支恰恰因为
+  // pageUrl 恒有值而永远走不到 → 槽写了从来没人读，整套已删。
   const parsed = result.value
   if (parsed?.pageUrl) {
     params.set('parseUrl', parsed.pageUrl)
@@ -1031,24 +1012,9 @@ const playAll = (startIndex = 0) => {
     if (lineName) params.set('lineName', lineName)
     params.set('index', String(idx))
     if (names[idx]) params.set('ep', names[idx])
-  } else if (isLazy.value) {
-    if (!handoffOk) {
-      toast.add({ title: '浏览器存储不可用，该站点无法送进播放器', color: 'red' })
-      return
-    }
-    params.set('handoff', '1')
-  } else if (urls.join('|').length > MAX_QUERY_LEN) {
-    if (handoffOk) {
-      // 几十集拼进 query 会顶爆地址栏。以前是截成 31 集的窗口——等于偷偷丢集数，
-      // 现在整份走交接槽，一集不少
-      params.set('handoff', '1')
-    } else {
-      // localStorage 满了/被禁 → 只能退回 query，带得下多少算多少
-      params.set('urls', urls.slice(0, 31).join('|'))
-      params.set('index', String(Math.min(idx, 30)))
-      toast.add({ title: '浏览器存储不可用，本次只带 31 集', color: 'orange' })
-    }
   } else {
+    // 兜底：没有 pageUrl 就只能把地址本身带过去（按需取址的站点在这条路上没法工作——
+    // 列表里是播放页占位地址，没有作业单谁也播不了。实际走不到这儿）
     params.set('urls', urls.join('|'))
     params.set('index', String(idx))
   }

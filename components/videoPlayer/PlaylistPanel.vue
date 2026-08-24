@@ -10,7 +10,7 @@
         </span>
       </span>
       <div class="flex gap-2">
-        <!-- 带签名的地址会过期，用交接槽里的来源就地重解析，不用回解析页 -->
+        <!-- 带签名的地址会过期，用记着的来源就地重解析，不用回解析页 -->
         <UButton
           v-if="playlistSource"
           size="xs"

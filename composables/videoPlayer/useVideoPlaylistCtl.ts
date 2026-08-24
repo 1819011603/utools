@@ -95,7 +95,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
    * 「上次看到第 N 集」——**播放器自己也要提**，不能只在解析页提。
    *
    * 解析页那条提示只覆盖「重新搜一遍再解析」这一条路；而用户也可能直接点「播放全部」、
-   * 或者拿着分享链接/交接槽进来，那时播放器照旧从第 1 集起播，续看记录白记了一场。
+   * 或者拿着分享链接进来，那时播放器照旧从第 1 集起播，续看记录白记了一场。
    *
    * 只在**没指定集数**（`currentIndex === 0`）时提：深链带了 `index`/`ep` 就是明确要看那一集，
    * 这时候插嘴纯属干扰。也不自动跳过去——用户可能就是想重看第 1 集，跳了他还得自己找回来。
@@ -133,7 +133,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
   }
   const dismissResumeHint = () => { resumeHint.value = null }
 
-  // 列表换了（解析出新的一份 / 交接槽读进来 / 手工贴一批）就重算一次
+  // 列表换了（解析出新的一份 / 从 savedState 恢复 / 手工贴一批）就重算一次
   watch([playlist, () => handoff.playlistTitle.value], () => findResumeHint(), { flush: 'post' })
 
   /**
@@ -216,7 +216,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
     // 作业单的占位地址对不上、来源会让地址栏写成上一部剧的 parseUrl，分享出去驴唇不对马嘴。
     //
     // 判据是「这批地址不全认识」而不是「列表变了」：onMounted 走 query 进来时也经过这里，
-    // 而那份 meta 是刚从交接槽读出来的，按「列表变了」清会把它冲掉
+    // 而那份 meta 是刚装上的（解析结果 / savedState 里的作业单），按「列表变了」清会把它冲掉
     //（踩过一次，表现为播放列表一排 index.m3u8）。
     // 注意要赶在 playlist 被覆盖**之前**判，否则 includes 恒真、等于没判。
     const known = (u: string) =>
@@ -333,7 +333,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
   /**
    * 从「源站播放页地址 + 线路」现场解析出整份播放列表并起播（`?parseUrl=…&line=N&index=M`）。
    *
-   * 这是分享链接的落地点：别人拿到链接时本机没有交接槽，列表得自己解析出来。
+   * 这是分享链接的落地点：链接里只有来源，列表一律现场解析出来（本机也一样，不吃任何缓存）。
    * 与「刷新链接」共用 resolvePlaylist（工作量证明 / 分批续拉 / 作业单都在里面），
    * 两处各写一份必然漂移。
    */
@@ -446,7 +446,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
    * 就地重新解析当前播放列表，换成新链接。
    *
    * 动机：部分线路给的是带签名的地址（`?sign=…&timestamp=…`），过一阵会失效，
-   * 表现为好好播着突然 403。此时不必回解析页重来一遍，用交接槽里带过来的
+   * 表现为好好播着突然 403。此时不必回解析页重来一遍，用 `playlistSource` 记着的
    * 「源页面地址 + 线路」原地重解析即可。
    *
    * 三个要点：

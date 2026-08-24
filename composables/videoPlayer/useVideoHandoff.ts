@@ -56,7 +56,7 @@ export function useVideoHandoff() {
     setLazyTask(null, [])
   }
 
-  /** 从 URL 猜显示名；交接槽给的集名优先 */
+  /** 从 URL 猜显示名；解析给的集名优先 */
   const getVideoName = (url: string, index: number): string => {
     const named = playlistNames.value[url]
     if (named) return named
