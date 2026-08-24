@@ -5,7 +5,7 @@
     等于把一张挑片用的图降级成色块；一度放到 2→5 列又太占地方，一屏摆不下十张。
     现在这档比 5 列小约三成，海报仍读得出字，同时一屏能看到两行以上
   -->
-  <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 xl:grid-cols-7 gap-3">
+  <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-9 gap-3">
     <button
       v-for="(it, i) in items"
       :key="i"

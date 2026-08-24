@@ -1,5 +1,5 @@
 <template>
-  <div class="relative max-w-6xl mx-auto">
+  <div class="relative max-w-[92rem] mx-auto">
     <!--
       两团极淡的光斑铺在整页最底下（pointer-events-none + -z-10，绝不吃点击）。
       layouts 里那层渐变是通铺的，本页需要一个「视线落点」——光斑压在搜索框正后方，
@@ -30,11 +30,11 @@
           <!-- 标题跟站点主视觉对齐（渐变字），副标题压成一行小字：
                这一页真正的主角是下面那个搜索框，标题不该抢戏 -->
           <div class="text-center pt-2 wf-fade-up">
-            <h1 class="text-3xl sm:text-4xl font-bold tracking-tight bg-gradient-to-r from-rose-500 via-pink-500 to-violet-500
+            <h1 class="text-4xl sm:text-5xl font-bold tracking-tight bg-gradient-to-r from-rose-500 via-pink-500 to-violet-500
                        bg-clip-text text-transparent pb-1">
               按片名搜索
             </h1>
-            <p class="text-sm text-gray-500 dark:text-gray-400 mt-1.5">
+            <p class="text-base text-gray-500 dark:text-gray-400 mt-2">
               一个片名，各站同时搜 · 点一格直接送去解析
             </p>
           </div>
@@ -157,53 +157,24 @@
       <div
         v-if="keyword"
         class="wf-fade-up rounded-2xl bg-white/70 dark:bg-white/[0.04] backdrop-blur-sm
-               ring-1 ring-black/5 dark:ring-white/10 shadow-sm p-4 sm:p-5"
+               ring-1 ring-black/5 dark:ring-white/10 shadow-sm p-5 sm:p-6 space-y-5"
         style="animation-delay: 160ms"
       >
-        <!-- grid-template-columns 本身就能过渡（Chrome 107+），
-             所以折叠是「列宽收窄」而不是「元素消失 + 布局跳一下」 -->
-        <div
-          class="grid gap-4 md:gap-5 transition-[grid-template-columns] duration-300 ease-out"
-          :class="railOpen ? 'md:grid-cols-[13rem_minmax(0,1fr)]' : 'md:grid-cols-[3.5rem_minmax(0,1fr)]'"
-        >
-          <!--
-            鼠标移上去自动展开。**是把这一列撑宽、把海报推开，不是浮一层盖上去**：
-            试过做成绝对定位的浮层（列宽不变、面板盖在网格上），结果它正好压住第一张海报和
-            那行「在源站看全部」——想看列表和想看第一张片的手势是同一个，等于用一个功能挡了另一个。
-            推开的代价只是海报横向挪一下，而且有过渡，比被盖住舒服得多
-          -->
-          <!--
-            **`min-w-0` 不能省**：grid 子项默认 `min-width: auto`，会被里面那条 flex 行的
-            内容宽度顶开。手机上这一列是横排的五个站，于是列被撑到比屏幕还宽——
-            `overflow-x-auto` 挂在里层却永远不触发（撑开的是外层），表现是
-            **横向划不动、右边那两个站永远够不着**（安卓上踩到）
-          -->
-          <div
-            class="min-w-0 md:border-r md:border-gray-200/70 md:dark:border-white/10 transition-all duration-300"
-            :class="railOpen ? 'md:pr-4' : 'md:pr-2'"
-            @mouseenter="railHovered = true"
-            @mouseleave="railHovered = false"
-          >
-            <VideoSearchSiteRail
-              :model-value="activeId"
-              :states="states"
-              :collapsed="!railOpen"
-              @update:model-value="pickSite"
-              @toggle="toggleRail"
-            />
-          </div>
+        <!-- 站点改横排按钮，点哪个看哪个的结果，下面整块留给海报网格 -->
+        <VideoSearchSiteRail
+          :model-value="activeId"
+          :states="states"
+          @update:model-value="activeId = $event"
+        />
 
-          <!-- 同上：结果那一列也要 min-w-0，否则长片名/长地址一样能把整格顶宽 -->
-          <VideoSearchSiteResults
-            v-if="activeState"
-            :key="activeState.siteId"
-            class="min-w-0"
-            :state="activeState"
-            :keyword="keyword"
-            @retry="retrySite(activeState.siteId)"
-            @page="goPage(activeState.siteId, $event)"
-          />
-        </div>
+        <VideoSearchSiteResults
+          v-if="activeState"
+          :key="activeState.siteId"
+          :state="activeState"
+          :keyword="keyword"
+          @retry="retrySite(activeState.siteId)"
+          @page="goPage(activeState.siteId, $event)"
+        />
       </div>
 
       <!-- 还没搜过时的空状态：与其画一个灰扑扑的占位框，不如把「有哪些站」摆出来当预告 -->
@@ -240,37 +211,6 @@ const focused = ref(false)
  */
 const compact = computed(() => !!keyword.value)
 
-/**
- * 左边那列站点可以折起来（只在 md+ 有意义，窄屏它本来就是横排滚动条）。
- *
- * **选完站自动折，但绝不在页面加载时折**：挑站是「先决定看哪家」的一次性动作，
- * 定下来之后这一列就只剩占地方，折起来把宽度让给海报；而一进页面就摆一列缩写方块，
- * 用户得先点开才知道有哪些站可选（试过，当场被骂丑）。
- * 折起来之后仍留「缩写 + 条数」，换站不必先展开。
- */
-const railCollapsed = ref(false)
-const railHovered = ref(false)
-
-/**
- * 实际展不展开 = 「没折起来」或「鼠标正压在这一列上」。
- *
- * 折起来之后 hover 只是**临时**展开，不动 `railCollapsed`：移开就自己收回去，
- * 用户不会莫名其妙多出一个「怎么又展开了」的状态。要长期展开就点那颗折叠钮。
- * 另外 `railHovered` 在点选站点后仍为真，所以自动折叠不会把光标底下的那一列当场抽走
- * ——那一下会让「点中的是哪个」看不清，也是抖动的来源。
- */
-const railOpen = computed(() => !railCollapsed.value || railHovered.value)
-const toggleRail = () => { railCollapsed.value = !railCollapsed.value }
-
-const pickSite = (id: string) => {
-  const changed = id !== activeId.value
-  activeId.value = id
-  if (!changed || railCollapsed.value) return
-  if (!window.matchMedia('(min-width: 768px)').matches) return
-  // 慢一拍再折：选中态的高亮要先落到用户点的那一格上。
-  // 同时发生的话，「整列变窄」会盖过「点中了谁」，看着像点歪了
-  setTimeout(() => { railCollapsed.value = true }, 220)
-}
 // 选中的站点按 **id** 记，不按下标：规则表增删站点后下标会指到别人身上
 const activeId = ref(states.value[0]?.siteId ?? '')
 const activeState = computed(() => states.value.find(s => s.siteId === activeId.value) ?? states.value[0])
