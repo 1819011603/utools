@@ -162,6 +162,19 @@ const COAST_WALL_SECS = 20
 const COAST_GAP_WALL_SECS = 10
 
 /**
+ * 「已到预加载目标」的**恢复线**占目标的比例：停取之后，缺口要重新张开到这么大才再开线程。
+ *
+ * 停取线是「缺口不足一片」，但只有这一条线时贴着目标必然每拍翻转——
+ * 缓冲本来就在**一片的幅度**上浮动（实测：目标 150s，存货在 146.4 ↔ 149.9 之间来回），
+ * 一片的死区正好被这个幅度跨过，于是连着二十几行 `1 → 0 → 1 → 0`。
+ *
+ * 危害和存货阶梯没迟滞那次一样：**每次变化都 `markConcChange()` 作废分档账本** → `饱和` 永远没数据。
+ * 5% 的含义是「目标 150s 时要掉到 142.5s 才重新开工」，比缓冲的自然浮动大一个量级，
+ * 又远小于任何会影响播放的量（那时离保险线还有一百多秒）。
+ */
+const HEADROOM_RESUME_FRAC = 0.05
+
+/**
  * **冷启动并发硬帽：3 条，无论有没有双通道。**
  *
  * 「还没有任何实测样本」= 不知道这个源是快是慢、每连接扛不扛得动、聚合能不能并行。
@@ -359,6 +372,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   let connDownAt = 0                      // 上次**下调**并发的时刻：沉降期内只许再降不许升
   let connUpAt = 0                        // 上次**上调**并发的时刻：爬升每 CONN_RAMP_MS 只许 +1
   let wallStep = WALL_CONN_STEPS.length   // 存货阶梯当前所在档（= length 表示放开）：迟滞用
+  let headroomIdle = false                // 缺口已到目标、停取中：恢复要等缺口张开到 5%（迟滞）
   let lastAhead = -1                      // 上次的前向缓冲秒数
   let lastHealthZone: HealthZone = 'healthy'  // 健康区（驱动 UI 与降速守卫）
   let lastPlayable = 0                    // 上次量到的有效可播秒数（MSE + 预取缓存）
@@ -373,6 +387,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     connDownAt = 0
     connUpAt = 0
     wallStep = WALL_CONN_STEPS.length
+    headroomIdle = false
     lastAhead = -1
     lastHealthZone = 'healthy'
     lastPlayable = 0
@@ -547,15 +562,17 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     const target = effectivePrefetchTarget()
     if (!Number.isFinite(target)) return hostConcurrencyCap   // 没设预加载时长 → 这条不参与
     /*
-     * 缺口不足一片就当已到目标（`gap <= 0` 的死区版本）。
-     *
-     * 只判 `gap <= 0` 时，贴着目标值会每拍在 0 条 ↔ 1 条之间抖：下完一片就超过目标 → 0 条 →
-     * 播掉一点又差一丁点 → 1 条 → …… 实测日志里连着十几行 `0 → 1 → 0`，
-     * 每次变化还会调 `markConcChange()` 把分档账本作废一次，反而把采样搅乱。
-     * 一片是这里的最小动作单位——缺口比一片还小，开线程也只会下过头。
+     * 「已到目标」用**两条线**：停取看「缺口不足一片」，恢复要等缺口重新张开到目标的 5%
+     * （见 HEADROOM_RESUME_FRAC）。单条线——无论是 `gap <= 0` 还是 `gap <= 一片`——
+     * 都会在贴着目标时每拍翻转，因为缓冲本身就在一片的幅度上浮动。
      */
     const gap = target - cachedAhead
-    if (gap <= (segDurSecs || FALLBACK_SEG_SECS)) return 0      // 已到目标（上层还会再判一次停取）
+    const seg = segDurSecs || FALLBACK_SEG_SECS
+    const stop = headroomIdle
+      ? gap < Math.max(2 * seg, target * HEADROOM_RESUME_FRAC)   // 已停取：等缺口张开够大才复工
+      : gap <= seg                                              // 在取：缺口不足一片就收工
+    if (stop) { headroomIdle = true; return 0 }                  // 已到目标（上层还会再判一次停取）
+    headroomIdle = false
     // 还没测出速度：退回「缺口装得下几片」。冷启动时缺口远大于一片，等于不限；
     // 但这样「快满了还开满线程」这个毛病就不依赖采样数据也不会犯
     if (!bw.hasSamples()) return Math.max(1, Math.ceil(gap / (segDurSecs || FALLBACK_SEG_SECS)))
@@ -736,31 +753,19 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
      *   ⑨ 沉降/爬升   刚减过 → 只许再降不许升（CONN_SETTLE_*）；升一律一档一档来（CONN_RAMP_MS）
      *                 ——**地板顶格也要走这条路**，否则 3 → 12 一步到位
      */
-    /*
-     * 每一级的值都记下来，**只在目标变化时打一行日志并点名是谁咬住的**。
-     *
-     * 不记全量就没法排查：线程数从 1 跳到 12 时，屏幕上只有「12 线程」这一个数字，
-     * 而它可能是九级里任何一级（甚至是地板 max 把前面八级全顶穿）的结果——
-     * 光看结果永远猜不出该改哪一级。日志只在变化时打，稳态下不吵。
-     */
-    const rungs: Array<[string, number]> = []
-    const clamp = (label: string, v: number) => { rungs.push([label, v]); target = Math.min(target, v) }
-
-    if (!bw.hasSamples()) clamp('①冷启动', COLD_START_CONN_CAP)              // ①
-    let floorApplied = 0
+    if (!bw.hasSamples()) target = Math.min(target, COLD_START_CONN_CAP)     // ①
     if (cachedAhead !== undefined) {
       const wall = cachedAhead / Math.max(1, getPlaybackRate())
-      clamp('②存货墙钟', wallConnCap(wall, getSafeWallSecs()))                // ②（内含 catchUpFloor 地板）
+      target = Math.min(target, wallConnCap(wall, getSafeWallSecs()))        // ②（内含 catchUpFloor 地板）
       const guard = stallGuard()                                            // ③
-      clamp('③卡顿守卫', guard.cap)
-      clamp('④摊薄帽', dilutionCap())                                        // ④
-      clamp('⑤单条够快', soloFastCap(wall))                                  // ⑤
-      clamp('⑥聚合拐点', aggregateKneeCap())                                 // ⑥
-      clamp('⑦缺口速率', headroomConnCap(cachedAhead))                        // ⑦
+      target = Math.min(target, guard.cap)
+      target = Math.min(target, dilutionCap())                              // ④
+      target = Math.min(target, soloFastCap(wall))                          // ⑤
+      target = Math.min(target, aggregateKneeCap())                         // ⑥
+      target = Math.min(target, headroomConnCap(cachedAhead))               // ⑦
       // ⑧ 地板只在「真慢型卡顿」时抬——它要压过上面所有的收紧，否则慢源永远补不回来。
       //    冷启动帽不受它影响：那时没样本，stallGuard 直接返回不咬人的值
-      floorApplied = Math.min(hostConcurrencyCap, guard.floor)
-      target = Math.max(target, floorApplied)
+      target = Math.max(target, Math.min(hostConcurrencyCap, guard.floor))
     }
     /*
      * ⑨ 沉降期：刚减过线程就**只许再降不许升**。
@@ -776,21 +781,12 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
      */
     const now = performance.now()
     const settleMs = Math.min(CONN_SETTLE_MAX_MS, Math.max(CONN_SETTLE_MIN_MS, bw.avgSegLoadMs()))
-    let held: '⑨沉降期' | '⑨爬升' | '' = ''
     if (lastTargetConn > 0 && target > lastTargetConn) {
-      if (now - connDownAt < settleMs) {
-        target = lastTargetConn                      // 刚减过：等在途排空，读数还不可信
-        held = '⑨沉降期'
-      } else if (now - connUpAt < CONN_RAMP_MS) {
-        target = lastTargetConn                      // 上一档还没站稳，这一拍不动
-        held = '⑨爬升'
-      } else if (target > lastTargetConn + 1) {
-        target = lastTargetConn + 1                  // 一档一档来（地板顶格也要走这条路）
-        held = '⑨爬升'
-      }
+      if (now - connDownAt < settleMs) target = lastTargetConn              // 刚减过：等在途排空，读数还不可信
+      else if (now - connUpAt < CONN_RAMP_MS) target = lastTargetConn       // 上一档还没站稳，这一拍不动
+      else target = Math.min(target, lastTargetConn + 1)                    // 一档一档来（地板顶格也走这条路）
     }
     if (target !== lastTargetConn) {
-      logConnDecision(target, { paused, ctrl: ctrlConn, rungs, floorApplied, held, cachedAhead })
       if (lastTargetConn > 0 && target < lastTargetConn) connDownAt = now
       if (target > lastTargetConn) connUpAt = now
       bw.markConcChange()
@@ -798,37 +794,6 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     lastTargetConn = target
     refreshStrategy(target)
     return target
-  }
-
-  /**
-   * 并发变化的单行日志。**必须把每一级的值都打出来，而不只是结果**：
-   * 「1 线程 → 12 线程」这种跳变，光看结果分不清是哪一级放开的，
-   * 也分不清是不是地板（`max`）把前面所有帽子一起顶穿了（实测最常见的就是这个）。
-   *
-   * 咬人的那几级用 `←` 标出（等于最终值的都算，可能并列）；地板生效时单独标 `⑧地板↑`，
-   * 因为它是唯一往上顶的一级，跟其他八级方向相反、最容易被漏看。
-   */
-  const logConnDecision = (
-    target: number,
-    ctx: { paused: boolean; ctrl: number; rungs: Array<[string, number]>; floorApplied: number; held: string; cachedAhead?: number },
-  ) => {
-    const bind = ctx.rungs.filter(([, v]) => v === target).map(([k]) => k)
-    // ⑨ 排在最后，它一生效就是它说了算（哪怕地板算出更高的值，也被它压成 +1）
-    const bound = ctx.held
-      || (ctx.floorApplied >= target && ctx.floorApplied > 0
-        ? `⑧地板↑${ctx.floorApplied}`
-        : (bind.length ? bind.join('+') : '闭环/暂停'))
-    const rate = getPlaybackRate()
-    console.log(
-      `[conn] ${lastTargetConn} → ${target} 线程 ∵ ${bound}`
-      + ` | ${ctx.rungs.map(([k, v]) => `${k}=${v >= hostConcurrencyCap ? '-' : v}`).join(' ')}`
-      + ` 地板=${ctx.floorApplied || '-'} 上限=${hostConcurrencyCap} 闭环=${ctx.ctrl}${ctx.paused ? ' 暂停' : ''}`
-      + ` | 存货=${ctx.cachedAhead === undefined ? '?' : ctx.cachedAhead.toFixed(1) + 's'}`
-      + `（够播 ${ctx.cachedAhead === undefined ? '?' : (ctx.cachedAhead / Math.max(1, rate)).toFixed(1)}s @${rate}x，保险线 ${getSafeWallSecs()}s）`
-      + ` | 单条=${bw.soloConnKBps()}KB/s 均值=${bw.perConnKBps()}KB/s 保有=${Math.round(bw.soloRetainRatio() * 100)}%`
-      + ` 峰值聚合=${(bw.peakAggBps() / 1e6).toFixed(1)}Mbps 码率=${bw.segMbps()}Mbps`
-      + ` 饱和=${bw.saturationConn() || '-'} 需要=${bw.hasSamples() ? bw.requiredConn(rate, tier().safety, true) : '-'}条`,
-    )
   }
 
   // 不限制预取"触达距离"：始终让 count 个连接并行下载最近的 count 个未缓存分片。
