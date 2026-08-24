@@ -436,6 +436,19 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
    * 它本身就是当时的目标并发，不再翻倍。学过的慢站第二次进来即刻高并发，不用先卡一片。
    * 都没有（生面孔第一片）就交给阶梯：先按 2 条把第一片让过去，一有样本立刻按实测放开，代价是一片。
    */
+  /**
+   * 地板的天花板：**任何地板都不能超过饱和并发**（见 bandwidth 的 saturationConn）。
+   *
+   * 地板说的是「要这么多条才喂得动」，可超过饱和点的那些连接**根本喂不动更多东西**，
+   * 只是把同一份带宽切得更碎。地板是 min 链里唯一往上顶的一级，不封它就等于
+   * 前面八级全部作废——实测日志里「1 线程 → 12 线程」的跳变就是这么来的：
+   * 存货 0 + 3x + 刚卡过 → `requiredConn × 2` 顶到 hostCap，②~⑦ 一起被顶穿。
+   */
+  const saturationLimit = (): number => {
+    const sat = bw.saturationConn()
+    return sat > 0 ? Math.min(hostConcurrencyCap, sat) : hostConcurrencyCap
+  }
+
   const catchUpFloor = (): number => {
     if (!bw.hasSamples()) return Math.min(hostConcurrencyCap, Math.max(0, opts.getColdStartConn?.() ?? 0))
     const rate = getPlaybackRate()
@@ -446,7 +459,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     // 实测截图（单条 369KB/s、被摊到 222KB/s、聚合 20.8Mbps vs 码率 5.2Mbps）就是它顶到 12 的。
     if (bw.aggregateFeeds(rate, safety)) return 0
     // 分母用**单条基线**（solo=true），不用被摊薄的混合均值——同一个正反馈的另一半
-    return Math.min(hostConcurrencyCap, Math.max(0, bw.requiredConn(rate, safety, true) * 2))
+    return Math.min(saturationLimit(), Math.max(0, bw.requiredConn(rate, safety, true) * 2))
   }
 
   /** 存货阶梯（表见 WALL_CONN_STEPS）：wall = 还够播几秒。保险线填 0/负数 = 关掉整条阶梯 */
@@ -553,7 +566,8 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     const diluted = retain > 0 && retain < DILUTION_RETAIN_STEPS[1]![0]
     return bandwidthEnough || diluted
       ? { cap: 3, floor: 0 }                       // 摊薄型：收紧，让眼前那一片先到
-      : { cap: hostConcurrencyCap, floor: hostConcurrencyCap }  // 真慢型：能开多少开多少
+      // 真慢型：能开多少开多少——但同样封在饱和并发，再多开也换不来吞吐
+      : { cap: hostConcurrencyCap, floor: saturationLimit() }
   }
 
   /**
@@ -653,19 +667,31 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
      *   ⑧ 地板        慢源兜底：catchUpFloor / 卡顿守卫的 floor（防「越缺越不敢开」自锁）
      *   ⑨ 沉降期      刚减过线程 → 只许再降不许升（在途排空前的读数不可信，见 CONN_SETTLE_*）
      */
-    if (!bw.hasSamples()) target = Math.min(target, COLD_START_CONN_CAP)     // ①
+    /*
+     * 每一级的值都记下来，**只在目标变化时打一行日志并点名是谁咬住的**。
+     *
+     * 不记全量就没法排查：线程数从 1 跳到 12 时，屏幕上只有「12 线程」这一个数字，
+     * 而它可能是九级里任何一级（甚至是地板 max 把前面八级全顶穿）的结果——
+     * 光看结果永远猜不出该改哪一级。日志只在变化时打，稳态下不吵。
+     */
+    const rungs: Array<[string, number]> = []
+    const clamp = (label: string, v: number) => { rungs.push([label, v]); target = Math.min(target, v) }
+
+    if (!bw.hasSamples()) clamp('①冷启动', COLD_START_CONN_CAP)              // ①
+    let floorApplied = 0
     if (cachedAhead !== undefined) {
       const wall = cachedAhead / Math.max(1, getPlaybackRate())
-      target = Math.min(target, wallConnCap(wall, getSafeWallSecs()))        // ②（内含 catchUpFloor 地板）
+      clamp('②存货墙钟', wallConnCap(wall, getSafeWallSecs()))                // ②（内含 catchUpFloor 地板）
       const guard = stallGuard()                                            // ③
-      target = Math.min(target, guard.cap)
-      target = Math.min(target, dilutionCap())                              // ④
-      target = Math.min(target, soloFastCap(wall))                          // ⑤
-      target = Math.min(target, aggregateKneeCap())                         // ⑥
-      target = Math.min(target, headroomConnCap(cachedAhead))               // ⑦
+      clamp('③卡顿守卫', guard.cap)
+      clamp('④摊薄帽', dilutionCap())                                        // ④
+      clamp('⑤单条够快', soloFastCap(wall))                                  // ⑤
+      clamp('⑥聚合拐点', aggregateKneeCap())                                 // ⑥
+      clamp('⑦缺口速率', headroomConnCap(cachedAhead))                        // ⑦
       // ⑧ 地板只在「真慢型卡顿」时抬——它要压过上面所有的收紧，否则慢源永远补不回来。
       //    冷启动帽不受它影响：那时没样本，stallGuard 直接返回不咬人的值
-      target = Math.max(target, Math.min(hostConcurrencyCap, guard.floor))
+      floorApplied = Math.min(hostConcurrencyCap, guard.floor)
+      target = Math.max(target, floorApplied)
     }
     /*
      * ⑨ 沉降期：刚减过线程就**只许再降不许升**。
@@ -681,16 +707,48 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
      */
     const now = performance.now()
     const settleMs = Math.min(CONN_SETTLE_MAX_MS, Math.max(CONN_SETTLE_MIN_MS, bw.avgSegLoadMs()))
+    let settled = false
     if (lastTargetConn > 0 && target > lastTargetConn && now - connDownAt < settleMs) {
       target = lastTargetConn
+      settled = true
     }
     if (target !== lastTargetConn) {
+      logConnDecision(target, { paused, ctrl: ctrlConn, rungs, floorApplied, settled, cachedAhead })
       if (lastTargetConn > 0 && target < lastTargetConn) connDownAt = now
       bw.markConcChange()
     }
     lastTargetConn = target
     refreshStrategy(target)
     return target
+  }
+
+  /**
+   * 并发变化的单行日志。**必须把每一级的值都打出来，而不只是结果**：
+   * 「1 线程 → 12 线程」这种跳变，光看结果分不清是哪一级放开的，
+   * 也分不清是不是地板（`max`）把前面所有帽子一起顶穿了（实测最常见的就是这个）。
+   *
+   * 咬人的那几级用 `←` 标出（等于最终值的都算，可能并列）；地板生效时单独标 `⑧地板↑`，
+   * 因为它是唯一往上顶的一级，跟其他八级方向相反、最容易被漏看。
+   */
+  const logConnDecision = (
+    target: number,
+    ctx: { paused: boolean; ctrl: number; rungs: Array<[string, number]>; floorApplied: number; settled: boolean; cachedAhead?: number },
+  ) => {
+    const bind = ctx.rungs.filter(([, v]) => v === target).map(([k]) => k)
+    const bound = ctx.floorApplied >= target && ctx.floorApplied > 0
+      ? `⑧地板↑${ctx.floorApplied}`
+      : (ctx.settled ? '⑨沉降期' : (bind.length ? bind.join('+') : '闭环/暂停'))
+    const rate = getPlaybackRate()
+    console.log(
+      `[conn] ${lastTargetConn} → ${target} 线程 ∵ ${bound}`
+      + ` | ${ctx.rungs.map(([k, v]) => `${k}=${v >= hostConcurrencyCap ? '-' : v}`).join(' ')}`
+      + ` 地板=${ctx.floorApplied || '-'} 上限=${hostConcurrencyCap} 闭环=${ctx.ctrl}${ctx.paused ? ' 暂停' : ''}`
+      + ` | 存货=${ctx.cachedAhead === undefined ? '?' : ctx.cachedAhead.toFixed(1) + 's'}`
+      + `（够播 ${ctx.cachedAhead === undefined ? '?' : (ctx.cachedAhead / Math.max(1, rate)).toFixed(1)}s @${rate}x，保险线 ${getSafeWallSecs()}s）`
+      + ` | 单条=${bw.soloConnKBps()}KB/s 均值=${bw.perConnKBps()}KB/s 保有=${Math.round(bw.soloRetainRatio() * 100)}%`
+      + ` 峰值聚合=${(bw.peakAggBps() / 1e6).toFixed(1)}Mbps 码率=${bw.segMbps()}Mbps`
+      + ` 饱和=${bw.saturationConn() || '-'} 需要=${bw.hasSamples() ? bw.requiredConn(rate, tier().safety, true) : '-'}条`,
+    )
   }
 
   // 不限制预取"触达距离"：始终让 count 个连接并行下载最近的 count 个未缓存分片。
