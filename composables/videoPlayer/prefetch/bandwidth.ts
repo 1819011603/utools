@@ -165,7 +165,22 @@ export function useBandwidthModel() {
    */
   const saturationConn = (): number => {
     const peak = peakAggBps()
-    return peak > 0 && perConnLow > 0 ? Math.max(2, Math.ceil(peak / perConnLow)) : 0
+    if (peak <= 0 || perConnLow <= 0) return 0
+    const sat = Math.max(2, Math.ceil(peak / perConnLow))
+    /*
+     * **只有「试探过更高并发」时这个数才可信**（同 bestAggConn 那句 `best.conn >= maxTried`）。
+     *
+     * 不加这道判据就会自锁：只在 2 条上测过时，峰值聚合就是 2 条那一档 = 2 × 单条，
+     * 于是算出饱和 = 2，`saturationLimit()` 把地板也封在 2 —— 源站压根没被试探过更高并发，
+     * 而「饱和值 = 试过的最高档」这个结论反过来禁止了试探。慢源上表现为**线程数永远上不去**：
+     * 5x 倍速下存货墙钟本来就长期停在濒卡档（保险线 5s 墙钟 = 25 视频秒），
+     * 唯一能救的 `catchUpFloor` 又被这个假饱和值封死（实测日志：全程钉在 2 条，一条 [conn] 都不再打）。
+     *
+     * 判据是「饱和点必须严格低于试过的最高档」——那才叫真的看见了饱和，
+     * 而不是「还没往上试过」。数据不够就返回 0（不咬人），交给存货阶梯和地板去试探。
+     */
+    const maxTried = aggByConn.reduce((m, v, i) => (v > 0 ? i : m), 0)
+    return sat < maxTried ? sat : 0
   }
 
   /**

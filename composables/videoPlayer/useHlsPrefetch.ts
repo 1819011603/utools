@@ -499,8 +499,16 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   const headroomConnCap = (cachedAhead: number): number => {
     const target = effectivePrefetchTarget()
     if (!Number.isFinite(target)) return hostConcurrencyCap   // 没设预加载时长 → 这条不参与
+    /*
+     * 缺口不足一片就当已到目标（`gap <= 0` 的死区版本）。
+     *
+     * 只判 `gap <= 0` 时，贴着目标值会每拍在 0 条 ↔ 1 条之间抖：下完一片就超过目标 → 0 条 →
+     * 播掉一点又差一丁点 → 1 条 → …… 实测日志里连着十几行 `0 → 1 → 0`，
+     * 每次变化还会调 `markConcChange()` 把分档账本作废一次，反而把采样搅乱。
+     * 一片是这里的最小动作单位——缺口比一片还小，开线程也只会下过头。
+     */
     const gap = target - cachedAhead
-    if (gap <= 0) return 0                                     // 已到目标（上层还会再判一次停取）
+    if (gap <= (segDurSecs || FALLBACK_SEG_SECS)) return 0      // 已到目标（上层还会再判一次停取）
     // 还没测出速度：退回「缺口装得下几片」。冷启动时缺口远大于一片，等于不限；
     // 但这样「快满了还开满线程」这个毛病就不依赖采样数据也不会犯
     if (!bw.hasSamples()) return Math.max(1, Math.ceil(gap / (segDurSecs || FALLBACK_SEG_SECS)))
@@ -556,6 +564,19 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     // → **整个卡顿守卫从来没生效过**（表现：卡了三次、聚合是码率的 4 倍，线程仍钉在 12）
     const recentlyStalled = stalledAt > 0 && performance.now() - stalledAt < STALL_WINDOW_MS
     if (!recentlyStalled || !bw.hasSamples()) return { cap: hostConcurrencyCap, floor: 0 }
+    /*
+     * **没有聚合读数就一个字都不许说。**
+     *
+     * 「摊薄型 vs 真慢型」全靠拿实测聚合跟需要的吞吐比；`peakAggBps() === 0` 时那个比较
+     * 恒为 false，于是一律落进「真慢型 → 地板抬到 hostCap」——把前面所有帽子顶穿。
+     *
+     * 这个组合在**切集后的头几拍必然出现**（实测日志「1 → 12 线程 ∵ ⑧地板↑12」就是它）：
+     * `resetStrategy` 清了带宽样本但**卡顿时间戳是跨集的**，上一集 20s 内卡过就仍算「近期在卡」；
+     * 而 `hasSamples()` 只要有一片就为真（它看 perConnBps），聚合分档账本却还空着
+     * ——尤其在途并发数被记成 0 的那几片压根不进分档账本。
+     * 分不清病因时的正确动作是不动手，交给存货阶梯。
+     */
+    if (bw.peakAggBps() <= 0) return { cap: hostConcurrencyCap, floor: 0 }
     // 拿**实测峰值聚合**跟「码率 × 倍速 × 安全系数」比（见 aggregateFeeds）。
     // 原来写的是 `requiredConn <= lastTargetConn`，两头都会被摊薄带着走：
     // 线程越多 → 每连接越慢 → requiredConn 越大，于是越摊薄越容易判成「真慢型」→ 地板抬到 hostCap → 更摊薄。
