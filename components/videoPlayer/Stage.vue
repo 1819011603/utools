@@ -383,8 +383,8 @@ const mp4Feedable = computed(() => !mp4Kbps.value || mp4Kbps.value >= mp4NeedKBp
 // 清晰度徽标：HLS 场景用 hls.js 当前档（随 ABR 切档自动更新，见 useVideoEngine 里写 hlsStats）；
 // MP4 没有档位概念，只能等 loadedmetadata 拿一次解码后的固有尺寸——之后画面大小不会再变，不用监听 resize
 const mp4Res = ref('')
-const handleLoadedMetadata = (e: Event) => {
-  onLoadedMetadata(e)
+const handleLoadedMetadata = () => {
+  onLoadedMetadata()
   const v = videoEl.value
   if (v?.videoWidth && v?.videoHeight) mp4Res.value = `${v.videoHeight}p`
 }

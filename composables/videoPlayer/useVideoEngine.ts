@@ -370,7 +370,9 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     const q = video.getVideoPlaybackQuality?.()
     hlsStats.value = {
       buffered: getCachedAhead(video),   // 含预取缓存的有效已缓冲，不只 MSE 的 ~60s
-      level: describeLevel(hls.levels[hls.currentLevel]),
+      // `currentLevel` 只在切过档之后才有效——单档流（只有一条 EXT-X-STREAM-INF）
+      // 没有切档这回事，`currentLevel` 会一直停在 -1，退回 `loadLevel`（正在下载/已下载的档）
+      level: describeLevel(hls.levels[hls.currentLevel >= 0 ? hls.currentLevel : hls.loadLevel]),
       dropped: q?.droppedVideoFrames ?? 0,
       total: q?.totalVideoFrames ?? 0,
     }

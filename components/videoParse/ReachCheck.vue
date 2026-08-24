@@ -21,6 +21,14 @@
         </span>
       </div>
       <ProbeMatrix :rows="rows" :total-ms="result.totalMs" />
+      <!--
+        清晰度只在清单是 master 列表时才有——分辨率/码率写在 EXT-X-STREAM-INF 的 variant 属性上，
+        探测已经顺手把它读出来了（下钻到媒体列表前摘的），不用再额外发一轮请求。
+        媒体列表本身没有这个字段，测不出就不显示，不摆一个「未知」占位
+      -->
+      <p v-if="result.variantRes" class="text-xs text-gray-500 dark:text-gray-400">
+        清晰度：<span class="font-medium text-gray-700 dark:text-gray-200">{{ result.variantRes }}</span>
+      </p>
       <!-- 把实测的那条地址摊开：一条线路里各集可能不同源（实测 4kvm 最新一集走网盘直链），
            不写清测的是哪条，结论就没法归因 -->
       <p class="text-xs text-gray-400 break-all">测的是：{{ url }}</p>

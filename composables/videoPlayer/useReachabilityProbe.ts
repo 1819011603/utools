@@ -94,6 +94,12 @@ export interface ProbeResult {
    * 于是「分片全 200、解码持续失败」，报出来是「取回的数据不是可播的视频」（踩过）。
    */
   manifestFinalUrl?: string
+  /**
+   * 胜出通道的清单里带出来的清晰度（master 列表才有——分辨率/码率写在 `EXT-X-STREAM-INF`
+   * 的 variant 上，媒体列表本身没有这个信息）。复用 `describeLevel` 而不是自己再格式化一遍，
+   * 保证跟播放器信息条里那枚清晰度徽标是同一句话
+   */
+  variantRes?: string
 }
 
 /** 代理对「已被官方下线的源」回这个码（451 Unavailable For Legal Reasons） */
@@ -377,6 +383,10 @@ export async function probeReachability(
       let { manifest, baseUrl, text, requestUrl, finalUrl } = await fetchM3u8Manifest(target, ctrl.signal)
       // master 列表：下钻一层拿真正的媒体列表（变体 URI 含 .m3u8，代理会把它重写成代理 URL，可直接再喂回去）
       const best = pickBestVariant(manifest)
+      // 清晰度只写在 master 的 variant 属性上，下钻之后这份信息就没了，先摘出来
+      const variantRes = best?.attributes
+        ? describeLevel({ height: best.attributes.RESOLUTION?.height, bitrate: best.attributes.BANDWIDTH })
+        : undefined
       if (best?.uri) {
         ({ manifest, baseUrl, text, requestUrl, finalUrl } = await fetchM3u8Manifest(resolveUrl(baseUrl, best.uri), ctrl.signal))
       }
@@ -394,6 +404,7 @@ export async function probeReachability(
         manifestText: best?.uri ? undefined : text,
         manifestRequestUrl: best?.uri ? undefined : requestUrl,
         manifestFinalUrl: best?.uri ? undefined : finalUrl,
+        variantRes: variantRes === '自动' ? undefined : variantRes,
       }
     } catch {
       return {
@@ -445,6 +456,7 @@ export async function probeReachability(
   result.manifestText = winner?.manifestText
   result.manifestRequestUrl = winner?.manifestRequestUrl
   result.manifestFinalUrl = winner?.manifestFinalUrl
+  result.variantRes = winner?.variantRes
 
   if (!result.manifestChannel) {
     result.degraded = true              // manifest 三条路全不通 → 没结论，交回兜底
@@ -489,6 +501,7 @@ export async function probeReachability(
     result.manifestText = finalRun?.manifestText
     result.manifestRequestUrl = finalRun?.manifestRequestUrl
     result.manifestFinalUrl = finalRun?.manifestFinalUrl
+    result.variantRes = finalRun?.variantRes
   }
 
   // 双通道判据：分片「直连」和「代理·伪装」双向都实测通，且最终就走直连。
