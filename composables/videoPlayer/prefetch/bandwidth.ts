@@ -75,6 +75,18 @@ export function useBandwidthModel() {
     return worseAbove ? best.conn : 0
   }
 
+  /**
+   * 「一条连接自己能跑多快」（KB/s）。**只认低并发（≤2）档的采样**，0 = 还没测到。
+   *
+   * 不能拿 `perConnBps` 代替：它把高并发档的采样一起 EWMA 进去了，而每 IP 限总量的源上
+   * 6 条连接各自都慢——用那个数判「单连接是不是被限速了」会得到正好相反的结论
+   * （越多开越显得该多开）。低并发档的读数才是这个源单条的真实上限。
+   *
+   * 样本来源不用另找：存货阶梯在起播、切集、拖进度时必然先走 2~3 条那一档（见 WALL_CONN_STEPS），
+   * 低并发采样天然就有，不需要主动降并发去探（那会在慢源上直接造卡顿）。
+   */
+  const soloConnKBps = (): number => Math.round(perConnLow / 8 / 1024)
+
   /** 一片平均下载耗时（ms）。0 = 还没测到 */
   const avgSegLoadMs = (): number => Math.round(segLoadMs)
 
@@ -108,7 +120,7 @@ export function useBandwidthModel() {
   }
 
   return {
-    sampleSpeed, sampleBitrate, getAggregateScales, bestAggConn, avgSegLoadMs,
+    sampleSpeed, sampleBitrate, getAggregateScales, bestAggConn, soloConnKBps, avgSegLoadMs,
     hasSamples, requiredConn, maxFluentRate, perConnKBps, segMbps, resetSamples,
   }
 }

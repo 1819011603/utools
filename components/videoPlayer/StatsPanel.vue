@@ -78,7 +78,15 @@
 
     <!-- 实测策略引擎 -->
     <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm border-t border-gray-200 dark:border-gray-700 pt-2">
-      <div><span class="text-gray-500">单连接速度：</span><span class="font-medium">{{ formatSpeed(strategy.perConnKBps) }}</span></div>
+      <!-- 「单条」是低并发（≤2 条）档的读数，跟左边那个混了各并发档的均值不是一回事：
+           每 IP 限总量的源上 6 条各自都慢，均值会把「单连接被限速了」判反。加不加线程只看它 -->
+      <div :title="'左值：各并发档采样的均值。'
+        + '括号里的「单条」只取低并发（≤2 条）档，是「这个源一条连接能跑多快」——'
+        + `加不加线程的判据：≥1MB/s 封 2 条、≥500KB/s 封 3 条、低于 500KB/s 才放开多开（当前目标 ${strategy.targetConn} 条）。`">
+        <span class="text-gray-500">单连接速度：</span>
+        <span class="font-medium">{{ formatSpeed(strategy.perConnKBps) }}</span>
+        <span v-if="strategy.soloKBps > 0" class="text-xs text-gray-400"> (单条 {{ formatSpeed(strategy.soloKBps) }})</span>
+      </div>
       <div>
         <span class="text-gray-500">聚合速度：</span>
         <span class="font-medium" :class="dualChannel && !dualChannelUnavailable ? 'text-green-500' : ''">

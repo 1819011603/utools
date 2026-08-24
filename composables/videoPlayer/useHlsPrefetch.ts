@@ -52,7 +52,8 @@ export interface HlsPrefetchOptions {
 }
 
 export interface StrategySnapshot {
-  perConnKBps: number     // 实测每连接速度
+  perConnKBps: number     // 实测每连接速度（混了各并发档的采样）
+  soloKBps: number        // 单条连接自己能跑多快（只取低并发档，0=没测到）：加不加线程的判据
   segMbps: number         // 实测视频码率
   targetConn: number      // 当前目标并发
   maxFluentRate: number   // 当前带宽最高可流畅倍速
@@ -156,6 +157,36 @@ const COAST_GAP_WALL_SECS = 10
 const COLD_START_CONN_CAP = 3
 
 /**
+ * 「单连接算不算快」的分界（KB/s）。**只跟 `bw.soloConnKBps()`（低并发档实测）比**。
+ *
+ * 立论：加线程只有一个正当理由——**单条连接被源站限速了，聚合只能靠并行凑**。
+ * 一条连接就能跑到 500KB/s（≈4Mbps）时，多开的每一条都在跟紧邻播放头那一片抢同样 6 个槽，
+ * 换来的吞吐微乎其微（实测：快源上 2 条与 6 条的聚合基本持平），代价却是最需要的那一片最晚到。
+ *
+ * 取 500KB/s 而不是「够喂当前码率」：后者随倍速浮动，1x 下几乎恒成立、3x 下几乎恒不成立，
+ * 等于把这条帽子变成倍速的附庸。500KB/s 是个绝对值——多数点播源的码率在 1~3Mbps，
+ * 一条连接跑到 4Mbps 就意味着「单条至少能喂 1.3~4 倍速」，剩下的余量交给下面的地板去补。
+ */
+const FAST_SOLO_KBPS = 500
+/**
+ * 单条速度（KB/s）→ 并发帽的阶梯，**越快越少开**。读法：`solo ≥ 门槛` 就取该档，从上往下取第一个命中的。
+ *
+ * 为什么不是一个固定值：`FAST_SOLO_KBPS` 那条线只回答了「要不要省」，没回答「省到几条」。
+ * 单条 500KB/s 和单条 2MB/s 是两种处境——前者刚够喂 1~2 倍速、留一条做试探/对冲有意义；
+ * 后者一条就顶 4 倍速，第二条纯属占槽。
+ *
+ * 敢压到 2 条是因为**关键路径不受这条帽子管**：hls.js 正在等的那一片走 fragLoader，
+ * 它有自己的对冲竞速额度（`maxRacers`）、可以越过预取上限抢连接。这里省下的只是「预取远处分片」
+ * 的线程，最需要的那一片反而因为不用跟它们抢槽而更快到。
+ *
+ * 下界仍由 `catchUpFloor()` 兜（见 soloFastCap），所以高倍速下这张表压不出卡顿。
+ */
+const FAST_SOLO_CONN_STEPS: ReadonlyArray<readonly [number, number]> = [
+  [1024, 2],           // 单条 ≥1MB/s（≈8Mbps）：一条就顶多数点播源 4 倍速，2 条纯属余量
+  [FAST_SOLO_KBPS, 3], // 单条 ≥500KB/s：够喂 1~2 倍速，留一条做试探/对冲
+]
+
+/**
  * 卡顿守卫的观察窗（ms）：这段时间内发生过真实卡顿就算「近期在卡」。
  * 取 20s——比一次抗卡动作的生效周期长，短于「换了个源/换了段网络」的时间尺度。
  */
@@ -247,7 +278,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
 
   // 初值与 resetStrategy 里那份保持一致（漏字段 tsc 会直接报，别只补一处）
   const strategy = ref<StrategySnapshot>({
-    perConnKBps: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0,
+    perConnKBps: 0, soloKBps: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0,
     aggregateScales: true, healthZone: 'healthy', playableSecs: 0,
     avgSegLoadMs: 0, aggKneeConn: 0,
   })
@@ -275,7 +306,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     segDurSecs = 0
     resetLanes()
     segInflightStart.clear()
-    strategy.value = { perConnKBps: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0, aggregateScales: true, healthZone: 'healthy', playableSecs: 0, avgSegLoadMs: 0, aggKneeConn: 0 }
+    strategy.value = { perConnKBps: 0, soloKBps: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0, aggregateScales: true, healthZone: 'healthy', playableSecs: 0, avgSegLoadMs: 0, aggKneeConn: 0 }
   }
 
   // 实测驱动的目标并发：需要带宽 = 码率 × 倍速 × 安全系数；并发 = ⌈需要 / 每连接速度⌉
@@ -296,6 +327,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     const sustainable = bw.maxFluentRate(hostConcurrencyCap, tier().safety, getPlaybackRate())
     strategy.value = {
       perConnKBps: bw.perConnKBps(),
+      soloKBps: bw.soloConnKBps(),
       segMbps: bw.segMbps(),
       targetConn,
       maxFluentRate: sustainable,
@@ -480,6 +512,27 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     return knee > 0 ? Math.min(hostConcurrencyCap, knee + 1) : hostConcurrencyCap
   }
 
+  /**
+   * 单连接够快帽：**一条连接自己就能跑到 `FAST_SOLO_KBPS`，就别加线程**（见该常量的立论）。
+   *
+   * 与聚合拐点帽（`aggregateKneeCap`）的分工：那条要等「高档确实明显更差」才咬人，
+   * 于是「多开白开」（各档聚合基本持平）这种最常见的情况它一律放过。这条从**单连接速度**
+   * 这一侧下判断，快源上不必等拐点浮现就先省下来。
+   *
+   * 省到几条由 `FAST_SOLO_CONN_STEPS` 决定（越快越少）。两道让路，都是为了「线程不能太少」：
+   *   · 没测到低并发样本（`solo === 0`）→ 不咬人，交给存货阶梯和冷启动帽；
+   *   · 帽子**不低于 `catchUpFloor()`**。它是 min 链的一环，压穿地板会重演慢源自锁
+   *     （2 条连维持播放都不够 → 存货永远涨不到阶梯放开线 → 永远不放开）。高倍速下
+   *     requiredConn 会把地板顶上去，正好是「单条虽快但喂不动 3x」该多开的那种情形。
+   */
+  const soloFastCap = (): number => {
+    const solo = bw.soloConnKBps()
+    for (const [kbps, cap] of FAST_SOLO_CONN_STEPS) {
+      if (solo >= kbps) return Math.max(cap, catchUpFloor())
+    }
+    return hostConcurrencyCap   // 单条慢（含 solo=0 还没测到）：不咬人，该多开就多开
+  }
+
   // 返回当前目标并发（受控值，双重钳制在 [2, hostCap]）。只读，供两个预取入口共用。
   // 注意：永远保持并行预取后续分片，绝不因当前分片慢而停掉后面的（否则退化成串行/卡死）。
   const getAdaptivePrefetchCount = (cachedAhead?: number): number => {
@@ -499,9 +552,10 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
      *   ① 冷启动帽    没有任何实测 → ≤3，无论双通道（拿第一片去赌是最亏的）
      *   ② 存货墙钟    还够播几秒 → 2/3/4/6（「现在能不能播下去」压倒一切）
      *   ③ 卡顿守卫    真卡过 → 摊薄型收紧到 3 / 真慢型抬地板到 hostCap
-     *   ④ 聚合拐点    加线程不涨吞吐 → 封在拐点 +1
-     *   ⑤ 缺口速率    接近预加载时长 → 按所需速率收（headroomConnCap，只省流量）
-     *   ⑥ 地板        慢源兜底：catchUpFloor / 卡顿守卫的 floor（防「越缺越不敢开」自锁）
+     *   ④ 单连接够快  一条就能跑到 500KB/s → 封在 3（不低于地板，见 soloFastCap）
+     *   ⑤ 聚合拐点    加线程不涨吞吐 → 封在拐点 +1
+     *   ⑥ 缺口速率    接近预加载时长 → 按所需速率收（headroomConnCap，只省流量）
+     *   ⑦ 地板        慢源兜底：catchUpFloor / 卡顿守卫的 floor（防「越缺越不敢开」自锁）
      */
     if (!bw.hasSamples()) target = Math.min(target, COLD_START_CONN_CAP)     // ①
     if (cachedAhead !== undefined) {
@@ -509,9 +563,10 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
       target = Math.min(target, wallConnCap(wall, getSafeWallSecs()))        // ②（内含 catchUpFloor 地板）
       const guard = stallGuard()                                            // ③
       target = Math.min(target, guard.cap)
-      target = Math.min(target, aggregateKneeCap())                         // ④
-      target = Math.min(target, headroomConnCap(cachedAhead))               // ⑤
-      // ⑥ 地板只在「真慢型卡顿」时抬——它要压过上面所有的收紧，否则慢源永远补不回来。
+      target = Math.min(target, soloFastCap())                              // ④
+      target = Math.min(target, aggregateKneeCap())                         // ⑤
+      target = Math.min(target, headroomConnCap(cachedAhead))               // ⑥
+      // ⑦ 地板只在「真慢型卡顿」时抬——它要压过上面所有的收紧，否则慢源永远补不回来。
       //    冷启动帽不受它影响：那时没样本，stallGuard 直接返回不咬人的值
       target = Math.max(target, Math.min(hostConcurrencyCap, guard.floor))
     }
