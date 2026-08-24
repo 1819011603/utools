@@ -52,7 +52,7 @@
         }"
         playsinline
         @timeupdate="onTimeUpdate"
-        @loadedmetadata="onLoadedMetadata"
+        @loadedmetadata="handleLoadedMetadata"
         @durationchange="onDurationChange"
         @progress="onProgress"
         @loadeddata="onLoadedData"
@@ -238,6 +238,9 @@
     -->
     <div class="px-4 sm:px-0 pt-3 flex items-center gap-2 flex-wrap text-sm">
       <span class="font-semibold truncate max-w-full">{{ playlistTitle || '放映厅' }}</span>
+      <!-- 清晰度：HLS 读 hls.js 当前档的 level.height（`describeLevel` 已格式成「720p (800kbps)」），
+           MP4 没有档位这回事，退回 <video> 解码后的 videoHeight。都拿不到就不渲染，不摆一个「未知」占位 -->
+      <UBadge v-if="videoRes" color="gray" variant="soft" size="xs">{{ videoRes }}</UBadge>
       <!--
         「第 N/M 集」是这一行最该显眼的东西，所以给实色徽标（其余都是 soft）。
         原来这里只有一枚写着集名的徽标，而且**挂着 `playlistTitle &&` 的条件** ——
@@ -376,6 +379,19 @@ const {
 const mp4NeedKBps = computed(() => (mp4AvgMbps.value * 1e6 / 8 / 1024) * playbackRate.value)
 // 还没测出速率时不先扣红帽子（起播头几秒 mp4Kbps 恒为 0）
 const mp4Feedable = computed(() => !mp4Kbps.value || mp4Kbps.value >= mp4NeedKBps.value)
+
+// 清晰度徽标：HLS 场景用 hls.js 当前档（随 ABR 切档自动更新，见 useVideoEngine 里写 hlsStats）；
+// MP4 没有档位概念，只能等 loadedmetadata 拿一次解码后的固有尺寸——之后画面大小不会再变，不用监听 resize
+const mp4Res = ref('')
+const handleLoadedMetadata = (e: Event) => {
+  onLoadedMetadata(e)
+  const v = videoEl.value
+  if (v?.videoWidth && v?.videoHeight) mp4Res.value = `${v.videoHeight}p`
+}
+const videoRes = computed(() => {
+  if (isHls.value) return hlsStats.value?.level && hlsStats.value.level !== '自动' ? hlsStats.value.level : ''
+  return mp4Res.value
+})
 
 // 锁定按钮「未锁定时小窗不出」要用它。**曾经漏了这行声明**：模板里读不存在的属性只是一条
 // Vue warn，取值恒 undefined（= 假），于是那个条件悄悄变成「任何尺寸都显示」，界面上看不出错

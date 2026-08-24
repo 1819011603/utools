@@ -1,5 +1,6 @@
 import { useM3u8 } from './useM3u8'
 import { isDirectDead, markDirectDead, clearDirectDead } from './probeStore'
+import { describeLevel } from './videoDiag'
 
 /**
  * 连接可达性探测：起播前用几个小请求实测出「manifest 轴」与「分片轴」各自能走哪条通道，
