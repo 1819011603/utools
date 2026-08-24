@@ -109,6 +109,21 @@ const WALL_CONN_STEPS: ReadonlyArray<readonly [number, number]> = [
   [2.0, 6],   // 再宽裕一档 → 6 条
 ]
 /**
+ * 存货阶梯**放开方向**的迟滞（比例）：要升一档，得比该档的线多攒 25%。收紧不加迟滞。
+ *
+ * 阶梯本身没有迟滞时，只要存货在某条线附近来回，档位就每拍换一次。倍速越高越明显：
+ * 5x 下四条线换算成存货是 10s / 25s / 37.5s / 50s，而存货本来就在几十秒的区间里锯齿
+ * ——实测日志里连着二十几行 `2 → 3 → 4 → 3 → 2`，咬人的全是 ②。
+ *
+ * 危害不止是抖：**每次目标变化都会 `markConcChange()` 作废一次分档账本**，
+ * 而一片下载要一两秒，于是没有一个样本能活到记账 → `饱和` 永远没数据、单条基线剧烈跳动
+ * → ④⑤⑥ 三级集体失能。所以这道迟滞是那几级能不能工作的前提，不只是「看着舒服」。
+ *
+ * 只在放开方向加：收紧是救命方向（存货真的掉下来了就该立刻让路给眼前那一片）。
+ */
+const WALL_STEP_HYST = 0.25
+
+/**
  * 量不到分片时长时的兜底值（秒）。只在冷启动那一两拍生效——那时缓存≈0、下面的
  * 「还差多少」远大于一片，这条上限压根不咬人，取多少都无所谓。
  */
@@ -224,6 +239,21 @@ const CONN_SETTLE_MIN_MS = 1000
 const CONN_SETTLE_MAX_MS = 5000
 
 /**
+ * 爬升的最小间隔（ms）：**每次最多 +1 条**，不管上面算出来多高。
+ *
+ * 治的是「3 → 12 一步顶格」。跳级上去有两笔账：
+ *   · 十几条连接同时冲进来必然把单条摊薄，而摊薄帽/饱和判据要等采样才反应得过来，
+ *     那一下的代价是紧邻播放头那一片被挤到最后（存货本来就只剩 0.2s 才触发的顶格）；
+ *   · **分档账本只会留下 3 和 12 两个档的样本**，而饱和并发要「饱和点严格低于试过的最高档」
+ *     才可信（见 saturationConn）——中间档全跳过去，这个判据就永远等不到数据。
+ *     一档一档爬正好把 4/5/6…都测一遍，是把探测顺手做掉，不是白等。
+ *
+ * 700ms 的量级：比一拍心跳略短、比一片下载耗时略短，6 条上限约 4 秒爬满、12 条约 8 秒。
+ * 只限「升」不限「降」（同 CONN_SETTLE_*，降是救命方向）。
+ */
+const CONN_RAMP_MS = 700
+
+/**
  * 卡顿守卫的观察窗（ms）：这段时间内发生过真实卡顿就算「近期在卡」。
  * 取 20s——比一次抗卡动作的生效周期长，短于「换了个源/换了段网络」的时间尺度。
  */
@@ -327,6 +357,8 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   let ctrlConn = 0                        // 当前受控并发（0=未初始化）
   let lastTargetConn = 0                  // 上一拍算出的目标并发（卡顿守卫拿它判「带宽够不够」）
   let connDownAt = 0                      // 上次**下调**并发的时刻：沉降期内只许再降不许升
+  let connUpAt = 0                        // 上次**上调**并发的时刻：爬升每 CONN_RAMP_MS 只许 +1
+  let wallStep = WALL_CONN_STEPS.length   // 存货阶梯当前所在档（= length 表示放开）：迟滞用
   let lastAhead = -1                      // 上次的前向缓冲秒数
   let lastHealthZone: HealthZone = 'healthy'  // 健康区（驱动 UI 与降速守卫）
   let lastPlayable = 0                    // 上次量到的有效可播秒数（MSE + 预取缓存）
@@ -339,6 +371,8 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     ctrlConn = 0
     lastTargetConn = 0
     connDownAt = 0
+    connUpAt = 0
+    wallStep = WALL_CONN_STEPS.length
     lastAhead = -1
     lastHealthZone = 'healthy'
     lastPlayable = 0
@@ -462,13 +496,26 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     return Math.min(saturationLimit(), Math.max(0, bw.requiredConn(rate, safety, true) * 2))
   }
 
-  /** 存货阶梯（表见 WALL_CONN_STEPS）：wall = 还够播几秒。保险线填 0/负数 = 关掉整条阶梯 */
+  /**
+   * 存货阶梯（表见 WALL_CONN_STEPS）：wall = 还够播几秒。保险线填 0/负数 = 关掉整条阶梯。
+   *
+   * 带**放开方向的迟滞**（见 WALL_STEP_HYST）：降档立刻生效，升档要多攒 25%。
+   * 下标越大 = 存货越多 = 上限越高；`WALL_CONN_STEPS.length` 表示彻底放开。
+   */
   const wallConnCap = (wall: number, safe: number): number => {
-    if (safe <= 0) return hostConcurrencyCap
-    for (const [ratio, cap] of WALL_CONN_STEPS) {
-      if (wall < safe * ratio) return Math.max(cap, catchUpFloor())   // 地板兜住慢源，见 catchUpFloor
+    if (safe <= 0) { wallStep = WALL_CONN_STEPS.length; return hostConcurrencyCap }
+    let step = WALL_CONN_STEPS.length
+    for (let i = 0; i < WALL_CONN_STEPS.length; i++) {
+      if (wall < safe * WALL_CONN_STEPS[i]![0]) { step = i; break }
     }
-    return hostConcurrencyCap
+    // 想往上放开（step > wallStep）时，得越过「当前所在档那条线 × (1 + 迟滞)」才算数
+    if (step > wallStep && wallStep < WALL_CONN_STEPS.length) {
+      if (wall < safe * WALL_CONN_STEPS[wallStep]![0] * (1 + WALL_STEP_HYST)) step = wallStep
+    }
+    wallStep = step
+    return step >= WALL_CONN_STEPS.length
+      ? hostConcurrencyCap
+      : Math.max(WALL_CONN_STEPS[step]![1], catchUpFloor())   // 地板兜住慢源，见 catchUpFloor
   }
 
   /**
@@ -686,7 +733,8 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
      *   ⑥ 聚合拐点    加线程不涨吞吐 → 封在拐点 +1
      *   ⑦ 缺口速率    接近预加载时长 → 按所需速率收（headroomConnCap，只省流量）
      *   ⑧ 地板        慢源兜底：catchUpFloor / 卡顿守卫的 floor（防「越缺越不敢开」自锁）
-     *   ⑨ 沉降期      刚减过线程 → 只许再降不许升（在途排空前的读数不可信，见 CONN_SETTLE_*）
+     *   ⑨ 沉降/爬升   刚减过 → 只许再降不许升（CONN_SETTLE_*）；升一律一档一档来（CONN_RAMP_MS）
+     *                 ——**地板顶格也要走这条路**，否则 3 → 12 一步到位
      */
     /*
      * 每一级的值都记下来，**只在目标变化时打一行日志并点名是谁咬住的**。
@@ -728,14 +776,23 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
      */
     const now = performance.now()
     const settleMs = Math.min(CONN_SETTLE_MAX_MS, Math.max(CONN_SETTLE_MIN_MS, bw.avgSegLoadMs()))
-    let settled = false
-    if (lastTargetConn > 0 && target > lastTargetConn && now - connDownAt < settleMs) {
-      target = lastTargetConn
-      settled = true
+    let held: '⑨沉降期' | '⑨爬升' | '' = ''
+    if (lastTargetConn > 0 && target > lastTargetConn) {
+      if (now - connDownAt < settleMs) {
+        target = lastTargetConn                      // 刚减过：等在途排空，读数还不可信
+        held = '⑨沉降期'
+      } else if (now - connUpAt < CONN_RAMP_MS) {
+        target = lastTargetConn                      // 上一档还没站稳，这一拍不动
+        held = '⑨爬升'
+      } else if (target > lastTargetConn + 1) {
+        target = lastTargetConn + 1                  // 一档一档来（地板顶格也要走这条路）
+        held = '⑨爬升'
+      }
     }
     if (target !== lastTargetConn) {
-      logConnDecision(target, { paused, ctrl: ctrlConn, rungs, floorApplied, settled, cachedAhead })
+      logConnDecision(target, { paused, ctrl: ctrlConn, rungs, floorApplied, held, cachedAhead })
       if (lastTargetConn > 0 && target < lastTargetConn) connDownAt = now
+      if (target > lastTargetConn) connUpAt = now
       bw.markConcChange()
     }
     lastTargetConn = target
@@ -753,12 +810,14 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
    */
   const logConnDecision = (
     target: number,
-    ctx: { paused: boolean; ctrl: number; rungs: Array<[string, number]>; floorApplied: number; settled: boolean; cachedAhead?: number },
+    ctx: { paused: boolean; ctrl: number; rungs: Array<[string, number]>; floorApplied: number; held: string; cachedAhead?: number },
   ) => {
     const bind = ctx.rungs.filter(([, v]) => v === target).map(([k]) => k)
-    const bound = ctx.floorApplied >= target && ctx.floorApplied > 0
-      ? `⑧地板↑${ctx.floorApplied}`
-      : (ctx.settled ? '⑨沉降期' : (bind.length ? bind.join('+') : '闭环/暂停'))
+    // ⑨ 排在最后，它一生效就是它说了算（哪怕地板算出更高的值，也被它压成 +1）
+    const bound = ctx.held
+      || (ctx.floorApplied >= target && ctx.floorApplied > 0
+        ? `⑧地板↑${ctx.floorApplied}`
+        : (bind.length ? bind.join('+') : '闭环/暂停'))
     const rate = getPlaybackRate()
     console.log(
       `[conn] ${lastTargetConn} → ${target} 线程 ∵ ${bound}`
