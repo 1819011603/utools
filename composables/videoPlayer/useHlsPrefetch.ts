@@ -55,6 +55,7 @@ export interface StrategySnapshot {
   perConnKBps: number     // 实测每连接速度（混了各并发档的采样）
   soloKBps: number        // 单条连接自己能跑多快（只取低并发档，0=没测到）：加不加线程的判据
   soloRetain: number      // 单条速度保有率（当前每连接 ÷ 单条基线），<0.7 = 被摊薄，停止加线程
+  satConn: number         // 饱和并发（峰值聚合 ÷ 单条基线）：再多开只是分摊。0=数据不够
   segMbps: number         // 实测视频码率
   targetConn: number      // 当前目标并发
   maxFluentRate: number   // 当前带宽最高可流畅倍速
@@ -314,7 +315,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
 
   // 初值与 resetStrategy 里那份保持一致（漏字段 tsc 会直接报，别只补一处）
   const strategy = ref<StrategySnapshot>({
-    perConnKBps: 0, soloKBps: 0, soloRetain: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0,
+    perConnKBps: 0, soloKBps: 0, soloRetain: 0, satConn: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0,
     aggregateScales: true, healthZone: 'healthy', playableSecs: 0,
     avgSegLoadMs: 0, aggKneeConn: 0,
   })
@@ -344,7 +345,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     segDurSecs = 0
     resetLanes()
     segInflightStart.clear()
-    strategy.value = { perConnKBps: 0, soloKBps: 0, soloRetain: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0, aggregateScales: true, healthZone: 'healthy', playableSecs: 0, avgSegLoadMs: 0, aggKneeConn: 0 }
+    strategy.value = { perConnKBps: 0, soloKBps: 0, soloRetain: 0, satConn: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0, aggregateScales: true, healthZone: 'healthy', playableSecs: 0, avgSegLoadMs: 0, aggKneeConn: 0 }
   }
 
   // 实测驱动的目标并发：需要带宽 = 码率 × 倍速 × 安全系数；并发 = ⌈需要 / 每连接速度⌉
@@ -367,6 +368,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
       perConnKBps: bw.perConnKBps(),
       soloKBps: bw.soloConnKBps(),
       soloRetain: Math.round(bw.soloRetainRatio() * 100) / 100,
+      satConn: bw.saturationConn(),
       segMbps: bw.segMbps(),
       targetConn,
       maxFluentRate: sustainable,
@@ -435,10 +437,16 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
    * 都没有（生面孔第一片）就交给阶梯：先按 2 条把第一片让过去，一有样本立刻按实测放开，代价是一片。
    */
   const catchUpFloor = (): number => {
-    const need = bw.hasSamples()
-      ? bw.requiredConn(getPlaybackRate(), tier().safety) * 2
-      : (opts.getColdStartConn?.() ?? 0)
-    return Math.min(hostConcurrencyCap, Math.max(0, need))
+    if (!bw.hasSamples()) return Math.min(hostConcurrencyCap, Math.max(0, opts.getColdStartConn?.() ?? 0))
+    const rate = getPlaybackRate()
+    const safety = tier().safety
+    // **聚合已经喂得动 → 地板一律不抬。** 地板的立论是「这个源真慢，少开线程连播放都维持不住」；
+    // 聚合是码率的好几倍时那个前提根本不成立，此时抬地板只会把摊薄推得更狠。
+    // 不加这道闸就是正反馈：线程多 → 单条被摊薄 → requiredConn 变大 → 地板变高 → 线程更多。
+    // 实测截图（单条 369KB/s、被摊到 222KB/s、聚合 20.8Mbps vs 码率 5.2Mbps）就是它顶到 12 的。
+    if (bw.aggregateFeeds(rate, safety)) return 0
+    // 分母用**单条基线**（solo=true），不用被摊薄的混合均值——同一个正反馈的另一半
+    return Math.min(hostConcurrencyCap, Math.max(0, bw.requiredConn(rate, safety, true) * 2))
   }
 
   /** 存货阶梯（表见 WALL_CONN_STEPS）：wall = 还够播几秒。保险线填 0/负数 = 关掉整条阶梯 */
@@ -530,15 +538,19 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
    */
   const stallGuard = (): { cap: number; floor: number } => {
     const stalledAt = opts.getLastStallAt?.() ?? 0
-    const recentlyStalled = stalledAt > 0 && Date.now() - stalledAt < STALL_WINDOW_MS
+    // **必须用 performance.now()**：`useStallTracker` 的 lastStallAt 记的就是它。
+    // 这里曾写 Date.now()，两个基准差三个数量级（1.7e12 vs 1e5）→ 差值恒 > 20s
+    // → **整个卡顿守卫从来没生效过**（表现：卡了三次、聚合是码率的 4 倍，线程仍钉在 12）
+    const recentlyStalled = stalledAt > 0 && performance.now() - stalledAt < STALL_WINDOW_MS
     if (!recentlyStalled || !bw.hasSamples()) return { cap: hostConcurrencyCap, floor: 0 }
-    // 「喂饱要几条」× 当前每连接速度 = 需要的聚合；拿实测聚合跟它比
-    const need = bw.requiredConn(getPlaybackRate(), tier().safety)
+    // 拿**实测峰值聚合**跟「码率 × 倍速 × 安全系数」比（见 aggregateFeeds）。
+    // 原来写的是 `requiredConn <= lastTargetConn`，两头都会被摊薄带着走：
+    // 线程越多 → 每连接越慢 → requiredConn 越大，于是越摊薄越容易判成「真慢型」→ 地板抬到 hostCap → 更摊薄。
+    const bandwidthEnough = bw.aggregateFeeds(getPlaybackRate(), tier().safety)
     // **单条速度优先于聚合**：单条已经被摊薄掉三成以上时，「聚合喂不动」只是摊薄的结果而不是原因，
     // 这时候按「真慢型」把地板抬到 hostCap 等于往火上浇油——照单条这个信号一律判摊薄型。
     const retain = bw.soloRetainRatio()
     const diluted = retain > 0 && retain < DILUTION_RETAIN_STEPS[1]![0]
-    const bandwidthEnough = need <= Math.max(1, lastTargetConn)
     return bandwidthEnough || diluted
       ? { cap: 3, floor: 0 }                       // 摊薄型：收紧，让眼前那一片先到
       : { cap: hostConcurrencyCap, floor: hostConcurrencyCap }  // 真慢型：能开多少开多少
@@ -556,21 +568,35 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   }
 
   /**
-   * 摊薄帽：**加线程只在「单条速度没被摊薄多少」时才允许**（见 DILUTION_RETAIN_STEPS）。
+   * 摊薄帽：**加线程只在「单条速度没被摊薄多少」时才允许**。两个判据，取紧的那个：
    *
-   * 与聚合拐点帽（`aggregateKneeCap`）管同一件事，但**这条优先**：单条速度加线程当场就掉，
-   * 聚合要等各档攒够样本才比得出拐点，慢一大截。两条都是 min 链上的帽子，谁紧听谁的。
+   *   ① `saturationConn()`（稳态）：峰值聚合 ÷ 单条基线 = 再多开就只是分摊的那个档。
+   *   ② `soloRetainRatio()`（快信号，见 DILUTION_RETAIN_STEPS）：单条掉了多少。
    *
-   * 仍然不低于 `catchUpFloor()`：单条被摊薄不等于「不需要那么多吞吐」，
-   * 维持当前倍速播放所需的连接数照给（真慢源上 requiredConn 大，地板自然把它顶回去）。
+   * **为什么必须要 ①**：光有 ② 会形成死循环——收了线程，单条速度就回升，保有率跟着回到 1，
+   * 帽子自己解除 → 又加到满 → 又摊薄 → 又收。② 的输入随线程数一起漂移，只能当快信号。
+   * ① 的两个输入（峰值聚合、低并发档基线）都不随当前线程数变，所以结论是稳的。
+   *
+   * 与聚合拐点帽（`aggregateKneeCap`）的分工：那条要等「某个高档确实明显更差」才认拐点，
+   * 各档持平时一律放过；这条从「总量除以单条」直接算出饱和点，不需要拐点浮现。
+   *
+   * 仍然不低于 `catchUpFloor()`（真慢源上它会顶回来），但注意地板现在自带
+   * 「聚合喂得动就不抬」那道闸——否则这条帽子会被自己制造的摊薄顶穿。
    */
   const dilutionCap = (): number => {
+    let cap = hostConcurrencyCap
+    // ① 稳态判据：饱和并发（峰值聚合 ÷ 单条基线）。两个输入都不随当前线程数漂移，
+    //    所以它不会「收完线程就自己解除」——那正是保有率单独用会来回振的原因。
+    const sat = bw.saturationConn()
+    if (sat > 0) cap = Math.min(cap, sat)
+    // ② 快信号：保有率。加线程当场就掉，比 ① 攒够各档样本快，用来在爬坡途中先刹住。
     const retain = bw.soloRetainRatio()
-    if (retain <= 0) return hostConcurrencyCap   // 还没有单条基线，别据此下判断
-    for (const [floor, cap] of DILUTION_RETAIN_STEPS) {
-      if (retain < floor) return Math.max(cap, catchUpFloor())
+    if (retain > 0) {
+      for (const [floor, c] of DILUTION_RETAIN_STEPS) {
+        if (retain < floor) { cap = Math.min(cap, c); break }
+      }
     }
-    return hostConcurrencyCap
+    return cap >= hostConcurrencyCap ? hostConcurrencyCap : Math.max(cap, catchUpFloor())
   }
 
   /**

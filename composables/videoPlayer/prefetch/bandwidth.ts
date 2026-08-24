@@ -129,9 +129,57 @@ export function useBandwidthModel() {
   /** 有没有测出东西来。没有时上层要走「冷启动乐观值」那条路 */
   const hasSamples = (): boolean => !!perConnBps && !!segBitrate
 
-  /** 喂满「码率 × 倍速 × 安全系数」需要几条连接 */
-  const requiredConn = (rate: number, safety: number): number =>
-    Math.ceil((segBitrate * rate * safety) / perConnBps)
+  /**
+   * 喂满「码率 × 倍速 × 安全系数」需要几条连接。
+   *
+   * `solo = true` 时分母改用**单条基线**（低并发档实测），**这是打断正反馈的关键**：
+   * 分母用混合均值 `perConnBps` 会形成死循环——线程一多 → 每条都被摊薄 → 均值掉 →
+   * 「需要更多条」→ 再加线程 → 更摊薄。实测截图：单条 369KB/s 的源被摊到 222KB/s，
+   * requiredConn 从 4 涨到 6，`catchUpFloor` 于是 ×2 顶到 12（= hostCap），
+   * 把所有帽子全顶回满并发；而那一刻聚合 20.8Mbps 已经是 5.2Mbps 码率的 4 倍。
+   *
+   * 凡是问「这个源要几条才喂得动」的地方（地板）都该用 solo；
+   * 问「当前这一拍的供给够不够」的地方（headroomConnCap）才用混合均值。
+   */
+  const requiredConn = (rate: number, safety: number, solo = false): number => {
+    const per = solo && perConnLow > 0 ? perConnLow : perConnBps
+    return Math.ceil((segBitrate * rate * safety) / per)
+  }
+
+  /** 实测到的最高聚合吞吐（bps，按并发档记的最好成绩）。0 = 还没测到 */
+  const peakAggBps = (): number => aggByConn.reduce((m, v) => (v > m ? v : m), 0)
+
+  /**
+   * **饱和并发**：多到这个数以上，加线程就纯粹是把同一份带宽分摊。0 = 数据不够，别据此下判断。
+   *
+   *     饱和并发 = 实测峰值聚合 ÷ 单条基线
+   *
+   * 推导：源站给这个 IP 的总量上限就是实测到的峰值聚合；一条连接自己能跑 `perConnLow`；
+   * 那么「每条都能跑到自己上限」的连接数就是两者的比。再多开的每一条都只能从别人嘴里抢。
+   * 实测截图：峰值聚合 20.8Mbps ÷ 单条 2.95Mbps ≈ 7 —— **12 条里有 5 条纯属摊薄**。
+   *
+   * 它是治「减了又加」那个死循环的关键，因为**两个输入都不随当前线程数漂移**：
+   * 峰值是历史最好成绩（按档独立记账，收线程也不会掉），单条基线只收低并发档的采样。
+   * 保有率（`soloRetainRatio`）反应快但会随线程数一起回升，只能当快信号，不能当稳态判据
+   * ——收完线程它就恢复了，于是放开、再摊薄、再收，来回振。
+   */
+  const saturationConn = (): number => {
+    const peak = peakAggBps()
+    return peak > 0 && perConnLow > 0 ? Math.max(2, Math.ceil(peak / perConnLow)) : 0
+  }
+
+  /**
+   * 「实测聚合到底喂不喂得动」——`卡顿守卫`那个「摊薄型 vs 真慢型」分岔的判据，抽出来复用。
+   *
+   * 判据用**实测峰值聚合**而不是「当前线程数 × 当前每连接速度」：后者跟着目标并发走，
+   * 会让「地板要不要抬」依赖于「地板刚才抬到多少」→ 3↔8 来回震荡。峰值是只读的历史事实，
+   * 收线程之后也不会掉（EWMA 按档独立记账），所以结论稳定。
+   * 代价是网络变差时它会偏乐观——那一侧由卡顿守卫和存货阶梯兜（它们看的是地面真值）。
+   */
+  const aggregateFeeds = (rate: number, safety: number): boolean => {
+    const need = segBitrate * rate * safety
+    return need > 0 && peakAggBps() >= need
+  }
 
   /**
    * 当前带宽最高能撑几倍速：满并发聚合带宽 ÷ (码率 × 安全系数)，向下对齐 0.25 档（保守，不过度承诺）。
@@ -159,7 +207,8 @@ export function useBandwidthModel() {
   return {
     sampleSpeed, sampleBitrate, markConcChange,
     getAggregateScales, bestAggConn, soloConnKBps, soloRetainRatio, avgSegLoadMs,
-    hasSamples, requiredConn, maxFluentRate, perConnKBps, segMbps, resetSamples,
+    hasSamples, requiredConn, aggregateFeeds, peakAggBps, saturationConn, maxFluentRate,
+    perConnKBps, segMbps, resetSamples,
   }
 }
 

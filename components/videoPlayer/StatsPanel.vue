@@ -105,7 +105,18 @@
         </span>
       </div>
       <div><span class="text-gray-500">视频码率：</span><span class="font-medium">{{ strategy.segMbps }} Mbps</span></div>
-      <div><span class="text-gray-500">目标并发：</span><span class="font-medium">{{ strategy.targetConn }}</span></div>
+      <!-- 「饱和」是「为什么只开这么几条」最直接的答案：峰值聚合 ÷ 单条基线，
+           超过它的每一条都只能从别人嘴里抢带宽 -->
+      <div :title="'饱和并发 = 实测峰值聚合 ÷ 单条基线：源站给这个 IP 的总量摊给「每条都能跑满」的连接数。'
+        + '开超过它的每一条都只是分摊，最需要的那一片反而更晚到。'">
+        <span class="text-gray-500">目标并发：</span>
+        <span class="font-medium">{{ strategy.targetConn }}</span>
+        <span
+          v-if="strategy.satConn > 0"
+          class="text-xs"
+          :class="strategy.targetConn > strategy.satConn ? 'text-red-500' : 'text-gray-400'"
+        > / 饱和 {{ strategy.satConn }}</span>
+      </div>
       <div>
         <span class="text-gray-500">最高流畅倍速：</span>
         <span class="font-medium" :class="strategy.maxFluentRate < playbackRate ? 'text-red-500' : 'text-green-500'">
