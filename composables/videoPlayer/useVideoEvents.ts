@@ -84,7 +84,31 @@ export function useVideoEvents(deps: VideoEventsDeps) {
     videoEl, playerContainer, isHls, isPlaying, isBuffering, isLoading, isVideoLoaded,
     currentTime, duration, bufferedPercent, volume, isMuted, playbackRate,
     skipIntro, skipOutro, hasSkippedIntro, autoFullscreen, errorMessage,
+    hlsStats, decodedRes,
   } = media
+
+  /**
+   * 清晰度徽标要的解码实测尺寸。**只在这里更新，别处不要各写一份**：
+   * `loadedmetadata` 起播/切集各来一次，`resize`（原生事件，videoWidth/videoHeight 变化时触发）
+   * 补 ABR 切档那种画面中途变尺寸的情况——两个事件都落在这一个函数上，才不会出现
+   * 「只在起播那一刻测了一次，切档之后没跟上」的漂移
+   */
+  const syncDecodedRes = () => {
+    const v = videoEl.value
+    if (v?.videoWidth && v?.videoHeight) decodedRes.value = `${v.videoHeight}p`
+  }
+  const onVideoResize = () => syncDecodedRes()
+
+  /**
+   * 清晰度徽标：解码实测优先，清单/master 列表声明的档只在解码还没出结果时先顶个位——
+   * 声明值不总是准（见 decodedRes 上那条注释），解码一有结果立刻让位。
+   * 播放器信息条和全屏顶栏共用这一个值，不各写一份。
+   */
+  const videoRes = computed(() => {
+    if (decodedRes.value) return decodedRes.value
+    const declared = isHls.value ? hlsStats.value?.level : ''
+    return declared && declared !== '自动' ? declared : ''
+  })
 
   let isFirstLoad = true
   let outroFired = false   // 本集是否已触发过「跳过片尾」（每次 loadedmetadata 复位）
@@ -270,6 +294,7 @@ export function useVideoEvents(deps: VideoEventsDeps) {
   const onLoadedMetadata = () => {
     if (!videoEl.value) return
     engine.markDataReceived()
+    syncDecodedRes()
     readDuration()
     lastBufEnd = -1   // 换了一集，缓冲末尾的采样基准要重来
     // 出问题时最该看的三个读数：浏览器解出的时长、可 seek 区间、就绪等级。
@@ -498,6 +523,7 @@ export function useVideoEvents(deps: VideoEventsDeps) {
     onTimeUpdate, onLoadedMetadata, onDurationChange, onProgress, onVolumeChange, onVideoError,
     onCanPlay, onLoadedData, onWaiting, onCanPlayThrough,
     onSeeking, onSeeked, onPlaying, onPause, onVideoEnded,
+    onVideoResize, videoRes,
     scheduleAutoPlay, disposeEvents,
   }
 }

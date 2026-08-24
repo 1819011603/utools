@@ -1,11 +1,33 @@
 <template>
   <div class="p-3 rounded-lg bg-gray-50 dark:bg-gray-800 space-y-2">
     <div class="flex items-center justify-between gap-2 flex-wrap">
-      <div class="text-sm font-medium text-gray-700 dark:text-gray-300">
-        可达性检测
-        <span class="font-normal text-gray-400">
-          （自动拿{{ epTitle ? `「${epTitle}」` : '其中一集' }}的地址实测直连/代理四条通道，切线路会重测）
-        </span>
+      <div class="flex items-center gap-2 flex-wrap">
+        <div class="text-sm font-medium text-gray-700 dark:text-gray-300">
+          可达性检测
+          <span class="font-normal text-gray-400">
+            （自动拿{{ epTitle ? `「${epTitle}」` : '其中一集' }}的地址实测直连/代理四条通道，切线路会重测）
+          </span>
+        </div>
+        <!--
+          清晰度挪到标题这一行、做成实色徽标——原来是行尾一句灰字，扫一眼扫不到。
+          **优先用解码实测**（`decodedRes`，拉隐藏播放器真解一帧读 `<video>` 的实际像素）：
+          清单声明的 `result.variantRes` 只在解码还没跑完时先顶个位，它不总是准
+          （实测过 FF 线路清单写 `RESOLUTION=1080x608`，ffprobe 解密真实分片一看编码其实是 `1280x720`，
+          源站清单本身就标错了），解码一出结果立刻让位
+        -->
+        <UBadge
+          v-if="decodedRes || result?.variantRes"
+          color="violet" variant="solid" size="sm"
+          class="gap-1"
+          :title="decodedRes ? '解码实测（真实像素）' : '清单声明的档，解码还没出结果时的临时值'"
+        >
+          <UIcon name="i-heroicons-tv" class="w-3.5 h-3.5" />
+          {{ decodedRes || result?.variantRes }}
+        </UBadge>
+        <UBadge v-else-if="decodingRes" color="gray" variant="soft" size="sm" class="gap-1">
+          <UIcon name="i-heroicons-arrow-path" class="w-3.5 h-3.5 animate-spin" />
+          清晰度检测中…
+        </UBadge>
       </div>
       <UButton size="xs" variant="soft" icon="i-heroicons-signal" :loading="probing" @click="run">
         {{ probing ? '检测中…' : '重新检测' }}
@@ -21,16 +43,6 @@
         </span>
       </div>
       <ProbeMatrix :rows="rows" :total-ms="result.totalMs" />
-      <!--
-        清晰度：清单是 master 列表时探测顺手就读出来了（`result.variantRes`，带码率，信息量更大）；
-        不少源的 m3u8 是纯分片列表，压根没有 EXT-X-STREAM-INF，这种测不出就退回 `decodedRes`
-        ——拉起一个隐藏播放器把清单真的解码一帧，读 `<video>` 的实际像素尺寸（见 runDecodeProbe）
-      -->
-      <p v-if="result.variantRes || decodedRes" class="text-xs text-gray-500 dark:text-gray-400">
-        清晰度：<span class="font-medium text-gray-700 dark:text-gray-200">{{ result.variantRes || decodedRes }}</span>
-        <span v-if="!result.variantRes" class="text-gray-400">（解码实测，清单未声明）</span>
-      </p>
-      <p v-else-if="decodingRes" class="text-xs text-gray-400">清晰度：解码中…</p>
       <!-- 把实测的那条地址摊开：一条线路里各集可能不同源（实测 4kvm 最新一集走网盘直链），
            不写清测的是哪条，结论就没法归因 -->
       <p class="text-xs text-gray-400 break-all">测的是：{{ url }}</p>
@@ -99,12 +111,13 @@ let seq = 0
 let inflight: AbortController | null = null
 
 /**
- * 清单没声明分辨率时的兜底：拉起一个隐藏的 <video> + hls.js，跟真播放器走同一套连接配置
+ * 拉起一个隐藏的 <video> + hls.js，跟真播放器走同一套连接配置
  * （`resolveConnConfig` 算出来的通道/防盗链头），让它把第一个分片真的解出一帧，
- * 读 `<video>` 的 videoWidth/videoHeight——这是浏览器吐出来的实测像素，不管清单声不声明都拿得到。
+ * 读 `<video>` 的 videoWidth/videoHeight——这是浏览器吐出来的实测像素。
  *
- * 只在探测已经给出「清单可达 + 分片可达」结论时才做，且已经有 `variantRes` 就不用再费这一遍——
- * 拉一次真播放器要多下一小段视频，是「锦上添花」不是「必须」，别在探测阶段的快速判断上加负担。
+ * **不管清单有没有声明分辨率都要跑这一遍**，不是只在没声明时兜底：声明值不总是准
+ * （见模板里那句注释，FF 线路清单写 608 实测编码是 720），解码实测才是唯一可信的数。
+ * 只在探测已经给出「清单可达 + 分片可达」结论时才做——没结论时拉播放器也是白折腾。
  */
 const decodedRes = ref('')
 const decodingRes = ref(false)
@@ -117,7 +130,7 @@ const cleanupDecodeProbe = () => {
 }
 
 const runDecodeProbe = async (r: ProbeResult, mine: number) => {
-  if (!r.isHls || r.variantRes || !r.manifestChannel || !r.segmentChannel) return
+  if (!r.isHls || !r.manifestChannel || !r.segmentChannel) return
   decodingRes.value = true
   try {
     const { default: Hls } = await import('hls.js')

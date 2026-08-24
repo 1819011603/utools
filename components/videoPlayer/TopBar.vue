@@ -32,6 +32,9 @@
         那儿该留给要点的东西
       -->
       <div v-if="isFullscreen" class="flex items-center gap-2 shrink-0 text-white/85 tabular-nums">
+        <!-- 清晰度：与页面上那行信息条同一个值（见 useVideoEvents.videoRes），全屏时那行看不见，
+             这里补一份。优先显示解码实测的真实像素，清单声明的值不总是准 -->
+        <span v-if="videoRes" class="text-xs font-medium drop-shadow">{{ videoRes }}</span>
         <!--
           聚合下载速度摆在时间/电量**左边**：全屏时页面上那行信息条整个看不见，
           而「现在到底下得动下不动」恰恰是看片当下最想知道的一件事（卡的时候尤其）。
@@ -105,6 +108,8 @@ const {
   // 全屏顶栏那枚速度（时间/电量左边）：HLS 用聚合速度，整片 MP4 用「实测 / 需要」
   isHls, aggregateKBps, strategy, dualChannel,
   mp4AvgMbps, mp4Kbps, playbackRate,
+  // 清晰度：与页面信息条共用同一份计算（useVideoEvents.videoRes）
+  videoRes,
 } = useVideoPlayerCtx()
 
 // 维持**当前倍速**需要多少 KB/s。倍速是乘上去的：3x 要 3 倍码率的持续供给

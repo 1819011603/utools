@@ -133,6 +133,9 @@
 
         <!-- 右侧一组：宽屏时靠 ml-auto 推到最右（进度条独占上一行后这行需要自己撑开） -->
         <div class="order-4 flex items-center gap-0.5 shrink-0 sm:ml-auto">
+          <!-- 清晰度：优先显示解码实测的真实像素，清单声明的值不总是准（见 useVideoEvents.videoRes）。
+               窄屏藏起来——这一行本来就挤，清晰度不如倍速/设置/全屏要紧 -->
+          <span v-if="videoRes" class="hidden sm:inline px-1.5 text-xs font-medium text-white/70 whitespace-nowrap">{{ videoRes }}</span>
           <div ref="speedMenuRef" class="relative">
             <button
               class="px-1.5 sm:px-2 py-1.5 rounded-lg text-white hover:bg-white/15 transition-all text-xs sm:text-sm font-semibold whitespace-nowrap"
@@ -213,6 +216,8 @@ const {
   volumeIcon, supportsPiP, showSpeedMenu, controlsVisible,
   togglePlay, startSeek, updateHoverTime, setVolume, toggleMute, setPlaybackRate, rateOptions,
   toggleFullscreen, togglePiP, keepControlsAlive, playPrev, playNext,
+  // 清晰度：与页面信息条、全屏顶栏共用同一份计算（useVideoEvents.videoRes）
+  videoRes,
 } = useVideoPlayerCtx()
 
 // 倍速菜单点击外部关闭

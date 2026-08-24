@@ -88,6 +88,12 @@ export function useVideoMediaState() {
   // 面板上要能一眼分开——「缓冲满但掉帧涨」是解码/GPU 问题，「缓冲空但不掉帧」才是网络问题
   const hlsStats = ref<{ buffered: number; level: string; dropped: number; total: number } | null>(null)
   const playbackDiag = ref('—')
+  /**
+   * `<video>` 解码后的实际像素高度（如 `"720p"`）。清单/master 列表声明的分辨率不总是准
+   * （实测过某源清单写 608，ffprobe 解密真实分片一看编码其实是 720），解码尺寸才是唯一可信的数，
+   * 所以单独存一份裸状态，不跟 hlsStats.level 混在一起——各展示位置按各自优先级去用
+   */
+  const decodedRes = ref('')
 
   // ── MP4 预加载 ──
   // 类型对齐 <video>.preload，免得赋值时要 as 一下
@@ -115,7 +121,7 @@ export function useVideoMediaState() {
     showAdvancedProxy, autoFullscreen, pendingAutoFullscreen, autoMuted, autoBestRate, turboRate, isLocked,
     progressPercent, bufferedPercent, seekPreviewTime, seekPreviewPercent, isSeeking, hoverTime, hoverPercent,
     skipIntro, skipOutro, hasSkippedIntro, savedProgress, isRestoringFromSaved,
-    hlsConfig, hlsStats, playbackDiag,
+    hlsConfig, hlsStats, playbackDiag, decodedRes,
     preloadStrategy, mp4ProbedDuration, mp4AvgMbps, mp4Kbps,
   }
 }
