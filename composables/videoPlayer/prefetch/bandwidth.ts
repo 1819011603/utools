@@ -31,13 +31,35 @@ export function useBandwidthModel() {
   /** 一片下载耗时（ms）的 EWMA：判「每连接够不够快」比看瞬时速度直观，也给面板展示 */
   let segLoadMs = 0
 
-  /** 采样一次下载。只认真实网络传输：缓存命中（极快）、过小分片、离谱值一律丢弃 */
-  const sampleSpeed = (bytes: number, ms: number, concurrency = 0) => {
+  /**
+   * 上一次目标并发变更的时刻（`performance.now()`）。**「按并发档记账」这件事全靠它才成立。**
+   *
+   * 由来：**减线程是没法立即生效的**——在途的下载不会被回收，实际并发要等它们各自跑完才降下来。
+   * 于是那几片是「在 6 条里挤着下、在 2 条时交货」的：速度是高并发时的低速度，
+   * 而记账时读到的并发已经是 2。后果是它把**低并发档污染成低速**（`perConnLow`、`aggByConn[2]`），
+   * 而低并发档正是「这个源单条能跑多快」的唯一依据（见 soloConnKBps）→
+   * 「刚减完线程 → 看着单条变慢 → 判定被限速 → 又加回去」的震荡，加减各一次就自锁。
+   *
+   * 加线程那一侧同样错，只是方向相反：早就在跑的那一片会被记进新的高档，把高档抬得虚高。
+   *
+   * 所以跨越变更点的样本一律不进分档账本（只喂混合均值，那本来就是混的）。
+   */
+  let concChangedAt = 0
+  /** 目标并发一变就调；在此之前发起的请求，其读数属于上一个并发档 */
+  const markConcChange = () => { concChangedAt = performance.now() }
+
+  /**
+   * 采样一次下载。只认真实网络传输：缓存命中（极快）、过小分片、离谱值一律丢弃。
+   * `startedAt` 是请求发起时刻（`performance.now()`）：跨越并发变更点的样本不进分档账本。
+   */
+  const sampleSpeed = (bytes: number, ms: number, concurrency = 0, startedAt?: number) => {
     if (bytes < 100_000 || ms < 50) return
     const bps = (bytes * 8) / (ms / 1000)
     if (bps > 500_000_000) return   // >500Mbps 基本是缓存/异常，丢弃
     perConnBps = ewma(perConnBps, bps)
     segLoadMs = ewma(segLoadMs, ms)
+    // 这一片是在「上一个并发档」里发起的 → 记进当前档会把两个档都判错，只留混合均值
+    if (startedAt !== undefined && startedAt < concChangedAt) return
     if (concurrency > 0 && concurrency <= 2) perConnLow = ewma(perConnLow, bps)
     else if (concurrency >= 5) perConnHigh = ewma(perConnHigh, bps)
     // 按档记聚合成绩：这一片是在 `concurrency` 条在途的情况下跑出 bps 的 → 那一档的聚合 ≈ bps × 并发
@@ -87,6 +109,20 @@ export function useBandwidthModel() {
    */
   const soloConnKBps = (): number => Math.round(perConnLow / 8 / 1024)
 
+  /**
+   * 单条速度的**保有率**：当前每连接速度 ÷ 单条基线。1 = 没被摊薄；0.5 = 掉一半。0 = 没基线，别据此下判断。
+   *
+   * 这是「加线程到底该不该加」最快的信号，比聚合成绩（`bestAggConn`）早得多：
+   * 加线程之后**单连接速度立刻就掉**，而聚合要等各档都攒够样本才比得出拐点。
+   * 所以**单条优先于聚合**——只有单条没被摊薄多少时才允许继续加。
+   *
+   * 分子用混合均值 `perConnBps`（含当前高并发档的采样，反应快）、分母用低并发档 `perConnLow`
+   * （这个源单条的真实上限）。跟 `getAggregateScales()` 的区别是它不要求有 ≥5 并发的采样，
+   * 任何并发档下都能给出读数，因此爬坡途中就能刹住，而不是等爬到顶才发现白爬。
+   */
+  const soloRetainRatio = (): number =>
+    perConnLow > 0 && perConnBps > 0 ? perConnBps / perConnLow : 0
+
   /** 一片平均下载耗时（ms）。0 = 还没测到 */
   const avgSegLoadMs = (): number => Math.round(segLoadMs)
 
@@ -117,10 +153,12 @@ export function useBandwidthModel() {
     perConnHigh = 0
     aggByConn.length = 0
     segLoadMs = 0
+    concChangedAt = 0
   }
 
   return {
-    sampleSpeed, sampleBitrate, getAggregateScales, bestAggConn, soloConnKBps, avgSegLoadMs,
+    sampleSpeed, sampleBitrate, markConcChange,
+    getAggregateScales, bestAggConn, soloConnKBps, soloRetainRatio, avgSegLoadMs,
     hasSamples, requiredConn, maxFluentRate, perConnKBps, segMbps, resetSamples,
   }
 }

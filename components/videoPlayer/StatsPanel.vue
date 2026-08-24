@@ -82,10 +82,20 @@
            每 IP 限总量的源上 6 条各自都慢，均值会把「单连接被限速了」判反。加不加线程只看它 -->
       <div :title="'左值：各并发档采样的均值。'
         + '括号里的「单条」只取低并发（≤2 条）档，是「这个源一条连接能跑多快」——'
-        + `加不加线程的判据：≥1MB/s 封 2 条、≥500KB/s 封 3 条、低于 500KB/s 才放开多开（当前目标 ${strategy.targetConn} 条）。`">
+        + '加不加线程的判据：门槛按当前倍速放大（1x 下 ≥1MB/s 封 2 条、≥500KB/s 封 3 条，'
+        + '低于门槛才放开多开），且只在存货过了阶梯放开线之后才生效——'
+        + '起播/切集/拖进度那一刻一律按存货阶梯来。'
+        + '「保有」= 当前每连接 ÷ 单条基线：加线程当场就掉，比聚合拐点早得多，'
+        + `所以只在它没掉多少时才允许继续加（<70% 收到 3 条、<45% 收到 2 条）。当前目标 ${strategy.targetConn} 条。`">
         <span class="text-gray-500">单连接速度：</span>
         <span class="font-medium">{{ formatSpeed(strategy.perConnKBps) }}</span>
         <span v-if="strategy.soloKBps > 0" class="text-xs text-gray-400"> (单条 {{ formatSpeed(strategy.soloKBps) }})</span>
+        <!-- 保有率是「加线程有没有加个白的」最快的信号，比聚合拐点早得多，所以摆在这里而不是聚合那一格 -->
+        <span
+          v-if="strategy.soloRetain > 0"
+          class="text-xs"
+          :class="strategy.soloRetain < 0.45 ? 'text-red-500' : strategy.soloRetain < 0.7 ? 'text-amber-500' : 'text-gray-400'"
+        > 保有 {{ Math.round(strategy.soloRetain * 100) }}%</span>
       </div>
       <div>
         <span class="text-gray-500">聚合速度：</span>

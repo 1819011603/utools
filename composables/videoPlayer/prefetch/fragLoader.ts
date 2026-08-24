@@ -31,7 +31,8 @@ export interface FragLoaderDeps {
   /** 当前档位参数：对冲延迟 hedgeMs / 跳片超时 skipMs / 竞速上限 maxRacers */
   tier: () => TierParams
   /** 采样一次下载速度（喂带宽模型） */
-  sampleSpeed: (bytes: number, ms: number, concurrency?: number) => void
+  /** `startedAt` = 请求发起时刻：跨越并发变更点的样本不进分档账本（见 bandwidth 的 markConcChange） */
+  sampleSpeed: (bytes: number, ms: number, concurrency?: number, startedAt?: number) => void
   /** 在途下载计时表（诊断「哪个分片卡住、下了多久」），与预取共用同一份 */
   segInflightStart: Map<string, number>
   /** 关键分片久拿不到 → 把播放头挪过去，返回是否真的跳了 */
@@ -193,7 +194,7 @@ export function createFragLoaderFactory(deps: FragLoaderDeps) {
           const conc = racers   // 采样时的并发（竞速条数），供聚合可并行探针分档
           fetch(laneUrl, { signal: ctrl.signal, referrerPolicy: 'no-referrer' })
             .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); if (!this.stats.loading.first) this.stats.loading.first = performance.now(); return r.arrayBuffer() })
-            .then(buf => { releaseLane(lane); markLaneOk(lane); sampleSpeed(buf.byteLength, performance.now() - t, conc); win(buf) })
+            .then(buf => { releaseLane(lane); markLaneOk(lane); sampleSpeed(buf.byteLength, performance.now() - t, conc, t); win(buf) })
             .catch(() => {
               releaseLane(lane)
               racers--   // 归还并发额度：额度是「同时几条」，别被顺序重试烧光（见上）
