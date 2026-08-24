@@ -64,10 +64,12 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
   豁免就没了，而比例变化是自动发生的、手上没有点击 → 必被 `NotAllowedError` 拒，小窗关掉再也开不回来。
   走**两跳**（占位进 → 真视频要回来，全程「有主」）实测有效，且要有冷却（比例会来回抖，每次重开都闪一下黑）
 - **起播门槛的单位是「够播几秒」不是「缓冲几秒」**（`autoPlayTarget`，一律 × 倍速），且随近期卡顿次数翻倍
-  （慢源上「五次一秒的卡」远比「一次四秒的等」难受）。**但下坡路要短（`STALL_DECAY_SMOOTH_SECS` = 连续流畅 5s
-  就归零，原来是 20s）**：断网/换网必然制造卡顿，而那些卡顿不是源站的错，却一样把门槛翻上去 →
-  网络一恢复 `onWaiting` 就主动 pause 去攒 `2^stalls`（1x 下 stalls=2 就要 24s，必然吃满 8s 封顶）
-  → **「网络早通了画面还要再等 8 秒」**。5s 不影响抗锯齿的初衷：真慢的源 5 秒内一定会再卡一次
+  （慢源上「五次一秒的卡」远比「一次四秒的等」难受）。**这一块只留一个秒数常量 `PLAYABLE_SECS = 2`**
+  ——起播门槛（冷启动 ×2）与「连续流畅就归零」共用它，别再往回加第二个旋钮。
+  **下坡路要短（归零线 = 2s × 倍速，倍速夹在 1~3x，原来是固定 20s）**：断网/换网必然制造卡顿，
+  而那些卡顿不是源站的错，却一样把门槛翻上去 → 网络一恢复 `onWaiting` 就主动 pause 去攒 `2^stalls`
+  （1x 下 stalls=2 就要 24s，必然吃满 8s 封顶）→ **「网络早通了画面还要再等 8 秒」**。
+  归零线跟着倍速涨是因为高倍速下缓冲消耗快、「刚好喘匀这几秒」的偶然性大，但**不能不封顶**（超快倍速那一档本来就必卡）
 - **跳过片头走 hls.js 的 `startPosition`**，不在 `loadedmetadata` 里手动 seek。进度优先于片头
 - **探测顺手下载的 m3u8 原文喂给 hls.js**（`pLoader` + `takeSeededManifest`）：**回调必须延到下一个宏任务**，
   同步回会赶在 MediaSource `sourceopen` 之前 →「分片一个接一个 200、缓冲恒 0、一直转圈」。
@@ -293,7 +295,7 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
 `video-player-state` · `video-probe-dead-direct`（按 host 记「直连是黑洞」）· `video-player-learned-profiles` ·
 `video-player-handoff`（交接槽 1 天）· `video-player-origin-history` / `-referer-history` · `video-parse-rules` /
 `-embed-sandbox` / `video-parse-last-result`（1 小时）· `video-watch-history`（**看到第几集**，按剧名存）·
-各页 `*-settings` · `utools-history-<page>`。
+`video-show-prefs`（**倍速与片头片尾**，按剧名存）· 各页 `*-settings` · `utools-history-<page>`。
 
 **「永久保存」= `navigator.storage.persist()`，不是「localStorage 没有 TTL」**：没授权时 Chrome/Edge 会按 LRU
 **整个 origin 一起驱逐**，Safari（ITP）**7 天不访问就删**且不支持 `persist()`（只能如实标出来）。先 `persisted()`

@@ -21,6 +21,10 @@ export function useVideoPlayerController() {
   const media = useVideoMediaState()
   const handoff = useVideoHandoff()
 
+  // 按剧记住倍速与片头片尾。只吃裸状态 + 交接槽（剧名从那儿来），不碰 playlist，
+  // 所以放在最前面装：它靠 watch 剧名工作，装配顺序对它没有要求
+  const showPrefs = useShowPrefs({ media, handoff })
+
   // 下面三个互相引用，先声明后赋值；回调里访问时都已就绪
   let conn!: VideoConnStrategy
   let engine!: VideoEngine
@@ -169,6 +173,10 @@ export function useVideoPlayerController() {
     const savedState = loadSavedState()
     if (savedState) {
       hydrate(savedState)
+      // hydrate 装的是「上一次」那份全局值，而 ?handoff= 那条路在这之前就把剧名读进来了
+      // （parseQueryVideoParams 在上面），换剧监听器早就跑过 → 会被这里原样盖回去。
+      // 所以补一次：有本剧记录就再套一遍，没有就什么都不做
+      showPrefs.applyShowPrefs()
       // 没有 URL 参数时才恢复保存的视频地址（parseUrl 也算——那条路自己会装好列表，
       // 先恢复上一份只会让旧作业单短暂串进来）
       if (!queryParams.urls.length && !queryParams.parseUrl && savedState.videoUrlInput) {
@@ -233,6 +241,7 @@ export function useVideoPlayerController() {
   return {
     ...media,
     ...handoff,
+    ...showPrefs,
     ...tier,
     ...conn,
     ...playlist,

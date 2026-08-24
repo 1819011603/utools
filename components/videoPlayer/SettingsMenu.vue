@@ -74,6 +74,26 @@
           </div>
           <p class="text-xs text-white/60">片尾：剩余时间少于此值自动跳下一集（0 = 关闭）</p>
         </div>
+
+        <!--
+          这几项是**按剧**记的（见 useShowPrefs），必须写在脸上：
+          否则「换部剧倍速自己变了」在用户看来就是播放器坏了，而且无从下手排查。
+        -->
+        <div class="pt-2 border-t border-white/15 text-xs">
+          <div v-if="showLabel" class="flex items-start justify-between gap-2">
+            <!-- 只点名真正按剧记的那几项：「加载后自动全屏」是全局的，一起说进去就是假话 -->
+            <span class="text-white/70">
+              倍速与片头片尾按<span class="text-white/90">《{{ showLabel }}》</span>单独记{{ hasShowPrefs ? '住了' : '（还没改过）' }}
+            </span>
+            <button
+              v-if="hasShowPrefs"
+              class="shrink-0 text-white/70 hover:text-white underline decoration-dotted"
+              title="删掉这部剧的单独设置，以后跟着上一次的设置走（不改动当前正在播的）"
+              @click="forgetShowPrefs"
+            >恢复默认</button>
+          </div>
+          <p v-else class="text-white/60">当前视频没有剧名，用的是上次的设置</p>
+        </div>
       </div>
     </Transition>
   </div>
@@ -86,7 +106,10 @@
  */
 import { onClickOutside } from '@vueuse/core'
 
-const { autoFullscreen, autoBestRate, autoRateCap, turboRate, skipIntro, skipOutro, saveState } = useVideoPlayerCtx()
+const {
+  autoFullscreen, autoBestRate, autoRateCap, turboRate, skipIntro, skipOutro, saveState,
+  showLabel, hasShowPrefs, forgetShowPrefs,
+} = useVideoPlayerCtx()
 
 const menuRef = ref<HTMLElement>()
 const open = ref(false)

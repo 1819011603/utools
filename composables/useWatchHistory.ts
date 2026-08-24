@@ -39,9 +39,16 @@ const MAX_SHOWS = 200
 type Store = Record<string, WatchRecord>
 
 /** 剧名归一化：去掉空白和常见的季/清晰度后缀差异，避免同一部剧因为标题小改动而分成两条 */
-const normTitle = (t: string) => t.trim().replace(/\s+/g, '').toLowerCase()
+export const normTitle = (t: string) => t.trim().replace(/\s+/g, '').toLowerCase()
 
-const keyOf = (r: { title?: string; pageUrl?: string }) =>
+/**
+ * 「这是哪部剧」的唯一口径：剧名优先，没剧名退回播放页地址，两者都没有就是空串（= 不归属任何剧）。
+ *
+ * **导出是为了让按剧存的设置（`useShowPrefs`）用同一把钥匙**：两处各写一套归一化的话，
+ * 迟早出现「续看记在这部剧上、倍速记在另一部上」——同一个剧名算出两个键，
+ * 而且只在标题里多一个空格这种场合才发作，肉眼完全看不出来。
+ */
+export const showKeyOf = (r: { title?: string; pageUrl?: string }) =>
   r.title?.trim() ? 't:' + normTitle(r.title) : (r.pageUrl ? 'u:' + r.pageUrl : '')
 
 const load = (): Store => {
@@ -61,7 +68,7 @@ export function useWatchHistory() {
    * ——记录的语义是「最后看的」，不是「看过的最大集数」（后者在跳着看时会一路虚高）。
    */
   const recordWatch = (r: Omit<WatchRecord, 'at'>) => {
-    const k = keyOf(r)
+    const k = showKeyOf(r)
     if (!k) return
     const s = load()
     s[k] = { ...r, at: Date.now() }
@@ -84,7 +91,7 @@ export function useWatchHistory() {
 
   const forgetWatch = (q: { title?: string; pageUrl?: string }) => {
     const s = load()
-    delete s[keyOf(q)]
+    delete s[showKeyOf(q)]
     // 两种键都清：同一部剧可能先以地址记过（那次没解析出剧名），后来才有了剧名
     if (q.pageUrl) delete s['u:' + q.pageUrl]
     save(s)

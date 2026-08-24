@@ -13,22 +13,19 @@ import type { VideoPlaylistCtl } from './useVideoPlaylistCtl'
  * 起播预缓冲：缓冲够了就起播，剩下的交给并行预取在播放中补齐；
  * 慢站最多等 AUTOPLAY_MAX_WAIT_MS 兜底避免卡死。非 HLS 固定等 2s。
  *
- * **门槛的单位是「能播多少秒」，不是「缓冲了多少秒」**——两者差一个倍速。
- * 3x 下缓冲 6 秒只够播 2 秒，1x 下缓冲 2 秒就够播 2 秒；拿固定秒数当门槛，
- * 等于在高倍速下过早起播（马上再卡）、在 1x 下过晚起播（干等）。所以一律 × 倍速。
+ * **`PLAYABLE_SECS` 是这一块唯一的秒数常量，单位是「能播多少秒」不是「缓冲多少秒」**
+ * ——两者差一个倍速，所以用它的地方一律 × 倍速。3x 下缓冲 6 秒只够播 2 秒；
+ * 拿固定秒数当门槛等于高倍速下过早起播（马上再卡）、1x 下过晚起播（干等）。
  *
- * 两档只差「要几秒的播放量」：
+ * 起播门槛的两档只差一个倍数：
  * · 定位类起播（切集 / 拖进度 / 重载）—— 画面停着，每多一秒都在盯转圈 → 够播 2 秒就走，
  *   后面由预取追；真追不上还有抗卡环兜。
- * · 首次冷启动（刚点开页面，人还在看别的）—— 多等一会儿攒厚一点划算 → 至少 6 秒缓冲，
- *   高倍速下同样按「够播 2 秒」放宽（3x 时两者正好都是 6s）。
+ * · 首次冷启动（刚点开页面，人还在看别的）—— 多等一会儿攒厚一点划算 → 翻倍，够播 4 秒。
  *
  * 实测这两档配合「存货不够就少开线程」（见 useHlsPrefetch 的 SAFE_WALL_SECS）才有意义：
  * 不收窄并发的话，门槛要的这点量本身就被 6~12 条并行下载拖慢了。
  */
-const AUTOPLAY_PLAYABLE_SECS = 2      // 「够播几秒」就可以出画面
-const AUTOPLAY_COLD_MIN_BUFFER = 6    // 冷启动的缓冲下限（1x 时就是它）
-const AUTOPLAY_MIN_BUFFER = 1         // 再快也得有这么多，否则等于没缓冲就播
+const PLAYABLE_SECS = 2               // 「够播几秒」：起播门槛与卡顿归零窗口共用
 const AUTOPLAY_MAX_WAIT_MS = 8000
 
 /**
@@ -44,37 +41,26 @@ const AUTOPLAY_MAX_WAIT_MS = 8000
  */
 const STALL_ESCALATION_CAP = 8
 /**
- * 门槛归零要的「连续流畅」量。**跟起播门槛一样，单位是「播过去多少内容」而不是墙钟秒**
- * ——只是换算方向相反：门槛是「够播 N 秒」× 倍速得到缓冲量，这里是墙钟 × 倍速得到内容量，
- * 所以拿来跟墙钟的 `smoothSecs` 比要**除以**倍速。
+ * 门槛归零要的「连续流畅」墙钟秒数，同样是 `PLAYABLE_SECS` × 倍速（`smoothSecs` 是墙钟）：
+ * 1x 要顺畅播过 2 秒，3x 要 6 秒。倍速越高，源要供上的吞吐越高、缓冲消耗得越快，
+ * **「刚好喘匀这几秒」的偶然性越大，免罪就该越难拿**。
  *
- * 为什么不能是固定墙钟秒：3x 下流畅 4 秒，意味着这条源在这 4 秒里交付了 12 秒的内容
- * ——这本身就是比 1x 下同样 4 秒强得多的证据，没有理由要求它等一样长。
- * 反过来，把墙钟门槛写死在高倍速能接受的量级上，1x 下就成了「随便喘口气就免罪」。
- *
- * **原来是 20s 固定值，太长了**：断网 / 换 Wi-Fi 必然制造卡顿，而那些卡顿**不是这条源不争气**，
+ * **原来是固定 20s，太长了**：断网 / 换 Wi-Fi 必然制造卡顿，而那些卡顿**不是这条源不争气**，
  * 却一样把门槛翻上去。于是网络一恢复，`onWaiting` 就主动 pause 去攒 `2^stalls` 的门槛
  * ——1x 下 stalls=2 就是 24s，实际必然吃满 `AUTOPLAY_MAX_WAIT_MS` 的 8s 封顶。
  * 也就是说**网络早通了，画面还要再等 8 秒**，而 20s 的下坡路让这个惩罚在整段恢复期里一直挂着。
  *
- * 4 秒内容是「一次抖动过去了」的量级：真慢的源交付不出这 4 秒就会再卡一次（门槛照样涨回去，
- * 抗锯齿那个初衷不受影响），而一次性的网络事件则很快被放过。
- *
- * 两个夹子跟 `autoPlayTarget` 保持一致的口径：
- * · `Math.max(1, rate)` —— 慢放不放宽（0.5x 下要求 8 墙钟秒毫无意义，那时候本来就不卡）
- * · 墙钟地板 2s —— `smoothSecs` 是每秒心跳里取整出来的，再小就落到采样噪声里了
+ * 倍速夹在 1~3x：慢放不缩短（0.5x 本来就不卡，没理由更容易免罪），超快倍速（3.5~5x）不加码
+ * ——那一档本来就必卡（多数浏览器 4x 往上还直接静音），让它把归零线拉到 10s 只是把
+ * 「网络早通了还在等」重演一遍，而那正是这条归零线存在的理由。
  */
-const STALL_DECAY_SMOOTH_SECS = 4
-const STALL_DECAY_MIN_WALL_SECS = 2
 const stallDecaySmoothSecs = (rate: number) =>
-  Math.max(STALL_DECAY_MIN_WALL_SECS, STALL_DECAY_SMOOTH_SECS / Math.max(1, rate))
+  PLAYABLE_SECS * Math.min(3, Math.max(1, rate))
 
 /** 起播门槛（秒缓冲）。relocating = 切集/拖进度/重载那一档；stalls = 近期卡顿次数 */
 const autoPlayTarget = (rate: number, relocating: boolean, stalls = 0): number => {
-  const byRate = AUTOPLAY_PLAYABLE_SECS * Math.max(1, rate)
-  const base = relocating
-    ? Math.max(AUTOPLAY_MIN_BUFFER, byRate)
-    : Math.max(AUTOPLAY_COLD_MIN_BUFFER, byRate)
+  const byRate = PLAYABLE_SECS * Math.max(1, rate)
+  const base = relocating ? byRate : byRate * 2   // 冷启动攒厚一倍
   return base * Math.min(STALL_ESCALATION_CAP, 2 ** Math.max(0, stalls))
 }
 /**
@@ -146,7 +132,7 @@ export function useVideoEvents(deps: VideoEventsDeps) {
 
   // ── 起播预缓冲 ──
   /**
-   * 近期卡顿次数（供门槛递增用）。**连续流畅够播 `STALL_DECAY_SMOOTH_SECS` 就清零**——门槛涨上去容易，
+   * 近期卡顿次数（供门槛递增用）。**连续流畅够 `stallDecaySmoothSecs()` 秒就清零**——门槛涨上去容易，
    * 不给它一条下坡路的话，源恢复正常之后每次拖进度还得干等十几秒（比卡顿更烦）。
    * 计数只认 stallTracker 的真实停顿（排除 seek 与用户 pause），不认我们自己的加载等待。
    */
