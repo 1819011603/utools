@@ -148,7 +148,18 @@ export function useVideoPrewarm(deps: VideoPrewarmDeps) {
     // 没结论（degraded）时跳过：不知道该走哪条，乱试只是白发请求。
     const cfg = probe.manifestChannel ? resolveConnConfig(probe, originOf(realUrl)) : null
     if (!cfg || !probe.manifestChannel) return
-    const manifestUrl = buildChannelUrl(realUrl, probe.manifestChannel, {
+    /*
+     * **通道要听 cfg，不能直接拿 `probe.manifestChannel`**：分片轴可能挑了代理而清单轴自己
+     * 直连就通了，`resolveConnConfig` 的归一化规则是「分片要代理 → manifest 也必须走同一种代理」
+     * （分片 URL 的重写只发生在服务端 rewriteM3u8）。之前这里直接用探测出的清单通道，
+     * 分片需要代理时预热到的会是一份指向裸 CDN 分片地址的清单——`warmSegments` 拿着这些地址
+     * 直接 `fetch`，撞的是同一个 CORS/403，预热静默失败（察觉不到，直到清晰度探测把同一个坑现出原形）。
+     * 跟 getProxyUrl（useVideoProxy.ts）用同一套判据，才对得上注释里说的「必须完全一致」
+     */
+    const channel = cfg.disguiseAsDownloader
+      ? 'disguise'
+      : (cfg.requestOrigin || cfg.requestReferer ? 'headers' : 'direct')
+    const manifestUrl = buildChannelUrl(realUrl, channel, {
       origin: cfg.requestOrigin,
       referer: cfg.requestReferer,
       noseg: cfg.manifestOnly,

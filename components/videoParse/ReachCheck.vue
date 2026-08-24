@@ -65,7 +65,7 @@
  */
 import {
   probeReachability, diagnoseProbe, probeMatrixRows, buildChannelUrl, resolveConnConfig,
-  type ProbeResult, type ProbeVerdict,
+  type ProbeResult, type ProbeVerdict, type Channel,
 } from '~/composables/videoPlayer/useReachabilityProbe'
 
 const props = defineProps<{
@@ -130,18 +130,36 @@ const cleanupDecodeProbe = () => {
 }
 
 const runDecodeProbe = async (r: ProbeResult, mine: number) => {
-  if (!r.isHls || !r.manifestChannel || !r.segmentChannel) return
+  if (!r.isHls || !r.manifestChannel || !r.segmentChannel) {
+    console.log('[清晰度探测] 跳过：非 HLS 或清单/分片没有可达通道', { isHls: r.isHls, manifestChannel: r.manifestChannel, segmentChannel: r.segmentChannel })
+    return
+  }
   decodingRes.value = true
   try {
     const { default: Hls } = await import('hls.js')
-    if (mine !== seq || !Hls.isSupported()) return
+    if (mine !== seq) return
+    if (!Hls.isSupported()) { console.log('[清晰度探测] 跳过：浏览器不支持 hls.js（MSE 不可用）'); return }
     // selfOrigin 只是没记 hdrOrigin 时的兜底（老缓存场景），probeReachability 当场测出的
     // 结论恒带 hdrOrigin，这里传什么基本不影响，不用再解析一遍
     const cfg = resolveConnConfig(r, props.origin?.trim() ?? '')
-    if (!cfg) return
-    const manifestUrl = buildChannelUrl(props.url, r.manifestChannel, {
+    if (!cfg) { console.log('[清晰度探测] 跳过：resolveConnConfig 凑不出可用的连接组合'); return }
+    /*
+     * **manifest 走哪条通道必须听 `cfg`，不能直接拿 `r.manifestChannel`**——两者可能不一致：
+     * 探测阶段清单自己直连就通了（`r.manifestChannel === 'direct'`），但分片直连 CORS/403，
+     * 分片轴选了代理；`resolveConnConfig` 的归一化规则是「分片要代理 → manifest 也必须走同一种代理」
+     * （分片 URL 的重写只发生在服务端 `rewriteM3u8`，manifest 不过代理就没法把分片指向代理）。
+     * 曾经直接用 `r.manifestChannel` 建 manifestUrl，manifest 走了裸直连，hls.js 按清单里的
+     * 原始相对路径解出**未代理的分片地址**，实测这条线路（HN 系）分片直连 403/CORS，
+     * 于是每一片都 `fragLoadError`，画质数虽然对但压根没帧可读——跟真播放器用
+     * `useVideoProxy.getProxyUrl()` 的判断逻辑本该完全一致，这里必须照抄同一套判据。
+     */
+    const channel: Channel = cfg.disguiseAsDownloader
+      ? 'disguise'
+      : (cfg.requestOrigin || cfg.requestReferer ? 'headers' : 'direct')
+    const manifestUrl = buildChannelUrl(props.url, channel, {
       origin: cfg.requestOrigin, referer: cfg.requestReferer, noseg: cfg.manifestOnly,
     })
+    console.log('[清晰度探测] 开始解码:', manifestUrl)
     const video = document.createElement('video')
     video.muted = true
     video.playsInline = true
@@ -152,15 +170,25 @@ const runDecodeProbe = async (r: ProbeResult, mine: number) => {
     probeVideoEl = video
     const hls = new Hls({ maxBufferLength: 2, maxMaxBufferLength: 4, startFragPrefetch: true })
     probeHls = hls
+    // 静默失败会把「到底卡在哪一步」全藏起来——这里只做诊断日志，不影响可达性结论本身
+    hls.on(Hls.Events.ERROR, (_: unknown, data: any) => {
+      console.log('[清晰度探测] hls.js 报错:', data?.details, data?.fatal ? '(致命)' : '', data?.response?.code ?? '')
+    })
     hls.attachMedia(video)
     hls.loadSource(manifestUrl)
     await new Promise<void>(resolve => {
       const done = () => { video.removeEventListener('loadedmetadata', done); resolve() }
       video.addEventListener('loadedmetadata', done)
-      setTimeout(resolve, 6000)   // 兜底：拿不到就算了，别让检测卡在这一步
+      setTimeout(resolve, 8000)   // 兜底：拿不到就算了，别让检测卡在这一步；与探测本身的单通道超时对齐
     })
-    if (mine === seq && video.videoWidth && video.videoHeight) decodedRes.value = `${video.videoHeight}p`
-  } catch { /* 解码测清晰度是锦上添花，失败就算了，不影响可达性结论本身 */ } finally {
+    if (mine === seq && video.videoWidth && video.videoHeight) {
+      decodedRes.value = `${video.videoHeight}p`
+    } else if (mine === seq) {
+      console.log('[清晰度探测] 超时未解出尺寸:', { videoWidth: video.videoWidth, videoHeight: video.videoHeight, readyState: video.readyState })
+    }
+  } catch (e) {
+    console.log('[清晰度探测] 异常（不影响可达性结论）:', e)
+  } finally {
     cleanupDecodeProbe()
     if (mine === seq) decodingRes.value = false
   }
