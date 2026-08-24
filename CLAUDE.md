@@ -215,6 +215,13 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
   **必须用 ResizeObserver 不能用 IntersectionObserver**（`v-show` 折叠时是空操作，展开没有事件可听，IO 又要等进视口）
 - **跨天续看靠 `useWatchHistory`（按剧名记一条）**，解析页和播放器**两处都要有入口**；三条闭嘴规则：
   深链带了 `index`/`ep`、落点就是正在播的那集、**用户自己动过集数就永久闭嘴**。也**不自动跳过去**
+- **倍速与片头片尾按剧存**（`useShowPrefs`：目标倍速 / 片头 / 片尾 / 自动最佳倍速 / 超快倍速）。
+  **没有本剧记录就一个字都不改**——当前值就是「上一次」，而「上一次」由 `saveState` 天然维护，
+  fallback 不需要代码。三个坑：**键必须复用 `useWatchHistory` 的 `showKeyOf`**（各写一套归一化 =
+  「续看记在这部剧、设置记在另一部」，只在标题多个空格时发作）；**套用必须 `flush: 'sync'`**
+  （`skipIntro` 就是 `startPosition`，晚一步则本剧第一集拿着上一部剧的片头秒数起播，切到第二集又正常）；
+  **`hydrate()` 之后要补一次 `applyShowPrefs()`**（`?handoff=` 那条路剧名在 hydrate 之前就读进来了，
+  否则刚套上的又被全局值盖回去）。写回不需要标志位：值与记录一致就跳过，继承来的值压根没变也就不落库
 
 ### URL 参数直链
 

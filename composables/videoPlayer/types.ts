@@ -147,25 +147,6 @@ export interface SavedState {
   lazyTask?: ClientResolveTask | null
 }
 
-/**
- * localStorage `video-player-handoff` 的载荷（长播放列表交接槽）。
- *
- * 几十集的列表拼进 query 会顶爆地址栏（部分浏览器 2000 字符上界，硬刷新还要过 CF 的请求头上限），
- * 所以改走 localStorage 交接：生产者写这个槽 + 跳 `?handoff=1`，播放器读出来。
- * 带时间戳，过期的不用——避免半个月前的残留列表被翻出来。
- */
-export interface HandoffPayload {
-  urls: string[]
-  names?: string[]            // 集名（「第 12 集」这类），与 urls 同下标；解析页知道，光看 URL 猜不出来
-  title?: string              // 剧名，同理
-  source?: PlaylistSource
-  // 按需取址的站点（站点限流，不许一次把整季都取完）：urls 里放的是源站播放页地址占位，
-  // 真实地址等播到那一集才现取。作业单跟着列表一起交接，下标与 urls 严格对齐。
-  lazy?: ClientResolveTask
-  index?: number
-  at: number
-}
-
 /** 从地址栏解析出的本页参数 */
 export interface QueryVideoParams {
   urls: string[]
@@ -178,9 +159,10 @@ export interface QueryVideoParams {
   /**
    * 源站播放页地址 + 线路序号：整份播放列表由播放器自己重新解析得来。
    *
-   * 这是解析来的列表**唯一可分享**的表达方式。此前只有 `?handoff=1`（列表在本机
-   * localStorage 里，别人打开一片空白）和 `urls=a|b|c`（几十集顶爆地址栏，且带签名的
-   * 地址过几小时就死）。带上来源则链接短、永不过期，别人打开自动解析到同一线路同一集。
+   * 这是解析来的列表**唯一可分享**的表达方式。此前还有 `?handoff=1`（列表在本机
+   * localStorage 的「交接槽」里，别人打开一片空白）和 `urls=a|b|c`（几十集顶爆地址栏，
+   * 且带签名的地址过几小时就死）——交接槽已整套删除，`handoff` 只剩个被忽略的历史键。
+   * 带上来源则链接短、永不过期，别人打开自动解析到同一线路同一集。
    */
   parseUrl?: string
   line?: number
@@ -199,6 +181,9 @@ export interface QueryVideoParams {
  * 直接读 `route.query.url` 只能拿到 `sign` 之前的部分。所以解析走原始 search 串，
  * 凡「不在这张表里」的片段一律原样回写进最近的那个视频地址。
  */
+// `handoff` 已经不再产出也不再读（交接槽整套删了），但**必须留在这张表里**：
+// 老书签/老标签页上还有 `?handoff=1`，一旦不认它，这段就会被当成 query 尾巴
+// 原样接到最近那个视频地址后面去。同 proxy/noref/manifestOnly——认得出、然后忽略。
 export const PAGE_QUERY_KEYS = new Set([
   'url', 'urls', 'index', 'origin', 'referer', 'proxy', 'noref', 'manifestOnly', 'handoff',
   'parseUrl', 'line', 'lineName', 'ep',

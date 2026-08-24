@@ -8,7 +8,7 @@
  *   index          起播第几个（0 基）
  *   origin/referer 注入的防盗链头；proxy=1 全程代理；noref=1 伪装下载器；manifestOnly=0/1
  *   parseUrl/line  源站播放页地址 + 线路，列表由播放器自己解析（解析来的列表首选这个）
- *   handoff=1      列表在 localStorage 交接槽里，query 只留标记
+ *   handoff=1      历史键，交接槽已删除 → 认得出但忽略（留着只为别被当成视频地址的尾巴）
  */
 import type { QueryVideoParams } from './types'
 import type { VideoMediaState } from './useVideoMediaState'
@@ -86,25 +86,8 @@ export function useVideoDeepLink(deps: VideoDeepLinkDeps) {
         case 'proxy': result.proxy = isTrue(val); break
         case 'noref': result.noref = isTrue(val); break
         case 'manifestOnly': result.manifestOnly = isTrue(val); break
-        case 'handoff': {
-          if (!isTrue(val)) break
-          const p = handoff.readHandoff()
-          if (!p) break
-          p.urls.forEach(u => result.urls.push(u))
-          handoff.applyHandoffMeta(p)
-          // ?index= 若显式给了以它为准，所以只在没给时才用槽里的
-          if (result.index === undefined && Number.isFinite(p.index)) result.index = p.index
-          break
-        }
-      }
-    }
-
-    // 短列表是用 urls= 传的（那样的链接能直接分享），集名则始终放在交接槽里。
-    // 两边内容完全一致时才采用，避免把别的列表的名字套上来。
-    if (result.urls.length) {
-      const p = handoff.readHandoff()
-      if (p && p.urls.length === result.urls.length && p.urls.every((u, i) => u === result.urls[i])) {
-        handoff.applyHandoffMeta(p)
+        // handoff=1 是交接槽时代的标记，现在认得出但什么都不做（见 PAGE_QUERY_KEYS 的注释）：
+        // 老书签打开时列表由下面的 savedState 恢复，比读一份过期的槽更靠谱
       }
     }
 
@@ -141,9 +124,6 @@ export function useVideoDeepLink(deps: VideoDeepLinkDeps) {
       q.push('index=' + idx)
       const epName = handoff.playlistNames.value[urls[idx]]
       if (epName) q.push('ep=' + encodeURIComponent(epName))
-      // 这里曾经顺手 writeHandoff 一份，给「本机刷新/回退时直接读回来、省掉一次重新解析」用。
-      // 那条捷径已经从 mount() 里删掉，没人再读这一份 → 一并去掉，别留个写了没人看的槽
-      //（留着更坏：槽里那份会随着切集持续过期，将来谁误读一次就是拿旧列表当实况）
       const search = '?' + q.join('&')
       if (window.location.search !== search) {
         window.history.replaceState(window.history.state, '', window.location.pathname + search + window.location.hash)
@@ -163,16 +143,20 @@ export function useVideoDeepLink(deps: VideoDeepLinkDeps) {
     }
 
     let search = parts.length ? '?' + parts.join('&') : ''
-    // 长播放列表会把地址栏顶爆（部分浏览器 2000 字符上界）→ 转存交接槽，query 里只留标记。
-    // 早先这里是退化成只带当前一集，代价是刷新后整个列表就没了（query 优先级高于 savedState）；
-    // 走交接槽则刷新也能把几十集完整读回来。
-    //
-    // 按需取址的列表无论多短也必须走交接槽：urls= 里是源站播放页地址占位，
-    // 光有它没有作业单谁也播不了，分享出去只会得到一堆打不开的链接。
-    if ((search.length > 2000 || handoff.lazyTask.value) && shareable) {
-      handoff.writeHandoff(urls, idx)
-      search = '?handoff=1'
-    }
+    /**
+     * 手工贴的长列表（几十条地址）会把地址栏顶爆——部分浏览器 2000 字符上界——
+     * 所以**干脆什么都不写**。
+     *
+     * 这里原来是「转存 localStorage 交接槽 + 只留 `?handoff=1`」，为的是刷新还能把整份列表读回来
+     *（query 的优先级高于 savedState，早先退化成只带当前一集就等于刷新即丢列表）。
+     * 那套已经删了：`video-player-state` 本来就存着完整的 playlist + currentIndex + 作业单，
+     * 而地址栏空着的时候 mount() 走的正是「恢复 savedState」那条分支，效果完全一样。
+     * `?handoff=1` 唯一的额外能力是「刷新后地址栏还长得像条直链」，但它**本来就分享不出去**
+     *（槽在本机 localStorage 里，别人打开一片空白），不值得为它留一整套读写 + 过期逻辑。
+     *
+     * 解析来的列表不走这里（上面 parseUrl 那段已经 return），按需取址的列表也一样。
+     */
+    if (search.length > 2000) search = ''
 
     if (window.location.search === search) return
     window.history.replaceState(window.history.state, '', window.location.pathname + search + window.location.hash)

@@ -903,13 +903,6 @@ const copyPageLink = async () => {
   toast.add({ title: '已复制本页链接', color: 'green' })
 }
 
-// 超过这个长度就不往 query 里塞了，改走交接槽。
-// 短列表仍走 query，因为那样的链接可以直接复制给别人；交接槽是本机 localStorage，分享不了。
-const MAX_QUERY_LEN = 1800
-
-// 播放器持有的长列表交接槽（见 video-player.vue 的 HANDOFF_KEY）
-const HANDOFF_KEY = 'video-player-handoff'
-
 /** 源站播放页的 origin，带去播放器当防盗链候选值（推不出来的那类站点全靠它） */
 const originOfPage = (pageUrl: string): string => {
   const u = (pageUrl || '').trim()

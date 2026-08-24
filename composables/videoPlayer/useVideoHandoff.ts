@@ -1,20 +1,21 @@
 /**
  * 播放列表的「附加信息」：剧名 / 集名 / 来源 / 按需取址作业单。
  *
- * 这些东西的共同点是：都从交接槽（localStorage `video-player-handoff`）带进来，
- * 都按 **URL** 而不是按下标存。按下标要跟 playlist 严格对齐，任何一处重新赋值
+ * 这些东西都按 **URL** 而不是按下标存。按下标要跟 playlist 严格对齐，任何一处重新赋值
  * playlist 都得记着同步清理，漏一处就会把上一部剧的集名套到新列表上（踩过：onMounted
  * 走 parseAndLoad 加载 query 地址，而 parseAndLoad 里的清理正好把刚读出的集名冲掉）。
  * 按 URL 存则天然对齐，残留条目也只是查不中，无害，且不需要任何清理逻辑。
+ *
+ * 这个模块原来还兼着「交接槽」（localStorage `video-player-handoff`）：解析页把整份列表写进槽、
+ * 跳 `?handoff=1`，播放器读出来。**那套已整体删除**——解析来的列表一律走 `?parseUrl=` 现场重解析
+ * （槽写了没人读），而手工贴的列表刷新时由 `video-player-state` 原样恢复。文件名先留着，
+ * 它现在的职责就是上面这一句：播放列表的附加信息。
  */
 import type { ClientResolveTask } from '../videoParseRules'
-import type { HandoffPayload, PlaylistSource } from './types'
-
-const HANDOFF_KEY = 'video-player-handoff'
-const HANDOFF_TTL = 24 * 60 * 60 * 1000
+import type { PlaylistSource } from './types'
 
 export function useVideoHandoff() {
-  // 剧名，来自交接槽。播放器和播放列表的标题位都用它顶掉泛称
+  // 剧名。播放器和播放列表的标题位都用它顶掉泛称
   const playlistTitle = ref('')
   // 播放列表的来源，有值才显示「刷新链接」
   const playlistSource = ref<PlaylistSource | null>(null)
@@ -47,48 +48,6 @@ export function useVideoHandoff() {
     playlistNames.value = map
   }
 
-  const readHandoff = (): HandoffPayload | null => {
-    try {
-      const raw = localStorage.getItem(HANDOFF_KEY)
-      if (!raw) return null
-      const p = JSON.parse(raw) as HandoffPayload
-      if (!Array.isArray(p?.urls) || !p.urls.length) return null
-      if (!p.at || Date.now() - p.at > HANDOFF_TTL) return null
-      return p
-    } catch {
-      return null
-    }
-  }
-
-  const writeHandoff = (urls: string[], index: number) => {
-    try {
-      // 名字要一起写回去，否则本页每次同步地址栏都会把交接槽里的集名冲掉
-      const picked = urls.map(u => playlistNames.value[u] ?? '')
-      const names = picked.every(Boolean) ? picked : undefined
-      const payload: HandoffPayload = {
-        urls,
-        names,
-        title: playlistTitle.value || undefined,
-        source: playlistSource.value ?? undefined,
-        // 作业单必须跟着列表走：列表里存的是占位地址，没有作业单就一集都播不了
-        lazy: lazyTask.value ?? undefined,
-        index,
-        at: Date.now(),
-      }
-      localStorage.setItem(HANDOFF_KEY, JSON.stringify(payload))
-    } catch (e) {
-      console.error('写入播放列表交接槽失败:', e)
-    }
-  }
-
-  /** 把交接槽里的附加信息套用到给定列表上（下标须与槽里完全一致，调用方负责校验） */
-  const applyHandoffMeta = (p: HandoffPayload) => {
-    setPlaylistNames(p.urls, p.names)
-    setLazyTask(p.lazy ?? null, p.urls)
-    if (p.title) playlistTitle.value = p.title
-    if (p.source) playlistSource.value = p.source
-  }
-
   /** 清空列表时一并清掉附加信息，避免下一份列表串名/串作业单 */
   const clearHandoffMeta = () => {
     playlistNames.value = {}
@@ -117,9 +76,6 @@ export function useVideoHandoff() {
     lazyIndexByUrl,
     setLazyTask,
     setPlaylistNames,
-    readHandoff,
-    writeHandoff,
-    applyHandoffMeta,
     clearHandoffMeta,
     getVideoName,
   }
