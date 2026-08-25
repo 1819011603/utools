@@ -16,7 +16,15 @@
  * 每次切歌、每次重播都去查一遍，既慢又容易把上游惹毛。歌词是几 KB 的文本，
  * 按曲目存 localStorage 完全够用（音频那种几十 MB 的才需要 IndexedDB）。
  * **查不到的结果也要缓存**（存空串），否则每次播到这首都要白等一次网络往返。
+ *
+ * ## 模块级单例
+ *
+ * 播放条上的滚动歌词和下面的歌词面板是两个组件、各调一次本 composable。
+ * 各持一份状态的话，一次切歌要查两遍网络（面板收起时还会两份不同步），
+ * 所以状态提到模块级（同 `useMusicFavorites`）。**取词只由播放条驱动一处**
+ * ——它是常驻的，而面板可以被收起来；两处都 watch 就会重复取。
  */
+import { parseLrc } from './lrc'
 
 const MANUAL_KEY = 'music-lyrics-manual'
 const CACHE_KEY = 'music-lyrics-cache'
@@ -48,18 +56,20 @@ function writeMap(key: string, map: Record<string, unknown>) {
   } catch { /* 超配额就算了，歌词是锦上添花 */ }
 }
 
+/** 当前曲目的歌词文本。空串 = 没有 */
+const lyrics = ref('')
+/** 来源标注。手动贴的为 null，在线匹配到的带歌名歌手 */
+const source = ref<{ name: string; artist: string } | null>(null)
+const loading = ref(false)
+/** 这一首是不是用户手动贴的 */
+const isManual = ref(false)
+/** 解析结果。放这里而不是各组件各算一遍：播放条每次 timeupdate 都要读它 */
+const parsed = computed(() => parseLrc(lyrics.value))
+
+/** 本轮请求的序号：切歌快时旧的那轮回来要能认出自己过时了 */
+let seq = 0
+
 export function useMusicLyrics() {
-  /** 当前曲目的歌词文本。空串 = 没有 */
-  const lyrics = ref('')
-  /** 来源标注。手动贴的为 null，在线匹配到的带歌名歌手 */
-  const source = ref<{ name: string; artist: string } | null>(null)
-  const loading = ref(false)
-  /** 这一首是不是用户手动贴的 */
-  const isManual = ref(false)
-
-  /** 本轮请求的序号：切歌快时旧的那轮回来要能认出自己过时了 */
-  let seq = 0
-
   const manualOf = (key: string): string => readMap<string>(MANUAL_KEY)[key] || ''
 
   /** 手动贴一份。存下来之后这首歌永远优先用它 */
@@ -140,5 +150,5 @@ export function useMusicLyrics() {
     }
   }
 
-  return { lyrics, source, loading, isManual, fetchFor, saveManual, clearManual, manualOf }
+  return { lyrics, parsed, source, loading, isManual, fetchFor, saveManual, clearManual, manualOf }
 }

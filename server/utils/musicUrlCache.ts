@@ -31,6 +31,14 @@ interface CachedUrl {
   name?: string
   artist?: string
   album?: string
+  /**
+   * 歌词原文。24bit 那边一直在运行时往这儿塞（只是类型里漏了，靠「变量不做多余属性检查」
+   * 蒙过去的），fangpi 更是把内嵌歌词当主要收获，所以补进类型 ——
+   * 漏了它，缓存命中的那些曲目会莫名其妙地没有词。
+   */
+  lrc?: string
+  /** 时长（秒）。只有 fangpi 给（它详情页里有 `03:35` 这种可读时长） */
+  duration?: number
 }
 
 interface Entry {

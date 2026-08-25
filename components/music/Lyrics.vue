@@ -13,12 +13,13 @@
  * 匹配到的来源一定要**摆在界面上**：下架歌常匹配到翻唱版，时间轴不一定严丝合缝。
  * 把出处亮出来让用户自己判断可信度，比我们替他打包票强。
  */
-import { activeLrcIndex, parseLrc } from '~/composables/musicPlayer/lrc'
+import { activeLrcIndex } from '~/composables/musicPlayer/lrc'
 
 const { current, currentTime, seekTo } = useMusicPlayerCtx()
-const { lyrics, source, loading, isManual, fetchFor, saveManual, clearManual, manualOf } = useMusicLyrics()
+// 状态是模块级单例，和播放条那行滚动歌词共用一份；**取词由播放条驱动**，
+// 这里不能再 watch 一遍——面板是 `v-if` 的，两处都取等于每次切歌查两遍网络
+const { parsed, source, loading, isManual, fetchFor, saveManual, clearManual, manualOf } = useMusicLyrics()
 
-const parsed = computed(() => parseLrc(lyrics.value))
 const hasLyrics = computed(() => parsed.value.lines.length > 0)
 
 /** 当前该高亮哪一行。没有时间轴时恒为 -1（整块显示，不高亮） */
@@ -51,11 +52,8 @@ const dropManual = () => {
   void fetchFor(current.value)
 }
 
-/** 换歌就重取。`key` 变了才算换歌——同一首歌回填元数据时不该重查 */
-watch(() => current.value?.key, () => {
-  editing.value = false
-  if (current.value) void fetchFor(current.value)
-}, { immediate: true })
+/** 换歌把编辑态收掉：留着的话，贴到一半切了歌，保存会落到新的那首上 */
+watch(() => current.value?.key, () => { editing.value = false })
 
 /**
  * 高亮行滚进视野。用 `block: 'center'` 而不是 `nearest` —— 跟唱的惯例是当前句居中、

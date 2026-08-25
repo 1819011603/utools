@@ -22,6 +22,17 @@ const { isFavorite, toggleFavorite } = useMusicFavorites()
 
 const curFavorited = computed(() => !!current.value && isFavorite(current.value.key))
 
+/*
+ * 歌词由播放条**统一驱动一处**：它常驻，而歌词面板收起来时组件根本不存在
+ * （`v-if="showLyrics"`），驱动放在面板里的话，面板一收播放条那行滚动歌词就再也不更新了。
+ * 状态是模块级单例，面板拿到的是同一份，所以那边只读不取。
+ * 只认 `key` 变化——同一首回填元数据（音质、体积）时不该重查一遍。
+ */
+const { fetchFor: fetchLyrics } = useMusicLyrics()
+watch(() => current.value?.key, () => {
+  if (current.value) void fetchLyrics(current.value)
+}, { immediate: true })
+
 /** 收藏/下载当前这首。直链播放的曲目没有 resolver，收藏了下次也取不回来，所以不给收藏 */
 const canCollect = computed(() => !!current.value?.resolver)
 
@@ -204,6 +215,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         </div>
       </div>
 
+      <!--
+        中间：跟着进度滚的歌词（网易云那种）。**窄屏整块不渲染**——那点宽度要留给歌名和按钮，
+        挤进来只会三样都看不清；手机上要看词点右边那枚歌词按钮展开面板。
+      -->
+      <div class="hidden lg:flex flex-1 min-w-0 justify-center">
+        <MusicNowLyric class="w-full max-w-md" />
+      </div>
+
       <!-- 传输控制 -->
       <div class="flex items-center gap-1 shrink-0">
         <UButton
@@ -315,13 +334,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           aria-label="歌词"
           @click="showLyrics = !showLyrics"
         />
+        <!-- 收藏栏的开关。**窄屏也要有**：那边收藏栏是滑出去的抽屉，这是它唯一的入口，
+             跟着「窄屏减项」一起藏掉就等于手机上再也打不开收藏 -->
         <UButton
-          icon="i-heroicons-star"
+          icon="i-heroicons-bars-3-bottom-left"
           :color="showFavorites ? 'primary' : 'gray'"
           variant="ghost"
           size="sm"
-          class="hidden sm:inline-flex"
-          title="我的收藏"
+          :title="showFavorites ? '收起我的收藏' : '我的收藏'"
           aria-label="我的收藏"
           @click="showFavorites = !showFavorites"
         />

@@ -91,6 +91,35 @@ export function useMusicFavorites() {
 
   const clearFavorites = () => commit([])
 
+  /**
+   * 把已收藏那条的元数据刷成更全的一份（封面、音质、格式、体积）。**已在收藏里才更新，绝不新增**
+   * ——调用点是「正在播的这首」，新增等于把听过的歌自动收藏了。
+   *
+   * 为什么需要这个：**封面不在搜索结果里，要取址（播一次）之后才有**。
+   * 所以「搜出来直接点心收藏、没播过」的那些，存下来时 `cover` 是空的，
+   * 在收藏列表里就是一片灰色占位——看着像图挂了，其实是压根没存过图。
+   * 播到哪首就顺手把那条补上。`at` 必须保留：这是补数据，不是重新收藏，不该把它顶到最前面。
+   */
+  const refreshMeta = (track: Track) => {
+    if (!track?.key) return
+    const i = favorites.value.findIndex(t => t.key === track.key)
+    if (i < 0) return
+    const old = favorites.value[i]
+    const merged: FavoriteTrack = {
+      ...old,
+      cover: track.cover || old.cover,
+      quality: track.quality || old.quality,
+      format: track.format || old.format,
+      sizeText: track.sizeText || old.sizeText,
+      duration: track.duration || old.duration,
+    }
+    // 一个字段都没变就别写盘：这个函数挂在播放状态上，会被调很多次
+    if ((['cover', 'quality', 'format', 'sizeText', 'duration'] as const).every(k => merged[k] === old[k])) return
+    const next = favorites.value.slice()
+    next[i] = merged
+    commit(next)
+  }
+
   return {
     favorites,
     favoriteKeys,
@@ -98,6 +127,7 @@ export function useMusicFavorites() {
     addFavorite,
     removeFavorite,
     toggleFavorite,
+    refreshMeta,
     clearFavorites,
   }
 }
