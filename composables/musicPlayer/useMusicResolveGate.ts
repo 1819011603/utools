@@ -24,6 +24,18 @@ const RESOLVE_TIMEOUT_MS = 15000
 /** 连续失败到这个数就停手报「可能被限流」，而不是默默把剩下的全标成失败 */
 const RATE_LIMIT_STREAK = 3
 
+/**
+ * 配额耗尽时给用户看的话。**必须点明这不是故障**——
+ * 只说「取不到播放地址」，用户只会以为功能坏了，然后反复点、把明天的心情也搭进去。
+ */
+const QUOTA_HINT = '音乐站今日访问配额已用完（该站对匿名访问按天限量），明天再来，或到 24bit.net 登录后使用。'
+
+/** 从 $fetch / ofetch 抛出的错误里取状态码。两种形状都要认，少认一种就漏判 */
+function statusOf(e: unknown): number | undefined {
+  const err = e as { statusCode?: number; status?: number; response?: { status?: number } }
+  return err?.statusCode ?? err?.status ?? err?.response?.status
+}
+
 export interface ResolveGateOptions {
   /** 真正发请求的那一下。由适配层提供（它知道要请求哪个站点的什么地址） */
   fetchOne: (id: string, src: DetailPrefix, signal: AbortSignal) => Promise<ResolvedTrack & { src?: DetailPrefix }>
@@ -38,6 +50,18 @@ export function useMusicResolveGate(options: ResolveGateOptions) {
   const failStreak = ref(0)
   /** 判定为限流，界面据此换措辞并劝用户等一会儿 */
   const rateLimited = computed(() => failStreak.value >= RATE_LIMIT_STREAK)
+
+  /**
+   * 站点今日配额已耗尽（服务端认出「今日访问已达限额」后回 429）。
+   *
+   * 一旦置位就**彻底停手**：不试第二个音源、不排后面的歌、连请求都不发。
+   * 配额是按天按 IP 给的，这时候每多发一发都是纯浪费 —— 而且会把整份队列
+   * 拖着一首首失败一遍，用户还以为是功能坏了。
+   *
+   * 不自动复位：配额要到第二天才回来，本次会话内再试没有意义。
+   * 用户主动重试（resetBackoff）时才清掉 —— 万一他去站点登录了呢。
+   */
+  const quotaExhausted = ref(false)
   /** 当前退避间隔，展示用 */
   const interval = computed(() =>
     Math.min(BASE_INTERVAL_MS * 2 ** failStreak.value, MAX_INTERVAL_MS),
@@ -77,6 +101,9 @@ export function useMusicResolveGate(options: ResolveGateOptions) {
     const id = locator?.id
     if (!id) throw new Error('这条曲目没有取址信息')
 
+    // 配额没了就别再发请求了。放在最前面，连排队都不排
+    if (quotaExhausted.value) throw new Error(QUOTA_HINT)
+
     const hit = inflight.get(track.key)
     if (hit) return hit
 
@@ -105,6 +132,17 @@ export function useMusicResolveGate(options: ResolveGateOptions) {
         } catch (e) {
           lastSentAt = Date.now()
           lastErr = e
+
+          /*
+           * 429 = 服务端认出了「今日访问已达限额」。**当场收手**：
+           * 剩下那个音源、以及后面排队的每一首，全都注定失败。
+           * 不 break 的话用户会眼看着整份队列一首首红过去，还以为是我们坏了。
+           */
+          if (statusOf(e) === 429) {
+            quotaExhausted.value = true
+            throw new Error(QUOTA_HINT)
+          }
+
           // 超时不算「站点在拒我们」，不推高退避
           if (!(e instanceof Error && e.name === 'AbortError')) failStreak.value++
         }
@@ -122,13 +160,20 @@ export function useMusicResolveGate(options: ResolveGateOptions) {
    */
   const failureMessage = (name?: string) => {
     const who = name ? `《${name}》` : '这首歌'
+    if (quotaExhausted.value) return QUOTA_HINT
     return rateLimited.value
-      ? `连续几首都取不到地址，多半是被站点限流了 —— 等几分钟再试。`
-      : `${who}暂时取不到播放地址（可能这个音源没有资源，也可能是站点限流）。`
+      ? '连续几首都取不到地址，可能是站点在限速 —— 等几分钟再试。'
+      : `${who}的这个音质档没有资源，换另一个档试试。`
   }
 
-  /** 用户主动重试时清掉退避，否则他点了也得干等好几秒，看着像没反应 */
-  const resetBackoff = () => { failStreak.value = 0 }
+  /**
+   * 用户主动重试时清掉退避 —— 否则他点了也得干等好几秒，看着像没反应。
+   * 顺带清掉配额标记：用户可能刚去站点登录过，值得再给一次机会（错了也只是一发请求）。
+   */
+  const resetBackoff = () => { failStreak.value = 0; quotaExhausted.value = false }
 
-  return { resolveTrack, rateLimited, failStreak, resolveInterval: interval, failureMessage, resetBackoff }
+  return {
+    resolveTrack, rateLimited, quotaExhausted, failStreak,
+    resolveInterval: interval, failureMessage, resetBackoff,
+  }
 }

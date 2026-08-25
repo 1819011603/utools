@@ -150,7 +150,8 @@ const toolCategories: Category[] = [
       { label: '放映厅', path: '/video-player', icon: 'i-heroicons-play-circle' },
       { label: '按片名搜索', path: '/video-search', icon: 'i-heroicons-magnifying-glass' },
       { label: '视频解析', path: '/video-parse', icon: 'i-heroicons-link' },
-      { label: '音频格式转换', path: '/audio-convert', icon: 'i-heroicons-musical-note' }
+      { label: '音频格式转换', path: '/audio-convert', icon: 'i-heroicons-musical-note' },
+      { label: '音乐', path: '/music', icon: 'i-heroicons-radio' }
     ]
   },
   {

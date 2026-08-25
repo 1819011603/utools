@@ -48,6 +48,8 @@ export default defineEventHandler(async (event) => {
   if (!api) throw createError({ statusCode: 400, statusMessage: 'source 只能是 one 或 two' })
 
   const res = await musicFetch(`${BASE}/api/player/${api}`, {
+    // 用户自己的登录态（可选），走请求头不走 query —— 凭证不该进日志和浏览器历史
+    cookie: getRequestHeader(event, 'x-music-cookie'),
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

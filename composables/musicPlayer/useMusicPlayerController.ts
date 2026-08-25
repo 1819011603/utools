@@ -10,6 +10,7 @@
 import type { InjectionKey } from 'vue'
 import type { ResolvedTrack, SavedMusicState, Track } from './types'
 import { toStorableTrack } from './types'
+import { useMusicDownload } from './useMusicDownload'
 import { useMusicEngine } from './useMusicEngine'
 import { useMusicMediaState } from './useMusicMediaState'
 
@@ -30,6 +31,13 @@ export function useMusicPlayerController(options: MusicPlayerOptions = {}) {
     resolve: options.resolve,
     onEnded: () => onTrackEnded(),
   })
+
+  /*
+   * 下载共用同一个取址器 —— 必须共用，不能各走各的：
+   * 那个闸门是全局串行 + 退避的，两条路各持一份就等于把并发翻倍，
+   * 而站点按天按 IP 限配额，多发的每一发都在啃同一份额度。
+   */
+  const download = useMusicDownload({ resolve: options.resolve })
 
   // ── 队列 ──
 
@@ -197,8 +205,10 @@ export function useMusicPlayerController(options: MusicPlayerOptions = {}) {
 
   return {
     // 全部平铺成一层：子组件里 `const { isPlaying, queue, togglePlay } = useMusicPlayerCtx()`
+    // 因此**各模块返回的键名不能重复**，重了后面的会静默盖掉前面的
     ...media,
     ...engine,
+    ...download,
     playAt, playNext, playPrev, setQueue, enqueue, removeAt, clearQueue, cycleRepeat,
     playDirectUrl, dismissError,
     mount, unmount, save,

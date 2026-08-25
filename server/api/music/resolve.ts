@@ -10,7 +10,8 @@
  *
  * 实现约束同 proxy.ts：不静态 import 任何 `node:*`（Nitro preset 是 cloudflare-pages）。
  */
-import { CF_WALL_MESSAGE, isCloudflareWall, musicFetch } from '../../utils/musicFetch'
+import { CF_WALL_MESSAGE, isCloudflareWall, isQuotaExhausted, musicFetch, QUOTA_MESSAGE } from '../../utils/musicFetch'
+import { readUrlCache, writeUrlCache } from '../../utils/musicUrlCache'
 
 const BASE = 'https://www.24bit.net'
 
@@ -78,7 +79,25 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 400, statusMessage: 'src 只能是 b 或 c' })
   }
 
-  const page = await musicFetch(`${BASE}/music/${prefix}/${id}`)
+  /*
+   * 服务端缓存先行 —— 这一层比前端缓存值钱得多。
+   *
+   * 站点的每日配额**按 IP 算**，而我们所有用户共用服务端这一个出口 IP：
+   * 一个人取过的歌，对所有人都不必再取。命中缓存 = 零配额消耗。
+   */
+  const cached = readUrlCache(id, prefix)
+  if (cached) {
+    setResponseHeader(event, 'Cache-Control', 'no-store')
+    return { ...cached, src: prefix, cached: true }
+  }
+
+  /*
+   * 用户自己的登录态（可选），走**请求头**而不是 query ——
+   * query 会进访问日志、浏览器历史和 Referer，凭证不该出现在那些地方。
+   */
+  const cookie = getRequestHeader(event, 'x-music-cookie')
+
+  const page = await musicFetch(`${BASE}/music/${prefix}/${id}`, { cookie })
 
   // 撞 CF 墙时说人话：本地开发下这几乎总是「dev server 带了 HTTPS_PROXY」造成的
   // （代理出口 IP 会被 Cloudflare 拦，实测直连 200、经代理 403）
@@ -89,24 +108,24 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 502, statusMessage: `源站返回 ${page.status}` })
   }
 
-  const item = extractItemMusic(page.body)
-
   /*
-   * 抠不到 itemMusic 有两种可能，而它们**在响应上完全无法区分**：
-   *   ① 这首歌在这个音源下真的没有资源
-   *   ② 我们被限流了 —— 实测密集取址之后，站点照常回 200、页面照常渲染，
-   *      只是不再吐 itemMusic，没有错误码、没有 cf-mitigated、没有任何「频繁」字样
-   * 所以这里**只报事实，不下结论**（404 = 没拿到地址），措辞留给前端，
-   * 由它结合「最近连续失败了几次」来判断该说哪一种。写死任何一种都是在误导用户。
+   * 配额耗尽必须**先于** itemMusic 判断，而且要用独立状态码。
+   *
+   * 这两种情况在状态码上一模一样（都是 200 + 没有 itemMusic），只有页面正文能区分：
+   *   · 配额用完 → 429，前端据此**立刻停手**：再试另一个音源、再排后面的歌全是白费
+   *   · 单纯没有 itemMusic → 404，那是「这个音源没这首歌」，换个音源还有戏
+   * 不分开的话，配额一用完就会把整份队列拖着一首首失败一遍，还每首都多烧一发请求。
    */
-  if (!item?.url) {
-    throw createError({ statusCode: 404, statusMessage: '这个音源没有给出播放地址' })
+  if (isQuotaExhausted(page.body)) {
+    throw createError({ statusCode: 429, statusMessage: QUOTA_MESSAGE })
   }
 
-  // 地址带时效签名（路径里那段时间戳是过期时刻，约 20 分钟后作废）→ 绝不能缓存
-  setResponseHeader(event, 'Cache-Control', 'no-store')
+  const item = extractItemMusic(page.body)
+  if (!item?.url) {
+    throw createError({ statusCode: 404, statusMessage: '这个音源没有这首歌，换一个音质档试试' })
+  }
 
-  return {
+  const payload = {
     url: item.url,
     format: item.format,
     sizeText: item.size,
@@ -115,7 +134,13 @@ export default defineEventHandler(async (event) => {
     name: item.name,
     artist: item.player,
     album: item.album,
-    /** 实际命中的音源，前端记下来供下次优先尝试，省掉一发注定失败的请求 */
-    src: prefix,
   }
+  writeUrlCache(id, prefix, payload)
+
+  // 地址本身带时效签名（约 20 分钟），**响应绝不能被 HTTP 层缓存**——
+  // 那一层不认识签名什么时候过期，缓存久了发出去的就是死链。有效期由我们自己按签名管
+  setResponseHeader(event, 'Cache-Control', 'no-store')
+
+  /** `src` = 实际命中的音源，前端记下来供下次优先尝试，省掉一发注定失败的请求 */
+  return { ...payload, src: prefix, cached: false }
 })

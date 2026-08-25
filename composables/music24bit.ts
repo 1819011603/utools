@@ -80,6 +80,8 @@ export async function search24bit(
 ): Promise<MusicSearchRow[]> {
   const res = await $fetch<{ items: MusicSearchRow[] }>('/api/music/search', {
     query: { source, kw: keyword, page },
+    // 用户填了自己的登录态就带上（配额另算）。没填就是空对象，照常匿名请求
+    headers: useMusic24bitAuth().authHeaders(),
     signal,
   })
   return res?.items ?? []

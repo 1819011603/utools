@@ -10,9 +10,26 @@ import { formatTrackTime, SEEK_STEP, VOLUME_STEP } from '~/composables/musicPlay
 const {
   audioEl, current, isPlaying, currentTime, duration, volume, isMuted,
   isBuffering, isResolving, resolveStage, errorMessage, errorKind,
-  queue, queueIndex, repeat, shuffle, seekPreview, isSeeking, progressPercent, showQueue,
+  queue, queueIndex, repeat, shuffle, seekPreview, isSeeking, showQueue, showDownloads, showFavorites,
   togglePlay, seekTo, setVolume, toggleMuted, playNext, playPrev, cycleRepeat, dismissError,
+  downloadTrack,
 } = useMusicPlayerCtx()
+
+// 收藏是页面级能力，不经播放器上下文。它内部是模块级单例，
+// 所以这里和页面各调一次拿到的是同一份状态（否则点了心、面板不更新）
+const { isFavorite, toggleFavorite } = useMusicFavorites()
+
+const curFavorited = computed(() => !!current.value && isFavorite(current.value.key))
+
+/** 收藏/下载当前这首。直链播放的曲目没有 resolver，收藏了下次也取不回来，所以不给收藏 */
+const canCollect = computed(() => !!current.value?.resolver)
+
+const onToggleFav = () => { if (current.value) toggleFavorite(current.value) }
+const onDownloadCurrent = () => {
+  if (!current.value) return
+  downloadTrack(current.value)
+  showDownloads.value = true
+}
 
 const progressEl = ref<HTMLElement>()
 
@@ -251,6 +268,28 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
             @input="setVolume(Number(($event.target as HTMLInputElement).value))"
           >
         </div>
+        <!-- 收藏/下载只对解析来的曲目有意义：直链是终态，收藏了也没有 resolver 能取回来 -->
+        <UButton
+          v-if="canCollect"
+          :icon="curFavorited ? 'i-heroicons-heart-solid' : 'i-heroicons-heart'"
+          :color="curFavorited ? 'primary' : 'gray'"
+          variant="ghost"
+          size="sm"
+          :title="curFavorited ? '取消收藏' : '收藏'"
+          :aria-label="curFavorited ? '取消收藏' : '收藏'"
+          @click="onToggleFav"
+        />
+        <UButton
+          v-if="canCollect"
+          icon="i-heroicons-arrow-down-tray"
+          color="gray"
+          variant="ghost"
+          size="sm"
+          class="hidden sm:inline-flex"
+          title="下载这首"
+          aria-label="下载这首"
+          @click="onDownloadCurrent"
+        />
         <UButton
           :icon="repeatIcon"
           :color="repeat === 'off' ? 'gray' : 'primary'"
@@ -269,6 +308,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           :title="shuffle ? '随机播放' : '顺序播放'"
           aria-label="随机播放"
           @click="shuffle = !shuffle"
+        />
+        <UButton
+          icon="i-heroicons-star"
+          :color="showFavorites ? 'primary' : 'gray'"
+          variant="ghost"
+          size="sm"
+          class="hidden sm:inline-flex"
+          title="我的收藏"
+          aria-label="我的收藏"
+          @click="showFavorites = !showFavorites"
         />
         <UButton
           icon="i-heroicons-queue-list"

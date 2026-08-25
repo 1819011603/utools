@@ -104,16 +104,22 @@ export function useMusicEngine(media: MusicMediaState, deps: MusicEngineDeps = {
 
     try {
       const r = await deps.resolve(track)
-      // 站点顺手给回的元数据通常比搜索结果更准（真封面、体积、格式），就地补上
+      /*
+       * 只补**文件属性**，绝不覆盖曲名/歌手/专辑。
+       *
+       * 实测站点在某些 id 下存的元数据是串的：请求「想你就写信」那个 id，
+       * 详情页回来的 `id` 与请求完全一致，`name`/`player`/`album` 却是另一首完全无关的歌
+       * （音频文件本身是对的 —— 体积、音质都对得上，是它那边的曲库匹配错了）。
+       *
+       * 覆盖的话表现就是「点了 A，播放条显示 B」，用户会以为我们把列表搞乱了。
+       * 用户点的是搜索结果里那一条，那条才是他要的身份；详情页只负责给地址和文件属性。
+       */
       Object.assign(track, {
         url: r.url,
         format: r.format ?? track.format,
         sizeText: r.sizeText ?? track.sizeText,
         quality: r.quality ?? track.quality,
         cover: r.cover ?? track.cover,
-        name: r.name ?? track.name,
-        artist: r.artist ?? track.artist,
-        album: r.album ?? track.album,
       })
       return r.url
     } finally {

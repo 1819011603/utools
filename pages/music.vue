@@ -18,17 +18,30 @@ useHead({ title: '音乐 · 晚风' })
 // ── 取址闸门 ──
 // 站点限流是**静默**的（照常回 200、只是不给地址），所以只能从发送侧下手：
 // 全站所有取址都从这一个闸门过，串行 + 退避。详见 useMusicResolveGate 的文件注释。
+const auth = useMusic24bitAuth()
+
 const gate = useMusicResolveGate({
   fetchOne: (id, src, signal) =>
     // 详情页 HTML 没有 ACAO，浏览器跨域取不到 → 这一段必须经服务端。
     // （搜索接口和 CDN 都是 ACAO:*，那两段前端直连，见 music24bit.ts 的分层说明）
-    $fetch(`/api/music/resolve`, { query: { id, src }, signal }),
+    $fetch(`/api/music/resolve`, {
+      query: { id, src },
+      // 用户自己的登录态（可选）。走请求头不走 query —— 凭证不该进日志和浏览器历史
+      headers: auth.authHeaders(),
+      signal,
+    }),
 })
 
 const player = useMusicPlayerController({ resolve: gate.resolveTrack })
 provide(MUSIC_PLAYER_KEY, player)
 
-const { urlInput, playDirectUrl, setQueue, current, isResolving, errorMessage, errorKind, mount, unmount } = player
+const {
+  urlInput, playDirectUrl, setQueue, current, isResolving, errorMessage, errorKind,
+  downloadTrack, showDownloads, showFavorites, mount, unmount,
+} = player
+
+// 收藏是页面级能力，不经过播放器上下文（播放器不该认识「收藏」这回事）
+const { favoriteKeys, toggleFavorite } = useMusicFavorites()
 
 // ── 搜索 ──
 const { keyword, states, searching, emptyResult, search, loadMore, retry } = useMusicSearch()
@@ -53,6 +66,19 @@ const onLoadMore = () => {
   for (const s of MUSIC_SOURCES) loadMore(s.id)
 }
 
+const onFavorite = (row: MusicSearchRow) => {
+  toggleFavorite(rowToTrack(row))
+}
+
+/**
+ * 下载。走的是同一个取址闸门，所以点了不一定立刻开始 —— 面板里有排队状态。
+ * 下载默认用第一个音质档；用户要另一个档就先播那个档再下（播过之后 locator 记住了）。
+ */
+const onDownload = (row: MusicSearchRow, tier: DetailPrefix) => {
+  downloadTrack(rowToTrack(row, tier))
+  showDownloads.value = true
+}
+
 /**
  * 取址失败时把闸门的措辞接过来。
  * 引擎那句是通用文案，闸门这句知道「最近连续失败了几次」，能判断该偏向
@@ -63,6 +89,9 @@ watch(errorKind, (k) => {
 })
 
 const searchBar = ref<{ submit: (kw?: string) => void }>()
+
+// 登录态输入框。用 password 类型，凭证不该明文躺在屏幕上
+const cookieInput = ref(auth.cookie.value)
 
 onMounted(mount)
 onBeforeUnmount(unmount)
@@ -80,14 +109,32 @@ onBeforeUnmount(unmount)
 
     <MusicSearchBar ref="searchBar" :searching="searching" @search="search" />
 
-    <!-- 限流提示常驻：toast 会消失，而这个状态要持续好几分钟 -->
+    <!--
+      这两个提示常驻（toast 会消失，而这两个状态要持续很久），且必须分开写：
+      配额用完是「今天到此为止」，限速是「等几分钟」，出路完全不同，
+      混成一句「暂时不可用」等于什么都没说。
+    -->
     <UAlert
-      v-if="gate.rateLimited.value"
+      v-if="gate.quotaExhausted.value"
+      icon="i-heroicons-clock"
+      color="orange"
+      variant="soft"
+      title="音乐站今日配额已用完"
+      :actions="[{ label: '去 24bit.net 登录', color: 'orange', variant: 'ghost', to: 'https://www.24bit.net/login', target: '_blank' }]"
+    >
+      <template #description>
+        该站对<strong>匿名访问按天限量</strong>，明天会自动恢复。登录后可继续使用。
+        搜索不受影响，仍然可以先把歌找出来收藏起来。
+      </template>
+    </UAlert>
+
+    <UAlert
+      v-else-if="gate.rateLimited.value"
       icon="i-heroicons-hand-raised"
       color="amber"
       variant="soft"
-      title="可能被站点限流了"
-      description="连续几首都取不到播放地址。等几分钟再试，期间搜索仍然可用。"
+      title="连续几首都取不到地址"
+      description="可能是站点在限速，等几分钟再试。搜索仍然可用。"
     />
 
     <MusicResultList
@@ -96,10 +143,18 @@ onBeforeUnmount(unmount)
       :empty-result="emptyResult"
       :resolving-key="resolvingKey"
       :current-key="currentKey"
+      :favorite-keys="favoriteKeys"
       @play="onPlay"
+      @download="onDownload"
+      @favorite="onFavorite"
       @load-more="onLoadMore"
       @retry="retry"
     />
+
+    <!-- 三个面板都由播放条上的按钮开合，放在这里而不是浮层：长列表浮起来会盖住播放条本身 -->
+    <MusicQueuePanel v-if="showQueue" />
+    <MusicFavoritesPanel v-if="showFavorites" />
+    <MusicDownloadPanel v-if="showDownloads" />
 
     <!--
       直链框收进折叠区：它是「播放器不绑定任何站点」的实证（也是排查入口），
@@ -126,6 +181,7 @@ onBeforeUnmount(unmount)
         任何浏览器能解的音频地址都能播，与上面的搜索无关。
       </p>
     </details>
+
   </div>
 
   <MusicPlayerBar />
