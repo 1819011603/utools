@@ -30,8 +30,10 @@ HEADERS = {
 
 CONNECT_TIMEOUT = 5
 READ_TIMEOUT = 6
-PROBE_WORKERS = 60             # 探测阶段是纯网络等待，线程可以开多一些
-STRESS_WORKERS = 8             # 连续请求阶段，多个可用代理并行测，但每个代理内部仍是串行
+# 同一瞬间对几十个陌生 IP 建连，会把家用路由器的连接跟踪表/带宽打满，
+# 表现为「整台机器网络都卡」——踩过一次坑，并发必须压低，宁可跑得慢一点。
+PROBE_WORKERS = 10
+STRESS_WORKERS = 3             # 连续请求阶段，多个可用代理并行测，但每个代理内部仍是串行
 MAX_SEQUENTIAL_REQUESTS = 20   # 每个可用代理最多连续打多少次
 REQUEST_INTERVAL = 0.3         # 单个代理内，连续请求之间的间隔
 MAX_PROXIES_TO_LOAD = None     # None = 不截断，全量测试
