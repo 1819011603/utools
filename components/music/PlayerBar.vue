@@ -26,12 +26,38 @@ const curFavorited = computed(() => !!current.value && isFavorite(current.value.
  * 歌词由播放条**统一驱动一处**：它常驻，而歌词面板收起来时组件根本不存在
  * （`v-if="showLyrics"`），驱动放在面板里的话，面板一收播放条那行滚动歌词就再也不更新了。
  * 状态是模块级单例，面板拿到的是同一份，所以那边只读不取。
+ *
  * 只认 `key` 变化——同一首回填元数据（音质、体积）时不该重查一遍。
  */
 const { fetchFor: fetchLyrics } = useMusicLyrics()
 watch(() => current.value?.key, () => {
   if (current.value) void fetchLyrics(current.value)
 }, { immediate: true })
+
+/**
+ * 取址结束后，如果这一首**自己带了歌词**，再取一次让它顶掉在线查询的结果。
+ *
+ * ## 为什么少了这一下就会显示错的歌词
+ *
+ * `useMusicEngine.load()` 是先 `current.value = track`、**再**去取址的，而有的音乐源
+ * （fangpi）的歌词是取址那一趟顺带带回来的。所以上面那个 watch 跑的时候 `track.lrc`
+ * 还是空的 → `fetchFor` 落到第 ④ 步在线查询 → 拿回**另一首同名歌**的歌词就存下来了。
+ * 实测搜「枫」播周杰伦那首，界面上显示的是夏蔓蔓那首的词，还标着「这份歌词没有时间轴」。
+ * 而真歌词到位时 `key` 没变，上面那个 watch 不会再跑，那份错的就一直用下去（还进了缓存）。
+ *
+ * **判据用 `isResolving` 的下降沿，不用 `current.lrc`**：引擎回填元数据走的是
+ * `Object.assign(track, …)`，改的是那个对象本身，watch 一个 `current.value?.lrc`
+ * 的 getter **不一定会被触发**（播放条本来就因为 `currentTime` 每秒重渲染好几次，
+ * 所以画面上看着是新值，但依赖没被收集）。`isResolving` 是引擎自己的 ref，一定可靠。
+ *
+ * 再加上 `current.lrc` 非空这个条件，就只有真带歌词的源会多跑这一次
+ * （24bit 两个源的 `lrc` 恒空，一次都不会多跑），而多跑的这次是纯本地的
+ * ——第 ② 步当场命中，不发请求，还顺带用 `seq` 把在线那轮作废掉
+ * （它在写缓存**之前**判 seq，所以错的那份连缓存都进不去）。
+ */
+watch(isResolving, (now, was) => {
+  if (was && !now && current.value?.lrc) void fetchLyrics(current.value)
+})
 
 /** 收藏/下载当前这首。直链播放的曲目没有 resolver，收藏了下次也取不回来，所以不给收藏 */
 const canCollect = computed(() => !!current.value?.resolver)

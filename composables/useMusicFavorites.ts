@@ -13,6 +13,9 @@
  */
 import type { Track } from '~/composables/musicPlayer/types'
 import { toStorableTrack } from '~/composables/musicPlayer/types'
+// 云同步的记事本。**取消收藏必须记墓碑**，否则另一台设备下次同步会把它推回来
+// （表现是「取消收藏之后它自己回来了」，且只在多设备时发作）
+import { markDirty, recordClear, recordDelete } from './cloudSyncLocal'
 
 const KEY = 'music-favorites'
 /** 上限：500 首足够，超了淘汰最早收藏的（同 useWatchHistory 的 MAX_SHOWS 思路） */
@@ -54,6 +57,17 @@ const sortDesc = (list: FavoriteTrack[]) => list.sort((a, b) => b.at - a.at)
 const commit = (list: FavoriteTrack[]) => {
   favorites.value = sortDesc(list)
   write(favorites.value)
+  markDirty('music-fav')
+}
+
+/**
+ * 从 localStorage 重读一遍。给云同步用：引擎合并完是直接写 localStorage 的，
+ * 上面那个模块级 ref 不会知道，不重读的话「另一台设备收的歌要刷新页面才出现」。
+ */
+export function reloadFavorites(): void {
+  if (typeof window === 'undefined') return
+  loaded = true
+  favorites.value = sortDesc(read())
 }
 
 export function useMusicFavorites() {
@@ -78,6 +92,7 @@ export function useMusicFavorites() {
 
   const removeFavorite = (key: string) => {
     if (!key) return
+    recordDelete('music-fav', key)
     commit(favorites.value.filter(t => t.key !== key))
   }
 
@@ -89,7 +104,11 @@ export function useMusicFavorites() {
     return true
   }
 
-  const clearFavorites = () => commit([])
+  const clearFavorites = () => {
+    // 记一个「清空时间」而不是给几百条各发一个墓碑：语义一样，只占一个数字
+    recordClear('music-fav')
+    commit([])
+  }
 
   /**
    * 把已收藏那条的元数据刷成更全的一份（封面、音质、格式、体积）。**已在收藏里才更新，绝不新增**

@@ -252,6 +252,10 @@ const { addToHistory, getHistory, clearHistory } = useHistory<{ kw: string }>('v
 const kwHistory = ref(getHistory())
 const clearKwHistory = () => { clearHistory(); kwHistory.value = [] }
 
+// 这个 ref 是打开页面那一刻的快照，而云同步是直接写 localStorage 的
+// ——不重读的话「另一台设备搜过的词」要刷新页面才出现
+onBeforeUnmount(onSyncApplied('video-search', () => { kwHistory.value = getHistory() }))
+
 const run = (kw = input.value) => {
   const q = kw.trim()
   if (!q) return

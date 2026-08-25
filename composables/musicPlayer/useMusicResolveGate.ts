@@ -40,6 +40,28 @@ function statusOf(e: unknown): number | undefined {
   return err?.statusCode ?? err?.status ?? err?.response?.status
 }
 
+/**
+ * 取服务端写的那句话。**它比我们在前端编的准得多**：
+ * 服务端看得到站点原样的 `msg`（「今日访问已达限额」「请完成人机验证后继续」是两回事，
+ * 状态码却都是 429），而前端只知道「这个站停了」。
+ * ofetch 把 h3 的 `statusMessage` 塞在 `data` 里，几种形状都认一遍，少认一种就退回泛泛的措辞。
+ */
+function messageOf(e: unknown): string {
+  const err = e as {
+    statusMessage?: string
+    data?: { statusMessage?: string; message?: string }
+    response?: { _data?: { statusMessage?: string; message?: string } }
+  }
+  return (
+    err?.data?.statusMessage
+    ?? err?.data?.message
+    ?? err?.response?._data?.statusMessage
+    ?? err?.response?._data?.message
+    ?? err?.statusMessage
+    ?? ''
+  ).trim()
+}
+
 export interface ResolveGateOptions {
   /** 这个站点按什么顺序试档位。**第一个是默认档** */
   tiersOf: (site: string) => readonly string[]
@@ -74,6 +96,14 @@ export function useMusicResolveGate(options: ResolveGateOptions) {
    * 万一他刚去站点登录了呢。
    */
   const quotaOut = ref<Record<string, boolean>>({})
+  /**
+   * 停手的**理由原文**（服务端写的那句），按站点存。
+   *
+   * 只有 `quotaOut` 这个标志位是不够的：429 只表示「别再打了」，
+   * 而 24bit 的 429 是「今天的配额用完了，明天见」、fangpi 的 429 是「去过一次人机验证」——
+   * 出路完全不同，摆一句「今日配额已用完」在 fangpi 上纯属误导（它压根没有配额这回事）。
+   */
+  const stopReason = ref<Record<string, string>>({})
 
   const streakOf = (site: string) => failStreaks.value[site] ?? 0
   const intervalOf = (site: string) =>
@@ -137,7 +167,7 @@ export function useMusicResolveGate(options: ResolveGateOptions) {
 
     // 配额没了就别再发请求了。放在最前面，连排队都不排
     const quotaHint = options.quotaHintOf(site)
-    if (isQuotaOut(site)) throw new Error(quotaHint || '这个音乐源今日配额已用完')
+    if (isQuotaOut(site)) throw new Error(stopReason.value[site] || quotaHint || '这个音乐源今日配额已用完')
 
     const hit = inflight.get(track.key)
     if (hit) return hit
@@ -176,7 +206,9 @@ export function useMusicResolveGate(options: ResolveGateOptions) {
            */
           if (statusOf(e) === 429) {
             quotaOut.value[site] = true
-            throw new Error(quotaHint || '这个音乐源今日配额已用完')
+            // 服务端那句最准（配额用完 / 要人机验证 / 别的停手理由，429 只说了「停」没说「为什么」）
+            stopReason.value[site] = messageOf(e) || quotaHint || '这个音乐源今日配额已用完'
+            throw new Error(stopReason.value[site])
           }
 
           // 超时不算「站点在拒我们」，不推高退避
@@ -201,7 +233,7 @@ export function useMusicResolveGate(options: ResolveGateOptions) {
     const who = name ? `《${name}》` : '这首歌'
     if (!site) return `${who}暂时取不到播放地址`
 
-    if (isQuotaOut(site)) return options.quotaHintOf(site) || '这个音乐源今日配额已用完'
+    if (isQuotaOut(site)) return stopReason.value[site] || options.quotaHintOf(site) || '这个音乐源今日配额已用完'
     if (isRateLimited(site)) return '连续几首都取不到地址，可能是站点在限速 —— 等几分钟再试。'
 
     /*
@@ -217,12 +249,13 @@ export function useMusicResolveGate(options: ResolveGateOptions) {
    * 用户主动重试时清掉退避 —— 否则他点了也得干等好几秒，看着像没反应。
    * 顺带清掉配额标记：用户可能刚去站点登录过，值得再给一次机会（错了也只是一发请求）。
    */
-  const resetBackoff = () => { failStreaks.value = {}; quotaOut.value = {} }
+  const resetBackoff = () => { failStreaks.value = {}; quotaOut.value = {}; stopReason.value = {} }
 
   return {
     resolveTrack,
     isRateLimited,
     isQuotaOut,
+    stopReason,
     troubledSites,
     failureMessage,
     resetBackoff,

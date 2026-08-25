@@ -27,9 +27,21 @@
 import { parseLrc } from './lrc'
 
 const MANUAL_KEY = 'music-lyrics-manual'
-const CACHE_KEY = 'music-lyrics-cache'
-/** 查询结果的有效期。歌词本身不变，但「查不到」的结论值得过一阵子再试一次（上游会补录） */
-const CACHE_TTL = 7 * 24 * 60 * 60 * 1000
+/**
+ * ⚠️ **键名带版本号，换查询实现时必须跟着 +1。**
+ *
+ * `v1` 那批缓存是在「网易云老接口已经回垃圾」期间攒下的，里面**几乎全是空结果**，
+ * 而空结果一样占着 7 天有效期 —— 服务端修好了，老用户还得盯着「暂无歌词」等一周，
+ * 且这种「代码明明改对了却没效果」最难归因。换个键 = 那批结论当场作废。
+ */
+const CACHE_KEY = 'music-lyrics-cache-v2'
+/** 查到的词的有效期。歌词本身不会变，存久一点纯赚 */
+const CACHE_TTL = 30 * 24 * 60 * 60 * 1000
+/**
+ * 「查不到」的有效期短得多：上游会补录、我们这边的匹配策略也会改，
+ * 拿一个月前的「没有」当结论，等于把每一次改进都推迟一个月才生效。
+ */
+const MISS_TTL = 12 * 60 * 60 * 1000
 /** 缓存条数上限。一条几 KB，几百条也才一两 MB */
 const MAX_ENTRIES = 300
 
@@ -37,6 +49,12 @@ interface LyricsEntry {
   lrc: string
   /** 匹配到的来源，界面上要标出来让用户判断可信度（下架歌常匹配到翻唱版） */
   from?: { name: string; artist: string }
+  /**
+   * 这条结论是**在知道时长是多少的情况下**得出的（0 = 当时还不知道）。
+   * 只对「没查到」有意义：时长是匹配里最硬的判据，起播前查空过一次、
+   * 播起来知道时长了就值得再查一次，而不是抱着那次「没有」等 12 小时。
+   */
+  d?: number
   at: number
 }
 
@@ -90,7 +108,7 @@ export function useMusicLyrics() {
    * 取这首歌的词。**永远不抛错**：歌词是附加信息，查失败只该表现为「没有词」，
    * 绝不能让播放界面弹出一个错误。
    */
-  const fetchFor = async (track: { key: string; name: string; artist?: string; lrc?: string }) => {
+  const fetchFor = async (track: { key: string; name: string; artist?: string; lrc?: string; duration?: number }) => {
     const mine = ++seq
     lyrics.value = ''
     source.value = null
@@ -111,10 +129,10 @@ export function useMusicLyrics() {
       return
     }
 
-    // ③ 查缓存（含「查不到」的空结果，避免每次播到都白等一次往返）
+    // ③ 查缓存（含「查不到」的空结果，避免每次播到都白等一次往返；空结果的有效期短得多）
     const cache = readMap<LyricsEntry>(CACHE_KEY)
     const hit = cache[track.key]
-    if (hit && Date.now() - hit.at < CACHE_TTL) {
+    if (hit && Date.now() - hit.at < (hit.lrc ? CACHE_TTL : MISS_TTL)) {
       lyrics.value = hit.lrc
       source.value = hit.from ?? null
       return
@@ -125,7 +143,18 @@ export function useMusicLyrics() {
     try {
       const res = await $fetch<{ lrc?: string; matched?: { name: string; artist: string } | null }>(
         '/api/music/lyrics',
-        { query: { name: track.name, artist: track.artist || '' } },
+        {
+          query: {
+            name: track.name,
+            artist: track.artist || '',
+            /*
+             * 时长能带就带：同名翻唱一大片时，「和这个文件一样长」是最硬的判据
+             * （服务端拿它加权，见 lyrics.ts 的 scoreOf）。
+             * 播过之后 `loadedmetadata` 会回填它，fangpi 更是取址时就给了。
+             */
+            duration: track.duration ? Math.round(track.duration) : '',
+          },
+        },
       )
       if (mine !== seq) return                      // 已经切歌了，这轮结果作废
 

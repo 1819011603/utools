@@ -31,7 +31,7 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
 ```
 
 工具：`/pdf-tools` · `/image-compress` · `/image-convert` · `/video-to-gif` · `/audio-convert` · `/video-player` ·
-`/video-parse` · `/video-search` · `/json-format` · `/json-diff` · `/json-extract` · `/content-diff` · `/timestamp`
+`/video-parse` · `/video-search` · `/music` · `/json-format` · `/json-diff` · `/json-extract` · `/content-diff` · `/timestamp`
 
 ## 视频播放器
 
@@ -361,6 +361,69 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
   唯一出路是整个摘掉属性 →「限制广告」开关（**默认关**，iframe 的 `:key` **必须带上它**，sandbox 是文档创建时定死的）。
   追这类问题别猜 flag：**拉下 bundle 搜 `Sandbox`**
 
+## 音乐（/music）
+
+单页 + 底部常驻播放条；**收藏在左侧常驻栏、队列在右侧抽屉**（网易云那套分工），
+歌词和下载留在页面流里（一个是要整段读的长文、一个是要盯进度的任务，都不是「看一眼就关」）。
+
+**分层**：`composables/musicPlayer/` 播放器**一个站点都不认识**（只认 `Track`）·
+`composables/musicSites/` 一站一份描述符 · `pages/music.vue` 只做装配。
+**接新站 = 加一份描述符（`sources`/`tiers`/`pageSize`/`search`/`resolve`）+ 两个服务端接口**，
+共享层里**一句 `if (site === 'xxx')` 都不该有**。搜索结果做成**横向页签**（页签上直接写条数，
+不点也知道另一个源有没有货），不混排——两个源音质差一档，那正是用户要拿来做选择的东西。
+
+- **取址路由只看 `Track.resolver`**（值就是站点 id），`locator` 里**故意不放 site**：
+  `resolver` 本来就是干这个的，而存量收藏里躺着的正是 `'24bit'` → 老数据天然是对的、零迁移
+- **配额/退避/连续失败数一律按站点分开记**（`useMusicResolveGate` 里的 `Map`）：
+  24bit 配额用完不该把没有配额概念的源也一起判死
+- **播放和下载的限制完全不对称，别用一个判断糊住两件事**（`useMusicMediaUrl`）：
+  `<audio>` 不受 CORS 约束 → **播放直连**；`fetch` 带 `Range` 会触发预检、CDN 不放行 →
+  **下载默认走 `/api/proxy`**，按 host 探一次并**持久化**结论（探测那一发必然在控制台留一条红色 CORS 报错，
+  不存就每次刷新都留一条，看着像坏了）
+- **搜索泳道收尾的判据是「我还是当前那一轮吗」，不是「我被中止了吗」**（`useMusicSearch` 的 `isCurrent()`）：
+  中止有两种来路——被更新的一轮取代（那轮会自己收尾，这轮该闷声退场）、或自己超时/卸载（**没有后继**，
+  必须自己把 status 收掉）。混成一个判断，后者就永久停在 `'searching'` →
+  「加载更多」那颗按钮 `:loading` 恒真、还因 loading 自带 disabled 而点不动，**转圈转到天荒地老**。
+  配套：**搜索必须有超时**（`$fetch` 默认永不超时，而 24bit 那两条泳道实测会有一条挂住不返回），
+  超时要落成「报错 + 可重试」而不是继续转圈。
+  另外**一条泳道挂了不等于整段 failed**（另一条还有结果），那种情况要单独把话说出来，否则是静默失败
+- **歌词三来源**：手动贴 > 曲目自带 > 在线查网易云。**取址回填 `lrc` 之后必须再取一次**
+  （`PlayerBar` 里听 `isResolving` 的**下降沿**）：`load()` 是先 `current.value = track` 再取址的，
+  只听 `key` 的话第一发在 `lrc` 还空时就跑完了 → 落到在线查询 → 拿回**另一首同名歌**的词存进缓存
+  （实测搜「枫」播周杰伦那首，显示的是夏蔓蔓那首、还标着「没有时间轴」）。
+  **判据不能用 `current.value?.lrc`**：引擎回填走 `Object.assign(track, …)`，依赖收集不到
+  （播放条本来就因 `currentTime` 每秒重渲染几次，所以画面上是新值、watch 却没触发）
+
+### 24bit.net
+
+- **两个搜索源不是两个音质档的映射**（一开始就是这么猜错的）：`one`/`two` 是两个不同的**库**，
+  `b`/`c` 是详情页的两个**音源**（`b` 酷我无损 20–52MB、`c` 网易云环绕声 45–115MB）。默认先 `b`
+- **不预先探测「这首有哪些档可用」**：一页 30 首 × 2 档 = 60 发，必被限流，而**限流是静默的**
+  （照常回 200、只是不再吐 `itemMusic`）→ 「这首没资源」和「你被限流了」在响应上完全无法区分
+- **按天按 IP 限配额**，耗尽时也是 200，只有正文里那句「今日访问已达限额」能认（`isQuotaExhausted`）→ 回 429 让前端当场停手
+- 搜索也得走服务端：站点给了 `ACAO: *` 且预检过，但从我们页面跨域发就是 `net::ERR_FAILED`
+  （连 `no-cors` 的 GET 都 `ERR_BLOCKED_BY_RESPONSE.NotSameOrigin`），拦截在站点侧
+
+### fangpi.net（放屁音乐网）
+
+只有一档 128K MP3，但**不要 cookie、没发现配额、而且自带歌词**——24bit 撞配额时它照常能用。
+
+- **CF 按客户端指纹拦人**：curl 和 **Node 的 `fetch`（undici）都过**，Python urllib 恒 403；
+  **经 `HTTPS_PROXY` 的出口恒 403**（`Just a moment`）→ 靠 `musicFetch`「代理在前、撞墙退直连」自愈
+- **搜索页没有分页**：`?page=2` 回的还是第一页原文，结果一次给全 → 描述符里 `pageSize: 0`，
+  界面上一个「加载更多」都不画（按了没反应比没有更让人以为坏了）
+- **取址是两跳，绕不开**：`/music/<id>` 抠 `window.appData.play_id`（Laravel `encrypt()` 的产物，
+  **我们生成不了**）→ `POST /member/common-play-url`。顺路白捡封面、时长、歌词
+- **地址同一首恒定**（同 `play_id` 两次调用回同一条），实测超过路径里那个 hex 时间戳 23 分钟仍回 206
+  → 值得缓存，且 `parseExpiry` 认不出 8 位 hex、自动退回保守的 15 分钟正合适
+- ⚠️ **歌词只在 `lrc_is_empty === false` 时才能往外给**：没词时 `#content-lrc` 里不是空的，
+  而是 `[ti:…][ar:…][al:…][00:00.00]该歌曲暂无歌词` 这份占位。它够长，会被
+  `useMusicLyrics` 第 ② 步当真收下、**把第 ③ 步的在线查询整个跳过**
+- **封面站点给的是 `http://`**，页面是 https → 混合内容会被拦。图床 https 完全正常，服务端直接换掉；
+  否则每张封面都要白绕一趟 `/api/thumb`
+- CDN（`kw-*.kuwo.cn`，**和 24bit `b` 档同一个 host**）**没有 `ACAO`**：能播不能 fetch，下载必走代理
+- **合集 `/topic/` 不做**（那条路上挂着 CF 人机校验）
+
 ## 状态持久化（localStorage）
 
 `video-player-state` · `video-probe-dead-direct`（按 host 记「直连是黑洞」）· `video-player-learned-profiles` ·
@@ -368,9 +431,67 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
 `-embed-sandbox` / `video-parse-last-result`（1 小时）· `video-watch-history`（**看到第几集**，按剧名存）·
 `video-show-prefs`（**倍速与片头片尾**，按剧名存）· 各页 `*-settings` · `utools-history-<page>`。
 
+音乐那侧：`music-player-state`（队列存**剥掉 url 的占位**）· `music-favorites` ·
+`music-lyrics-manual` / `music-lyrics-cache`（含「查不到」的空结果，7 天）·
+`music-cdn-direct-ok`（按 host 记「跨域 fetch 能不能用」，**只对下载有意义**）·
+`music-24bit-cookie`（用户自填的登录态，**只存本机、只透传**）。
+整首音频不在这儿——那是 IndexedDB（`useMusicAudioCache`，滑动 TTL 30 天 + 1GB + LRU）。
+
+同步账号那侧：`cloud-sync-token` / `cloud-sync-user`（令牌与用户名）· `cloud-sync-meta`（见下）。
+
 **「永久保存」= `navigator.storage.persist()`，不是「localStorage 没有 TTL」**：没授权时 Chrome/Edge 会按 LRU
 **整个 origin 一起驱逐**，Safari（ITP）**7 天不访问就删**且不支持 `persist()`（只能如实标出来）。先 `persisted()`
 再 `persist()`（已授权还去调会在 Firefox 白弹一次窗）；**请求时机必须挂在「真的写下了一条」之后**，绝不在页面加载时请求。
+
+## 账号与云同步（Cloudflare D1）
+
+登录后把 **5 份清单**同步到 D1，换设备接着看：`video-watch-history`（追剧进度）·
+`utools-history-video-search` / `-music-search`（两处搜索历史）· `music-favorites` · `video-show-prefs`。
+**一律只同步「清单信息」**：播放地址带时效签名（存下来必是死链且失败静默）、`music-24bit-cookie`
+是第三方站凭证（`useMusic24bitAuth.ts` 承诺过只存本机），两样都不上传；视频解析历史（2000 条）也不收。
+
+`server/api/user/{register,login,salt,quota,sync}` · 存储层 `server/utils/userStore.ts` ·
+令牌 `server/utils/authToken.ts` · 前端 `useUserAuth` / `useCloudSync` / `cloudSyncSpec`（清单表）/
+`cloudSyncMerge`（纯合并规则）/ `cloudSyncLocal`（本机账本）· UI `components/user/Auth{Button,Modal}.vue`
+（挂在 `layouts/default.vue`，**弹窗挂布局根上**——`/video-search` 不出 header，嵌在按钮里会一起没）。
+
+- **口令拉伸必须放前端**（`PBKDF2` 12 万次，服务端只做一次 SHA-256）：**CF 免费版每请求只有 10ms CPU**，
+  服务端跑不动 —— 同 PoW 那条。代价是登录要等一秒多，**按钮必须有 loading**，否则会被连点。
+  `crypto.subtle` 只在安全上下文有，**局域网 IP 的 http 打开时它是 undefined**，要说清而不是抛
+  「Cannot read properties of undefined」
+- **`/api/user/salt` 对不存在的用户名要回一个假盐**（`HMAC(secret, 用户名)`，**必须确定性**，随机的话
+  连问两次就露馅），否则它就是个免费的用户名枚举器。同理「用户名不存在」与「口令不对」回同一句话
+- **名额上限 5 个（`MAX_USERS`），判断必须和 INSERT 同一条语句**
+  （`WHERE (SELECT COUNT(*) FROM users) < ?` + `OR IGNORE`）：先查再插的话两个人同时注册会双双通过
+- **payload 一律走 `.bind()`，绝不拼进 SQL**：D1 单条语句上限 100KB，而字符串/行上限是 2MB
+  ——拼进去几十 KB 的收藏夹就顶到语句上限，绑定参数不计入语句长度。另外**一个清单一行**
+  （不是一个用户一个大 blob）：单行小、只推脏的那几份、两台设备改不同清单时不会互相撞 rev
+- **删除必须有墓碑**（`tomb` / `clearedAt` 跟着 payload 一起上传）：只做并集的话删除永远传不出去，
+  「A 取消收藏 → B 下次同步又推回来」，而且**只在多设备时发作**，本机怎么试都是对的。
+  判据是「删除时间 ≥ 条目时间」而不是「存不存在」——删掉之后又重新收藏的那条要留下
+- **合并输出必须是确定性的**（map 按键排序、list 排序有稳定第二关键字）：
+  「跟云端那份一样吗」是靠 `JSON.stringify` 比的，不确定就每 5 分钟白推一次
+- **两道闸**：① **有变更才同步**（`dirty` 空就一个请求都不发，不轮询、回前台也不白拉），
+  唯一例外是**这台设备从没同步过**（`rev` 空）—— 否则「换设备接着看」等于没做；
+  ② **两次之间至少 5 分钟**，落在窗口里的改动只留 `dirty` 标记不发请求。
+  **节流时钟用「上次尝试」不是「上次成功」**：用成功当时钟的话一旦没网，每次改动都会立刻再撞一次。
+  用户手点「立即同步」两道闸都豁免（那是明确意图，而他点它往往正是想拉对方的改动）
+- **`dirty` 必须落 localStorage**：改一下就关标签页是最常见的操作，放内存等于那次改动没记
+- **`video-show-prefs` 的合并只能按 `mt` 不能按 `at`**：`at` 在 `applyShowPrefs` 里也会被刷
+  （那是 LRU 的「最近看过」）→「A 改了倍速、B 只是打开看了一眼这部剧，结果 B 的旧值赢」。
+  配套 `save(s, false)`：只刷 LRU 时间戳那一笔不标脏，否则「打开播放器就同步」
+- **合并结果是直接写 localStorage 的**，持在 ref 里的那些要重读：收藏夹走 `reloadFavorites()`，
+  两处搜索历史走 `onSyncApplied` 事件（它们是 `ref(getHistory())` 的快照，不重读就得刷新页面才看得到）
+- **没有 D1 绑定时线上必须报 503 说清「绑定没配」**，绝不能掉进本地文件兜底那条路
+  ——那会报 `Dynamic require of "node:fs/promises" is not supported`，一句跟真实原因毫无关系的话。
+  同理 `USER_TOKEN_SECRET` 缺失一律 503，**绝不退回硬编码默认值**（那等于令牌可任意伪造，且毫无症状）
+- **本地 `nuxt dev` 没有 D1 绑定** → `userStore` 有一份 `.data/*.json` 的开发兜底（判据是 `process` 存在），
+  没有它账号功能在本地一步都跑不动
+
+**部署四步**（少一步就是线上 503）：`npx wrangler d1 create utools-users` →
+把 `database_id` 填进 `wrangler.json`（**顶层和 `env.preview` 两处都要**）→
+`npx wrangler d1 execute utools-users --remote --file=./server/db/schema.sql`
+（`userStore` 也有懒建表兜底）→ `npx wrangler pages secret put USER_TOKEN_SECRET`。
 
 ## 踩过的坑（通用）
 

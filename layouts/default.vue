@@ -60,6 +60,7 @@
           </nav>
 
           <div class="flex items-center space-x-2">
+            <UserAuthButton />
             <ColorModeButton />
             <UButton
               class="md:hidden"
@@ -76,11 +77,14 @@
       <div class="p-4">
         <div class="flex justify-between items-center mb-6">
           <span class="text-lg font-semibold">工具列表</span>
-          <UButton
-            variant="ghost"
-            icon="i-heroicons-x-mark"
-            @click="mobileMenuOpen = false"
-          />
+          <div class="flex items-center gap-1">
+            <UserAuthButton />
+            <UButton
+              variant="ghost"
+              icon="i-heroicons-x-mark"
+              @click="mobileMenuOpen = false"
+            />
+          </div>
         </div>
         <nav class="space-y-4">
           <div v-for="category in toolCategories" :key="category.name">
@@ -111,6 +115,10 @@
       <slot />
     </main>
 
+    <!-- 挂在布局根上而不是嵌在按钮里：/video-search 那一页不出 header，
+         按钮跟着不渲染，弹窗要是嵌在里面就一起没了 -->
+    <UserAuthModal />
+
     <footer class="border-t border-rose-100/70 dark:border-white/5 mt-auto">
       <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-5">
         <p class="text-center text-gray-400 dark:text-gray-500 text-xs tracking-widest">
@@ -138,6 +146,20 @@ const route = useRoute()
 const mobileMenuOpen = ref(false)
 
 const showHeader = computed(() => route.path !== '/video-search')
+
+/*
+ * 云同步挂在**布局**上而不是某个页面上：清单会在 /music、/video-player、/video-parse、
+ * /video-search 好几处被改到，挂在页面上就得挂四遍，还得想清楚「同时开两个页面」怎么办。
+ *
+ * `restore()` 必须排在 `start()` 之前 —— start 里第一件事就是看有没有令牌。
+ * 引擎自己有「有变更才同步 + 5 分钟节流」两道闸，所以这里无条件调用是安全的：
+ * 没登录、没改动时它一个请求都不发。
+ */
+const { restore } = useUserAuth()
+restore()
+
+const cloudSync = useCloudSync()
+onMounted(() => cloudSync.start())
 
 const toolCategories: Category[] = [
   {

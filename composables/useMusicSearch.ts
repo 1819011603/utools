@@ -50,6 +50,14 @@ export interface MusicSection {
  */
 const memCache = new Map<string, MusicSearchRow[]>()
 
+/**
+ * 单条泳道的搜索超时。
+ *
+ * 服务端那一跳本来就可能慢（`musicFetch` 先试代理、撞 CF 墙再退直连），所以给得比较宽；
+ * 但**必须有个数**：`$fetch` 默认永不超时，一挂就是「加载更多」那颗按钮转圈转到永远。
+ */
+const SEARCH_TIMEOUT_MS = 20000
+
 const laneKey = (site: MusicSiteId, source: string) => `${site}/${source}`
 const cacheKeyOf = (site: MusicSiteId, source: string, kw: string, page: number) =>
   `${site}|${source}|${kw}|${page}`
@@ -129,6 +137,28 @@ export function useMusicSearch() {
     const ctrl = new AbortController()
     aborters.set(lk, ctrl)
 
+    /**
+     * 这一轮还是这条泳道**当前**那一轮吗。
+     *
+     * 收尾时的判据只能是这个，**不能用 `ctrl.signal.aborted`**：那样问的是「我被中止了吗」，
+     * 而中止有两种完全不同的来路 ——
+     *   · 被**更新的一轮**取代（那一轮已经把 status 置成 searching，会自己收尾）→ 这轮该闷声退场
+     *   · 自己**超时**或整页卸载（**没有后继**）→ 这轮必须把 status 收掉
+     * 混成一个判断的后果是后者也闷声退场，`status` 就永久停在 `'searching'`
+     * ——界面上「加载更多」那颗按钮 `:loading` 恒真、转圈转到天荒地老，还因为 loading
+     * 自带 disabled 而点不动，看着就是「一直在加载更多」。
+     */
+    const isCurrent = () => aborters.get(lk) === ctrl
+
+    /*
+     * 搜索必须有超时。`$fetch` 默认**永不超时**，而服务端那一跳可能很久
+     * （`musicFetch` 会先试代理、撞 CF 墙再退直连），24bit 那个域名本身还偶发连不上
+     * （CLAUDE.md：同一请求前一次 200、后一次 ConnectTimeout）。
+     * 没有闹钟的话这条泳道就一直挂着 —— 而「转圈转不停」比「报个错给个重试」难处理得多。
+     */
+    let timedOut = false
+    const timer = setTimeout(() => { timedOut = true; ctrl.abort() }, SEARCH_TIMEOUT_MS)
+
     lane.status = 'searching'
     lane.error = undefined
     if (!append) { lane.rows = []; lane.page = 0; lane.hasMore = false }
@@ -139,6 +169,7 @@ export function useMusicSearch() {
     const ck = cacheKeyOf(lane.site, lane.source, kw, page)
     const cached = memCache.get(ck)
     if (cached) {
+      clearTimeout(timer)
       lane.rows = append ? [...lane.rows, ...cached] : cached
       lane.page = page
       lane.hasMore = moreOf(cached.length)
@@ -148,8 +179,8 @@ export function useMusicSearch() {
 
     try {
       const rows = await site.search(lane.source, kw, page, ctrl.signal)
-      // 这一轮已经被新的搜索取代了 → 结果作废，别覆盖新状态
-      if (ctrl.signal.aborted) return
+      // 已经被更新的一轮取代 → 结果作废，也别碰 status（那一轮会自己收尾）
+      if (!isCurrent()) return
       memCache.set(ck, rows)
       lane.rows = append ? [...lane.rows, ...rows] : rows
       lane.page = page
@@ -158,9 +189,17 @@ export function useMusicSearch() {
       lane.hasMore = moreOf(rows.length)
       lane.status = 'done'
     } catch (e: any) {
-      if (ctrl.signal.aborted || e?.name === 'AbortError') return
+      if (!isCurrent()) return
+      /*
+       * 走到这儿说明**没有后继那一轮**，所以这一轮必须自己把 status 收掉，
+       * 一个 `return` 都不能有 —— 留在 `'searching'` 就是那颗永远转圈的「加载更多」。
+       */
       lane.status = 'error'
-      lane.error = e?.data?.statusMessage || e?.statusMessage || e?.message || '搜索失败'
+      lane.error = timedOut
+        ? `这个音乐源 ${SEARCH_TIMEOUT_MS / 1000}s 没有响应，点重试再试一次`
+        : (e?.data?.statusMessage || e?.statusMessage || e?.message || '搜索失败')
+    } finally {
+      clearTimeout(timer)
     }
   }
 

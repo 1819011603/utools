@@ -1,0 +1,212 @@
+/**
+ * 同步引擎。**一次同步只有一个动作：拉取 → 合并 → 变了才提交。**
+ *
+ * 不做「上传」和「下载」两条路：那样就有两套语义要各自想清楚冲突和删除怎么办，
+ * 而它们其实是同一件事的两半。单向的一条路，两台设备各跑一遍就收敛了。
+ *
+ * ## 两条节流规则（都是刻意的）
+ *
+ * · **有变更才同步**：`dirty` 空着就一个请求都不发。不做定时轮询、回到前台也不白拉一次。
+ *   唯一的例外是**这台设备还从没同步过**（刚登录 / 换了浏览器）——那一次必须拉，
+ *   否则「换设备接着看」这个功能等于没有。
+ * · **两次之间至少 5 分钟**。落在窗口里的改动**不发请求、只留着 `dirty` 标记**：
+ *   数据本来就在 localStorage 里，云端最多滞后 5 分钟，什么都不会丢。
+ *
+ * 节流的时钟用「上次**尝试**」而不是「上次成功」：用成功当时钟的话，一旦出错（比如没网），
+ * 每一次改动都会立刻再撞一次网络，5 分钟内能撞几十下。
+ *
+ * ## 关标签页那一下是尽力而为
+ *
+ * `pagehide` 里发出的请求可能被浏览器掐掉。这里不为它做 `sendBeacon` 那套：
+ * beacon 发不了带鉴权头的 GET，也做不了「拉取→合并」这半段，而代价只是「这次改动等下次再上去」，
+ * 数据在 localStorage 里是安全的。
+ */
+import type { SyncSpec } from './cloudSyncMerge'
+import { emptyItems, isEmptyItems, mergeItems, mergeTomb, parsePayload, sameJson } from './cloudSyncMerge'
+import { SYNC_COLLECTIONS } from './cloudSyncSpec'
+import { notifyApplied, onDirty, patchMeta, readMeta, writeMeta } from './cloudSyncLocal'
+
+const THROTTLE_MS = 5 * 60_000
+/** 连着改好几下（连点几个收藏）只算一次 */
+const DEBOUNCE_MS = 5_000
+
+interface PullRes {
+  user: { uid: string; username: string }
+  store: 'd1' | 'local'
+  colls: Array<{ coll: string; rev: number; payload: string }>
+}
+
+interface PushRes {
+  results: Array<{ coll: string; ok: boolean; rev?: number }>
+}
+
+const syncing = ref(false)
+const lastOkAt = ref(0)
+const syncError = ref('')
+/** 有改动但被 5 分钟窗口挡着。界面上要说出来，否则「点了没反应」 */
+const pendingChanges = ref(false)
+const storeKind = ref<'d1' | 'local' | ''>('')
+
+let started = false
+let debounceTimer: ReturnType<typeof setTimeout> | null = null
+
+const readLocal = (spec: SyncSpec): any => {
+  try {
+    const raw = localStorage.getItem(spec.lsKey)
+    if (!raw) return emptyItems(spec.kind)
+    const v = JSON.parse(raw)
+    if (spec.kind === 'map') return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {}
+    return Array.isArray(v) ? v : []
+  } catch { return emptyItems(spec.kind) }
+}
+
+const writeLocal = (spec: SyncSpec, items: any) => {
+  try { localStorage.setItem(spec.lsKey, JSON.stringify(items)) } catch { /* 配额满了，这一份下次再落 */ }
+}
+
+export function useCloudSync() {
+  const auth = useUserAuth()
+
+  /** 跑一轮。返回 true = 有冲突（外层据此再来一次） */
+  const cycle = async (): Promise<boolean> => {
+    const res = await auth.authFetch<PullRes>('/api/user/sync')
+    storeKind.value = res.store || ''
+    if (res.user) auth.adoptUser(res.user)
+
+    const cloud = new Map(res.colls.map(c => [c.coll, c]))
+    const now = Date.now()
+    const m = readMeta()
+    const pushes: Array<{ coll: string; baseRev: number; payload: string }> = []
+    const applied: SyncSpec[] = []
+    /**
+     * 提交前每一份的脏标记时间。提交那一发是要 await 的，**这中间用户完全可以再收一首歌**
+     * ——那次改动不在这一发的 payload 里，成功回来时无条件清掉脏标记就等于把它咽掉了，
+     * 数据虽然还在 localStorage 里，却要等到下一次改动才有机会上去（可能是几天以后）。
+     * 所以只清「跟提交前一模一样」的那些。
+     */
+    const dirtyAt: Record<string, number | undefined> = {}
+
+    for (const spec of SYNC_COLLECTIONS) {
+      const row = cloud.get(spec.id)
+      const cp = parsePayload(row?.payload, spec.kind)
+      const local = readLocal(spec)
+
+      // 墓碑和「清空」时间两边都要取并集/取大：只认自己那份的话，对方的删除就传不过来
+      const tomb = mergeTomb(m.tomb[spec.id] || {}, cp.tomb, now)
+      const clearedAt = Math.max(m.clearedAt[spec.id] || 0, cp.clearedAt)
+      const merged = mergeItems(spec, local, cp.items, tomb, clearedAt)
+
+      if (!sameJson(merged, local)) {
+        writeLocal(spec, merged)
+        applied.push(spec)
+      }
+      m.tomb[spec.id] = tomb
+      m.clearedAt[spec.id] = clearedAt
+      m.rev[spec.id] = row?.rev ?? 0
+
+      const next = { v: 1 as const, items: merged, tomb, clearedAt }
+      const cloudSide = { v: 1 as const, items: cp.items, tomb: cp.tomb, clearedAt: cp.clearedAt }
+      // 云端压根没有这一份、而本地也确实没东西 → 不要白占一行
+      const trivial = !row && isEmptyItems(spec.kind, merged) && !Object.keys(tomb).length && !clearedAt
+      if (!trivial && !sameJson(next, cloudSide)) {
+        dirtyAt[spec.id] = m.dirty[spec.id]
+        pushes.push({ coll: spec.id, baseRev: row?.rev ?? 0, payload: JSON.stringify(next) })
+      } else {
+        // 这一段整个是同步的，localStorage 不可能在中途变，所以这里清脏标记是安全的
+        delete m.dirty[spec.id]
+      }
+    }
+
+    writeMeta(m)
+    // 落盘之后再通知界面：回调里会去重读 localStorage
+    for (const spec of applied) {
+      try { spec.onApplied?.() } catch { /* 刷新界面失败不该让整轮同步失败 */ }
+      notifyApplied(spec.id)
+    }
+
+    if (!pushes.length) return false
+
+    const pr = await auth.authFetch<PushRes>('/api/user/sync', { method: 'POST', body: { colls: pushes } })
+    let conflict = false
+    const m2 = readMeta()
+    for (const r of pr.results || []) {
+      if (r.ok && typeof r.rev === 'number') {
+        m2.rev[r.coll] = r.rev
+        // 只清「提交期间没再被改过」的那些，见上面 dirtyAt 的注释
+        if (m2.dirty[r.coll] === dirtyAt[r.coll]) delete m2.dirty[r.coll]
+      } else {
+        // 撞了 rev = 别的设备在这中间写过。重新拉一轮再合并就是了
+        conflict = true
+      }
+    }
+    writeMeta(m2)
+    return conflict
+  }
+
+  /**
+   * `force` 只给用户手点的「立即同步」用：那是明确的意图，不是后台轮询，
+   * 不该被 5 分钟窗口挡在外面（「有变更才同步」那道闸对它同样豁免——
+   * 用户点它往往正是因为想把另一台设备的改动拉过来）。
+   */
+  const syncNow = async (opts: { force?: boolean } = {}): Promise<boolean> => {
+    if (typeof window === 'undefined' || !auth.token.value || syncing.value) return false
+
+    const meta = readMeta()
+    const hasDirty = Object.keys(meta.dirty).length > 0
+    const neverSynced = Object.keys(meta.rev).length === 0
+
+    if (!opts.force) {
+      if (!hasDirty && !neverSynced) return false
+      if (Date.now() - meta.lastSyncAt < THROTTLE_MS) {
+        pendingChanges.value = hasDirty
+        return false
+      }
+    }
+
+    syncing.value = true
+    syncError.value = ''
+    // 节流的时钟在**尝试**时就往前走，失败也算（否则出错时会被每一次改动反复撞）
+    patchMeta(m => { m.lastSyncAt = Date.now() })
+    try {
+      if (await cycle()) await cycle()   // 只重试一次：两台设备来回撞的话再多试也是撞
+      const m = patchMeta(x => { x.lastOkAt = Date.now() })
+      lastOkAt.value = m.lastOkAt
+      pendingChanges.value = Object.keys(m.dirty).length > 0
+      return true
+    } catch (e: any) {
+      // 失败时**不清 dirty**：那几份下次还要再试
+      syncError.value = auth.errText(e)
+      pendingChanges.value = true
+      return false
+    } finally {
+      syncing.value = false
+    }
+  }
+
+  const schedule = () => {
+    if (debounceTimer) clearTimeout(debounceTimer)
+    debounceTimer = setTimeout(() => { void syncNow() }, DEBOUNCE_MS)
+  }
+
+  /** 挂在布局上，每个页面都跑（`/video-search` 没有 header，但同步照常） */
+  const start = () => {
+    if (started || typeof window === 'undefined') return
+    started = true
+
+    const m = readMeta()
+    lastOkAt.value = m.lastOkAt || 0
+    pendingChanges.value = Object.keys(m.dirty).length > 0
+
+    onDirty(schedule)
+    // 切走/关页时补一发，但仍受两道闸约束（没改过就不发）
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') void syncNow()
+    })
+    window.addEventListener('pagehide', () => { void syncNow() })
+    // 刚登录的那台设备 rev 是空的，这一发会真的拉；已经同步过又没改动的则原地返回
+    watch(auth.token, t => { if (t) void syncNow({ force: true }) })
+    void syncNow()
+  }
+
+  return { syncing, lastOkAt, syncError, pendingChanges, storeKind, syncNow, start }
+}

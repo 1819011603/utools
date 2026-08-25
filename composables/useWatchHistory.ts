@@ -32,6 +32,9 @@ export interface WatchRecord {
   at: number
 }
 
+// 云同步的记事本（删一部剧要记墓碑，否则另一台设备会把它推回来）
+import { markDirty, recordDelete } from './cloudSyncLocal'
+
 const KEY = 'video-watch-history'
 /** 记录上限：按剧计，200 部足够，超了淘汰最久没看的 */
 const MAX_SHOWS = 200
@@ -58,6 +61,7 @@ const load = (): Store => {
 
 const save = (s: Store) => {
   try { localStorage.setItem(KEY, JSON.stringify(s)) } catch { /* 配额满了就算了，这是锦上添花的数据 */ }
+  markDirty('video-watch')
 }
 
 export function useWatchHistory() {
@@ -91,9 +95,14 @@ export function useWatchHistory() {
 
   const forgetWatch = (q: { title?: string; pageUrl?: string }) => {
     const s = load()
-    delete s[showKeyOf(q)]
+    const k = showKeyOf(q)
+    delete s[k]
+    if (k) recordDelete('video-watch', k)
     // 两种键都清：同一部剧可能先以地址记过（那次没解析出剧名），后来才有了剧名
-    if (q.pageUrl) delete s['u:' + q.pageUrl]
+    if (q.pageUrl) {
+      delete s['u:' + q.pageUrl]
+      recordDelete('video-watch', 'u:' + q.pageUrl)
+    }
     save(s)
   }
 

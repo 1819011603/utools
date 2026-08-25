@@ -21,8 +21,11 @@ import type { VideoHandoff } from './useVideoHandoff'
 // 显式 import 不靠自动导入：这把钥匙一旦没接上（unimport 漏掉时 tsc 照样能过）
 // 表现是设置全存到空键上，看着像「随机不生效」
 import { showKeyOf } from '../useWatchHistory'
+import { markDirty, recordDelete } from '../cloudSyncLocal'
 
 const KEY = 'video-show-prefs'
+/** 清单 id，与 `cloudSyncSpec.ts` 里那条对应 */
+const COLL = 'show-prefs'
 /** 与续看历史同一个量级：200 部够用，超了淘汰最久没看的 */
 const MAX_SHOWS = 200
 
@@ -35,6 +38,12 @@ export interface ShowPrefs {
   turboRate?: boolean
   /** 最后一次用到这条记录的时间，只用来做 LRU 淘汰 */
   at: number
+  /**
+   * 最后一次**真的改过设置**的时间。云同步的先后判断只能看它，不能看 `at`：
+   * `at` 在 `applyShowPrefs` 里也会被刷（那是「最近看过」），拿它做判断就会出现
+   * 「A 上改了倍速、B 上只是打开看了一眼这部剧，结果 B 的旧值赢」。旧记录没有这个字段，退回 `at`。
+   */
+  mt?: number
 }
 
 type Store = Record<string, ShowPrefs>
@@ -44,8 +53,13 @@ const load = (): Store => {
   try { return JSON.parse(localStorage.getItem(KEY) || '{}') as Store } catch { return {} }
 }
 
-const save = (s: Store) => {
+/**
+ * `dirty = false` 是给「只是刷了一下 LRU 时间戳」那种写盘用的：
+ * 那不是用户改了设置，标脏会让「有变更才同步」变成「打开播放器就同步」。
+ */
+const save = (s: Store, dirty = true) => {
   try { localStorage.setItem(KEY, JSON.stringify(s)) } catch { /* 配额满了就算了，这是锦上添花的数据 */ }
+  if (dirty) markDirty(COLL)
 }
 
 export interface ShowPrefsDeps {
@@ -105,9 +119,9 @@ export function useShowPrefs(deps: ShowPrefsDeps) {
     if (rec.skipOutro !== undefined) skipOutro.value = rec.skipOutro
     if (rec.autoBestRate !== undefined) autoBestRate.value = rec.autoBestRate
     if (rec.turboRate !== undefined) turboRate.value = rec.turboRate
-    // 用到了就算「最近看过」，LRU 才淘汰得对
+    // 用到了就算「最近看过」，LRU 才淘汰得对。这一笔不算「改过设置」，所以不标脏
     s[key] = { ...rec, at: Date.now() }
-    save(s)
+    save(s, false)
   }
 
   watch(showKey, () => applyShowPrefs(), { flush: 'sync' })
@@ -125,7 +139,8 @@ export function useShowPrefs(deps: ShowPrefsDeps) {
     const cur = snapshot()
     const s = load()
     if (sameAsStored(s[key], cur)) return
-    s[key] = { ...cur, at: Date.now() }
+    const now = Date.now()
+    s[key] = { ...cur, at: now, mt: now }
     const keys = Object.keys(s)
     if (keys.length > MAX_SHOWS) {
       keys.sort((a, b) => s[a]!.at - s[b]!.at)
@@ -144,6 +159,7 @@ export function useShowPrefs(deps: ShowPrefsDeps) {
     if (!key) return
     const s = load()
     delete s[key]
+    recordDelete(COLL, key)
     save(s)
     hasShowPrefs.value = false
   }

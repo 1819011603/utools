@@ -44,7 +44,9 @@ export const siteById = (id?: string): MusicSite | undefined =>
   MUSIC_SITES.find(s => s.id === id)
 
 /**
- * 注册表。**顺序决定界面上分区的先后**，所以音质好的放前面
- * （用户先看到无损那一段，配额用完了再往下看 MP3 那段）。
+ * 注册表。**顺序决定界面上分区的先后**，排序按的是**「点下去多半能播」而不是音质**：
+ * 24bit 对匿名访问按天限量（配额一满，整天所有曲目都只回一句 429，音质再好也播不了），
+ * fangpi 没有这回事。把「有资源但可能取不到地址」的那段摆在前面，
+ * 用户点第一排点到的多半是 429，得往下翻才有能播的——先后一换就没这回事了。
  */
-export const MUSIC_SITES: MusicSite[] = [SITE_24BIT, SITE_FANGPI]
+export const MUSIC_SITES: MusicSite[] = [SITE_FANGPI, SITE_24BIT]

@@ -1,3 +1,5 @@
+import { markDirty, recordClear } from './cloudSyncLocal'
+
 const MAX_ITEMS = 50
 const MAX_ITEM_SIZE = 1 * 1024 * 1024
 const MAX_TOTAL_SIZE = 256 * 1024 * 1024
@@ -67,6 +69,13 @@ export interface HistoryOptions {
 export function useHistory<T>(page: string, options: HistoryOptions = {}) {
   const maxItems = options.maxItems ?? MAX_ITEMS
 
+  /**
+   * 只有视频和音乐这两处搜索历史参与云同步（JSON 那几个工具页的历史留在本机）。
+   * 这里刻意**不 import `SYNC_COLLECTIONS`**：那张表里带着合并函数，而这个模块是最底层的存储，
+   * 让它去依赖同步那一整套就成了环。清单 id 与 page 同名，对不上时的表现只是「不同步」，不会出错。
+   */
+  const syncId = (page === 'video-search' || page === 'music-search') ? page : ''
+
   const loadHistory = (): HistoryItem<T>[] => {
     if (typeof window === 'undefined') return []
     try {
@@ -84,6 +93,7 @@ export function useHistory<T>(page: string, options: HistoryOptions = {}) {
     } catch (e) {
       console.error('Save history failed:', e)
     }
+    if (syncId) markDirty(syncId)
   }
 
   /**
@@ -131,7 +141,14 @@ export function useHistory<T>(page: string, options: HistoryOptions = {}) {
 
   const getHistory = (): HistoryItem<T>[] => loadHistory()
 
-  const clearHistory = () => saveHistory([])
+  /**
+   * 清空要记一个「清空时间」，不然它传不出去：另一台设备那份里还有这些词，
+   * 下次同步就整份灌回来 —— 表现是「清空了搜索历史，过一会儿又全回来了」。
+   */
+  const clearHistory = () => {
+    if (syncId) recordClear(syncId)
+    saveHistory([])
+  }
 
   const applyItem = (item: HistoryItem<T>): T => item.data
 

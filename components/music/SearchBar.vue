@@ -18,6 +18,9 @@ const input = ref('')
 const { addToHistory, getHistory, clearHistory } = useHistory<{ kw: string }>('music-search', { maxItems: 200 })
 const history = ref(getHistory())
 
+// 同 video-search：云同步直接写 localStorage，这个快照不重读就得刷新页面才看得到
+onBeforeUnmount(onSyncApplied('music-search', () => { history.value = getHistory() }))
+
 const submit = (kw = input.value) => {
   const q = kw.trim()
   if (!q) return

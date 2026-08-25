@@ -120,10 +120,29 @@ export default defineEventHandler(async (event) => {
 
   const url = json?.data?.url
   if (json?.code !== 1 || !url) {
+    /*
+     * ⚠️ **「要人机验证」和「这首没资源」必须分开报，它们在这一层长得一模一样**
+     * （都是 `code !== 1`，只有 `msg` 不同）。
+     *
+     * 连着取几十首之后站点会开始要人机验证：`{code:2, msg:"请完成人机验证后继续"}`，
+     * 此后**这个 IP 上每一首都是这个结果**。按 404「没资源」报的话，用户会一首首往下试，
+     * 每试一次都在加深站点对我们的判定 —— 而唯一有用的动作是**停手**，
+     * 去站点页面上过一次校验或等一会儿。
+     *
+     * 回 429 就是让闸门当场对这个站点收手（见 useMusicResolveGate 的 429 分支）。
+     */
+    const msg = json?.msg?.trim() || ''
+    if (json?.code === 2 || /人机验证|验证码|安全验证/.test(msg)) {
+      throw createError({
+        statusCode: 429,
+        statusMessage: '放屁音乐网要求人机验证：在浏览器里打开 fangpi.net 随便播一首、过一次校验，'
+          + '或者等几分钟再试。这期间可以先用另一个音乐源。',
+      })
+    }
     // 站点自己的 msg 比我们编的话准，有就用它
     throw createError({
       statusCode: 404,
-      statusMessage: json?.msg?.trim() || '这首歌取不到播放地址',
+      statusMessage: msg || '这首歌取不到播放地址',
     })
   }
 

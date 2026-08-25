@@ -68,7 +68,12 @@ const troubles = computed(() =>
   gate.troubledSites.value
     .map(id => siteById(id))
     .filter((s): s is NonNullable<typeof s> => !!s)
-    .map(site => ({ site, quota: gate.isQuotaOut(site.id) })),
+    .map(site => ({
+      site,
+      quota: gate.isQuotaOut(site.id),
+      // 服务端写的停手理由。429 只说了「停」，为什么停只有它知道
+      reason: gate.stopReason.value[site.id],
+    })),
 )
 
 /**
@@ -137,19 +142,29 @@ onBeforeUnmount(unmount)
         混成一句「暂时不可用」等于什么都没说，还会把另一个照常能用的源一起否掉。
       -->
       <template v-for="t in troubles" :key="t.site.id">
+        <!--
+          「停手」有两种理由，**措辞不能共用一句**：24bit 是每日配额（明天见、登录可续），
+          fangpi 是站点要人机验证（过一次校验或等几分钟就能继续，它压根没有配额这回事）。
+          理由原文由服务端给（`gate.stopReason`），这里只负责摆出来。
+        -->
         <UAlert
           v-if="t.quota"
-          icon="i-heroicons-clock"
+          :icon="t.site.quotaHint ? 'i-heroicons-clock' : 'i-heroicons-shield-exclamation'"
           color="orange"
           variant="soft"
-          :title="`${t.site.name} 今日配额已用完`"
+          :title="t.site.quotaHint ? `${t.site.name} 今日配额已用完` : `${t.site.name} 暂时停手了`"
           :actions="t.site.loginUrl
             ? [{ label: `去 ${t.site.name} 登录`, color: 'orange', variant: 'ghost', to: t.site.loginUrl, target: '_blank' }]
             : []"
         >
           <template #description>
-            该源对<strong>匿名访问按天限量</strong>，明天会自动恢复。
-            搜索不受影响，其他音乐源也照常可用。
+            <template v-if="t.site.quotaHint">
+              该源对<strong>匿名访问按天限量</strong>，明天会自动恢复。
+              搜索不受影响，其他音乐源也照常可用。
+            </template>
+            <template v-else>
+              {{ t.reason || '这个源暂时不肯给地址了，等几分钟再试。搜索不受影响，其他音乐源也照常可用。' }}
+            </template>
           </template>
         </UAlert>
 
@@ -177,10 +192,9 @@ onBeforeUnmount(unmount)
         @retry="(site: MusicSiteId) => retry(site)"
       />
 
-      <!-- 面板都由播放条上的按钮开合，放在这里而不是浮层：长列表浮起来会盖住播放条本身。
-           收藏是例外——它是随时要用的，已经挪到左侧常驻栏（MusicSideLibrary） -->
+      <!-- 歌词和下载留在页面流里：一个是要整段读的长文，一个是要盯着进度的任务，
+           两者都不是「看一眼就关」。收藏在左侧常驻栏、队列在右侧抽屉，各自的理由见那两个组件 -->
       <MusicLyrics v-if="showLyrics" />
-      <MusicQueuePanel v-if="showQueue" />
       <MusicDownloadPanel v-if="showDownloads" />
 
       <!--
@@ -215,5 +229,6 @@ onBeforeUnmount(unmount)
   <!-- 侧边栏和播放条都是 fixed 的，摆在内容外层：放进上面那个带左内边距的容器里，
        等于让它自己给自己让位，展开时会越推越远 -->
   <MusicSideLibrary />
+  <MusicQueuePanel />
   <MusicPlayerBar />
 </template>
