@@ -1,0 +1,103 @@
+/**
+ * 音乐收藏（歌单）。
+ *
+ * **收藏里绝对不能存播放地址**：24bit 的地址带时效签名、约 20 分钟就过期，
+ * 存下来下次打开必是死链，而失败是静默的（音频元素只是不出声），比不存更难查
+ * ——同 `musicPlayer/types.ts` 里 `Track.url` 那条注释、也同 video-parse 的「占位地址」那条教训。
+ * 所以存的是**占位**：`key` + 元数据 + `resolver` + `locator`，播的时候由播放器重新取址。
+ * 剥字段一律走 `toStorableTrack`，别在这里再写一份——两份迟早漂移，
+ * 而漂移的表现正是「某天开始收藏又存进 url 了」，得等到二十分钟后才看得出来。
+ *
+ * 去重、比对「这首是否已收藏」一律用 `Track.key`（形如 `24bit:<id>`）：
+ * 名字会重（同名翻唱），地址会变，只有 key 是稳定的。
+ */
+import type { Track } from '~/composables/musicPlayer/types'
+import { toStorableTrack } from '~/composables/musicPlayer/types'
+
+const KEY = 'music-favorites'
+/** 上限：500 首足够，超了淘汰最早收藏的（同 useWatchHistory 的 MAX_SHOWS 思路） */
+const MAX_FAVORITES = 500
+
+/** 收藏的一条 = 可持久化的 Track + 收藏时间。时间既用来排序，也用来做超量淘汰 */
+export interface FavoriteTrack extends Track {
+  at: number
+}
+
+const read = (): FavoriteTrack[] => {
+  // SSR 关着（ssr: false），但 composable 仍可能在服务端被求值一次，别炸
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = JSON.parse(localStorage.getItem(KEY) || '[]')
+    // 坏掉的存档不该拖垮整个页面：形状不对就当没有，而不是让后面的 .filter 抛异常
+    return Array.isArray(raw) ? (raw as FavoriteTrack[]).filter(t => t && typeof t.key === 'string') : []
+  } catch { return [] }
+}
+
+const write = (list: FavoriteTrack[]) => {
+  if (typeof window === 'undefined') return
+  try { localStorage.setItem(KEY, JSON.stringify(list)) } catch { /* 配额满了就算了 */ }
+}
+
+/**
+ * 模块级单例，**不能做成每次调用新建一个 ref**：
+ * 搜索结果里的收藏心和收藏面板是两个组件、各调一次 `useMusicFavorites()`，
+ * 各持一份状态的话点了心之后面板不会更新，要刷新页面才看得到（而数据其实已经存进去了，
+ * 这种「存对了但界面不动」最难归因）。
+ */
+const favorites = ref<FavoriteTrack[]>([])
+/** 只在第一次调用时读盘：localStorage 是同步 IO，每个组件挂载都读一遍纯属浪费 */
+let loaded = false
+
+/** 收藏时间倒序 = 最近收藏的排最前。排序在写入时做一次，读的时候就不用每次都排 */
+const sortDesc = (list: FavoriteTrack[]) => list.sort((a, b) => b.at - a.at)
+
+const commit = (list: FavoriteTrack[]) => {
+  favorites.value = sortDesc(list)
+  write(favorites.value)
+}
+
+export function useMusicFavorites() {
+  if (!loaded && typeof window !== 'undefined') {
+    loaded = true
+    favorites.value = sortDesc(read())
+  }
+
+  /** 已收藏的 key 集合。列表里每行都要判一次，逐个 `.some()` 在 500 条上是平方级 */
+  const favoriteKeys = computed(() => new Set(favorites.value.map(t => t.key)))
+
+  const isFavorite = (key?: string) => !!key && favoriteKeys.value.has(key)
+
+  /** 收藏一首。已在收藏里就**只更新时间**（顺手把元数据刷新成更准的那份），不产生第二条 */
+  const addFavorite = (track: Track) => {
+    if (!track?.key) return
+    const rest = favorites.value.filter(t => t.key !== track.key)
+    rest.push({ ...toStorableTrack(track), at: Date.now() })
+    // 超量按最早收藏的淘汰。排序后 slice 比逐个 shift 好读，条数又只有几百
+    commit(sortDesc(rest).slice(0, MAX_FAVORITES))
+  }
+
+  const removeFavorite = (key: string) => {
+    if (!key) return
+    commit(favorites.value.filter(t => t.key !== key))
+  }
+
+  /** 返回收藏后的状态（true = 现在是收藏态），调用方可以据此弹 toast 说清是加还是取消 */
+  const toggleFavorite = (track: Track) => {
+    if (!track?.key) return false
+    if (isFavorite(track.key)) { removeFavorite(track.key); return false }
+    addFavorite(track)
+    return true
+  }
+
+  const clearFavorites = () => commit([])
+
+  return {
+    favorites,
+    favoriteKeys,
+    isFavorite,
+    addFavorite,
+    removeFavorite,
+    toggleFavorite,
+    clearFavorites,
+  }
+}
