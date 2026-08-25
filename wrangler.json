@@ -1,5 +1,23 @@
 {
   "name": "utools",
   "compatibility_date": "2024-09-23",
-  "pages_build_output_dir": "dist"
+  "pages_build_output_dir": "dist",
+  "d1_databases": [
+    {
+      "binding": "USER_DB",
+      "database_name": "utools-users",
+      "database_id": "5cec69c7-2ef7-42ef-8173-682377eaef64"
+    }
+  ],
+  "env": {
+    "preview": {
+      "d1_databases": [
+        {
+          "binding": "USER_DB",
+          "database_name": "utools-users",
+          "database_id": "5cec69c7-2ef7-42ef-8173-682377eaef64"
+        }
+      ]
+    }
+  }
 }

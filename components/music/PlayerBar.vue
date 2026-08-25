@@ -144,6 +144,32 @@ const tags = computed(() => {
   return out
 })
 
+/**
+ * 窄屏「更多」菜单。**手机上一行只放得下四五个可点区**（412px 实测），
+ * 硬把宽屏那九个图标全摆上去，右边几个会被顶到屏幕外 —— 表现就是「播放、收藏按钮不见了」。
+ *
+ * 留在外面的是按下一秒就要用的：播放 / 下一首 / 收藏这首 / 队列；
+ * 其余全进这里。**「我的收藏」必须在**：窄屏那条侧栏是滑出屏幕的抽屉，这是它唯一的入口。
+ * 用文字菜单而不是再塞一排图标：图标挤到 2xs 就点不准了，而这些项本来就不是高频操作。
+ */
+const moreItems = computed(() => [
+  [
+    { label: '上一首', icon: 'i-heroicons-backward', disabled: !hasQueue.value, click: () => playPrev() },
+    { label: showQueue.value ? '收起播放列表' : `播放列表（${queue.value.length}）`, icon: 'i-heroicons-queue-list', click: () => { showQueue.value = !showQueue.value } },
+    { label: showFavorites.value ? '收起我的收藏' : '我的收藏', icon: 'i-heroicons-heart', click: () => { showFavorites.value = !showFavorites.value } },
+    { label: showLyrics.value ? '收起歌词' : '歌词', icon: 'i-heroicons-document-text', click: () => { showLyrics.value = !showLyrics.value } },
+  ],
+  [
+    { label: repeatLabel.value, icon: repeatIcon.value, click: () => cycleRepeat() },
+    { label: shuffle.value ? '随机播放：开' : '随机播放：关', icon: 'i-heroicons-arrows-right-left', click: () => { shuffle.value = !shuffle.value } },
+    { label: isMuted.value ? '取消静音' : '静音', icon: volumeIcon.value, click: () => toggleMuted() },
+  ],
+  // 下载只对解析来的曲目有意义：直链是终态，没有 resolver 能再取一次
+  ...(canCollect.value
+    ? [[{ label: '下载这首', icon: 'i-heroicons-arrow-down-tray', click: () => onDownloadCurrent() }]]
+    : []),
+])
+
 /** 空格播放/暂停、左右方向键快进退。输入框里不接管，否则打字就没法用了 */
 const onKey = (e: KeyboardEvent) => {
   const tag = (e.target as HTMLElement)?.tagName
@@ -251,11 +277,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
       <!-- 传输控制 -->
       <div class="flex items-center gap-1 shrink-0">
+        <!-- 「上一首」窄屏收进「更多」：手机上一行只放得下四五个可点区，
+             而它远不如播放/下一首常用（同 QQ 音乐移动端的取舍） -->
         <UButton
           icon="i-heroicons-backward"
           color="gray"
           variant="ghost"
           size="sm"
+          class="hidden sm:inline-flex"
           :disabled="!hasQueue"
           aria-label="上一首"
           @click="playPrev"
@@ -283,9 +312,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         />
       </div>
 
-      <!-- 时间。窄屏只留当前时间，总时长挪走（不然和右侧按钮挤成一坨） -->
-      <div class="text-xs tabular-nums text-gray-500 shrink-0">
-        {{ formatTrackTime(shownTime) }}<span class="hidden sm:inline"> / {{ formatTrackTime(duration) }}</span>
+      <!--
+        时间。**窄屏整块不渲染**：进度条本身已经把「播到哪儿了」画出来了，
+        而手机上那点宽度留给歌名比留给一串数字值 —— 原来只藏总时长，
+        剩下的「00:00」照样占位，右侧图标被顶到屏幕外（安卓上表现是「播放、收藏都看不见」）。
+      -->
+      <div class="hidden sm:block text-xs tabular-nums text-gray-500 shrink-0">
+        {{ formatTrackTime(shownTime) }} / {{ formatTrackTime(duration) }}
       </div>
 
       <!-- 右侧：音量（窄屏不渲染，触摸端没有 hover，滑条展不开）+ 循环 + 队列 -->
@@ -337,6 +370,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           :color="repeat === 'off' ? 'gray' : 'primary'"
           variant="ghost"
           size="sm"
+          class="hidden sm:inline-flex"
           :title="repeatLabel"
           :aria-label="repeatLabel"
           @click="cycleRepeat"
@@ -356,17 +390,18 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           :color="showLyrics ? 'primary' : 'gray'"
           variant="ghost"
           size="sm"
+          class="hidden sm:inline-flex"
           title="歌词"
           aria-label="歌词"
           @click="showLyrics = !showLyrics"
         />
-        <!-- 收藏栏的开关。**窄屏也要有**：那边收藏栏是滑出去的抽屉，这是它唯一的入口，
-             跟着「窄屏减项」一起藏掉就等于手机上再也打不开收藏 -->
+        <!-- 收藏栏（左侧抽屉）的开关。窄屏收进「更多」，但**一定要有入口** —— 抽屉在窄屏是滑出屏幕的 -->
         <UButton
           icon="i-heroicons-bars-3-bottom-left"
           :color="showFavorites ? 'primary' : 'gray'"
           variant="ghost"
           size="sm"
+          class="hidden sm:inline-flex"
           :title="showFavorites ? '收起我的收藏' : '我的收藏'"
           aria-label="我的收藏"
           @click="showFavorites = !showFavorites"
@@ -380,8 +415,23 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           aria-label="播放队列"
           @click="showQueue = !showQueue"
         >
-          <span v-if="queue.length" class="text-xs tabular-nums">{{ queueIndex + 1 }}/{{ queue.length }}</span>
+          <span v-if="queue.length" class="hidden sm:inline text-xs tabular-nums">{{ queueIndex + 1 }}/{{ queue.length }}</span>
         </UButton>
+
+        <!--
+          「更多」**只在窄屏出现**：手机上一行放不下九个图标，硬摆的结果是右边几个被顶出屏幕
+          （用户看到的就是「播放、收藏按钮不见了」）。宽屏一个不藏，不需要这一层。
+        -->
+        <UDropdown :items="moreItems" :popper="{ placement: 'top-end' }" class="sm:hidden">
+          <UButton
+            icon="i-heroicons-ellipsis-horizontal"
+            color="gray"
+            variant="ghost"
+            size="sm"
+            title="更多"
+            aria-label="更多"
+          />
+        </UDropdown>
       </div>
     </div>
   </div>
