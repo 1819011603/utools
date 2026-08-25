@@ -23,8 +23,33 @@
  *   下载 → 默认走代理；只有探测确认直连可行的 host 才直连
  */
 
-/** 按 host 记住 fetch 能不能直连（**只对下载有意义**，不能拿来判断能不能播） */
-const fetchDirectOk = new Map<string, boolean>()
+/**
+ * 按 host 记住 fetch 能不能直连（**只对下载有意义**，不能拿来判断能不能播）。
+ *
+ * **持久化到 localStorage**：探测那一发注定会在控制台留下一条红色的 CORS 报错
+ * （浏览器直接打的，JS 既抓不住也压不掉）。不存的话每次刷新都要重探、每次都留一条，
+ * 看着像功能坏了。CDN 的 CORS 策略是很稳定的东西，存下来一辈子探一次就够。
+ */
+const DIRECT_OK_KEY = 'music-cdn-direct-ok'
+
+function loadDirectOk(): Map<string, boolean> {
+  if (typeof window === 'undefined') return new Map()
+  try {
+    const raw = localStorage.getItem(DIRECT_OK_KEY)
+    return raw ? new Map(Object.entries(JSON.parse(raw) as Record<string, boolean>)) : new Map()
+  } catch {
+    return new Map()
+  }
+}
+
+const fetchDirectOk = loadDirectOk()
+
+function persistDirectOk() {
+  if (typeof window === 'undefined') return
+  try {
+    localStorage.setItem(DIRECT_OK_KEY, JSON.stringify(Object.fromEntries(fetchDirectOk)))
+  } catch { /* 存不下就退回每次会话探一次，不影响正确性 */ }
+}
 /** 同一个 host 的在途探测，避免连点几首时并发探同一个 CDN */
 const probing = new Map<string, Promise<boolean>>()
 /** 播放时被判定为「直连播不动」的 host，下次直接走代理 */
@@ -96,8 +121,10 @@ export function useMusicMediaUrl() {
     if (!job) {
       job = probeFetch(url).then((ok) => {
         fetchDirectOk.set(host, ok)
+        persistDirectOk()
         probing.delete(host)
-        console.log(`[music] ${host} 跨域下载${ok ? '可直连' : '被 CORS 拒，改走代理'}`)
+        // 只在真的探了一次时才打这行 —— 命中记忆的走不到这里，控制台就不会年复一年地刷
+        console.log(`[music] ${host} 跨域下载${ok ? '可直连' : '被 CORS 拒，改走代理'}（已记住，不再重探）`)
         return ok
       })
       probing.set(host, job)

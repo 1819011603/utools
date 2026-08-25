@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>代理池测试报告</title>
+<style>
+  body { font-family: -apple-system, "Microsoft YaHei", sans-serif; margin: 24px; color: #222; }
+  h1 { font-size: 20px; }
+  h2 { font-size: 16px; margin-top: 32px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 8px; font-size: 13px; }
+  th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; }
+  th { background: #f5f5f5; }
+  tr:nth-child(even) { background: #fafafa; }
+  .meta { color: #666; font-size: 13px; }
+  details { margin: 6px 0; border: 1px solid #eee; border-radius: 4px; padding: 4px 8px; }
+  summary { cursor: pointer; font-size: 13px; }
+</style>
+</head>
+<body>
+  <h1>代理池测试报告</h1>
+  <p class="meta">目标地址：https://www.24bit.net/music/c/ffd42eb95819da57e5daaaadf5905bfe<br>
+  代理来源：https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt<br>
+  生成时间：2026-08-26 03:01:04</p>
+  <p>探测总数：2812，可用：13，不可用：2799</p>
+
+  <h2>探测结果（仅列可用的，不可用的太多不展示明细）</h2>
+  <table>
+    <thead><tr><th>代理</th><th>是否可用</th><th>状态码</th><th>耗时</th><th>错误信息</th></tr></thead>
+    <tbody>
+    <tr><td>183.6.88.12:18181</td><td>可用</td><td>200</td><td>6.42s</td><td></td></tr>
+<tr><td>165.154.7.156:8888</td><td>可用</td><td>200</td><td>1.94s</td><td></td></tr>
+<tr><td>58.254.153.147:17981</td><td>可用</td><td>200</td><td>2.8s</td><td></td></tr>
+<tr><td>58.254.153.146:17981</td><td>可用</td><td>200</td><td>3.5s</td><td></td></tr>
+<tr><td>223.85.21.195:8080</td><td>可用</td><td>200</td><td>7.17s</td><td></td></tr>
+<tr><td>27.185.218.213:17981</td><td>可用</td><td>200</td><td>2.9s</td><td></td></tr>
+<tr><td>181.215.18.40:8181</td><td>可用</td><td>200</td><td>3.13s</td><td></td></tr>
+<tr><td>120.232.115.170:17981</td><td>可用</td><td>200</td><td>3.21s</td><td></td></tr>
+<tr><td>219.142.66.245:9090</td><td>可用</td><td>200</td><td>2.02s</td><td></td></tr>
+<tr><td>112.64.135.45:8080</td><td>可用</td><td>200</td><td>3.92s</td><td></td></tr>
+<tr><td>114.236.137.41:21000</td><td>可用</td><td>200</td><td>2.36s</td><td></td></tr>
+<tr><td>119.188.131.55:17981</td><td>可用</td><td>200</td><td>3.94s</td><td></td></tr>
+<tr><td>164.52.11.194:18080</td><td>可用</td><td>200</td><td>8.37s</td><td></td></tr>
+    </tbody>
+  </table>
+
+  
+    <h2>连续请求测试汇总（每个可用代理）</h2>
+    <table>
+      <thead><tr><th>代理</th><th>连续成功次数</th><th>共尝试次数</th></tr></thead>
+      <tbody>
+      <tr><td>219.142.66.245:9090</td><td>20</td><td>20</td></tr>
+<tr><td>120.232.115.170:17981</td><td>20</td><td>20</td></tr>
+<tr><td>114.236.137.41:21000</td><td>20</td><td>20</td></tr>
+<tr><td>119.188.131.55:17981</td><td>20</td><td>20</td></tr>
+<tr><td>112.64.135.45:8080</td><td>20</td><td>20</td></tr>
+<tr><td>27.185.218.213:17981</td><td>4</td><td>5</td></tr>
+<tr><td>58.254.153.146:17981</td><td>1</td><td>2</td></tr>
+<tr><td>58.254.153.147:17981</td><td>1</td><td>2</td></tr>
+<tr><td>181.215.18.40:8181</td><td>0</td><td>1</td></tr>
+<tr><td>165.154.7.156:8888</td><td>0</td><td>1</td></tr>
+<tr><td>223.85.21.195:8080</td><td>0</td><td>1</td></tr>
+<tr><td>183.6.88.12:18181</td><td>0</td><td>1</td></tr>
+<tr><td>164.52.11.194:18080</td><td>0</td><td>1</td></tr>
+
+      </tbody>
+    </table>
+
+    <h2>连续请求测试明细（点击展开）</h2>
+    
+    <details>
+      <summary>219.142.66.245:9090 — 连续成功 20 次</summary>
+      <table>
+        <thead><tr><th>#</th><th>结果</th><th>状态码</th><th>耗时</th><th>错误信息</th></tr></thead>
+        <tbody>
+        <tr><td>1</td><td>成功</td><td>200</td><td>3.04s</td><td></td></tr>
+<tr><td>2</td><td>成功</td><td>200</td><td>2.43s</td><td></td></tr>
+<tr><td>3</td><td>成功</td><td>200</td><td>2.37s</td><td></td></tr>
+<tr><td>4</td><td>成功</td><td>200</td><td>2.07s</td><td></td></tr>
+<tr><td>5</td><td>成功</td><td>200</td><td>2.9s</td><td></td></tr>
+<tr><td>6</td><td>成功</td><td>200</td><td>2.57s</td><td></td></tr>
+<tr><td>7</td><td>成功</td><td>200</td><td>2.38s</td><td></td></tr>
+<tr><td>8</td><td>成功</td><td>200</td><td>2.42s</td><td></td></tr>
+<tr><td>9</td><td>成功</td><td>200</td><td>2.85s</td><td></td></tr>
+<tr><td>10</td><td>成功</td><td>200</td><td>2.3s</td><td></td></tr>
+<tr><td>11</td><td>成功</td><td>200</td><td>2.9s</td><td></td></tr>
+<tr><td>12</td><td>成功</td><td>200</td><td>2.31s</td><td></td></tr>
+<tr><td>13</td><td>成功</td><td>200</td><td>2.36s</td><td></td></tr>
+<tr><td>14</td><td>成功</td><td>200</td><td>2.34s</td><td></td></tr>
+<tr><td>15</td><td>成功</td><td>200</td><td>1.73s</td><td></td></tr>
+<tr><td>16</td><td>成功</td><td>200</td><td>1.8s</td><td></td></tr>
+<tr><td>17</td><td>成功</td><td>200</td><td>1.63s</td><td></td></tr>
+<tr><td>18</td><td>成功</td><td>200</td><td>1.76s</td><td></td></tr>
+<tr><td>19</td><td>成功</td><td>200</td><td>1.85s</td><td></td></tr>
+<tr><td>20</td><td>成功</td><td>200</td><td>2.25s</td><td></td></tr>
+
+        </tbody>
+      </table>
+    </details>
+
+    <details>
+      <summary>120.232.115.170:17981 — 连续成功 20 次</summary>
+      <table>
+        <thead><tr><th>#</th><th>结果</th><th>状态码</th><th>耗时</th><th>错误信息</th></tr></thead>
+        <tbody>
+        <tr><td>1</td><td>成功</td><td>200</td><td>2.98s</td><td></td></tr>
+<tr><td>2</td><td>成功</td><td>200</td><td>2.36s</td><td></td></tr>
+<tr><td>3</td><td>成功</td><td>200</td><td>2.32s</td><td></td></tr>
+<tr><td>4</td><td>成功</td><td>200</td><td>2.43s</td><td></td></tr>
+<tr><td>5</td><td>成功</td><td>200</td><td>2.64s</td><td></td></tr>
+<tr><td>6</td><td>成功</td><td>200</td><td>2.85s</td><td></td></tr>
+<tr><td>7</td><td>成功</td><td>200</td><td>3.0s</td><td></td></tr>
+<tr><td>8</td><td>成功</td><td>200</td><td>2.49s</td><td></td></tr>
+<tr><td>9</td><td>成功</td><td>200</td><td>2.8s</td><td></td></tr>
+<tr><td>10</td><td>成功</td><td>200</td><td>2.6s</td><td></td></tr>
+<tr><td>11</td><td>成功</td><td>200</td><td>2.68s</td><td></td></tr>
+<tr><td>12</td><td>成功</td><td>200</td><td>2.59s</td><td></td></tr>
+<tr><td>13</td><td>成功</td><td>200</td><td>2.44s</td><td></td></tr>
+<tr><td>14</td><td>成功</td><td>200</td><td>2.36s</td><td></td></tr>
+<tr><td>15</td><td>成功</td><td>200</td><td>1.92s</td><td></td></tr>
+<tr><td>16</td><td>成功</td><td>200</td><td>2.28s</td><td></td></tr>
+<tr><td>17</td><td>成功</td><td>200</td><td>1.95s</td><td></td></tr>
+<tr><td>18</td><td>成功</td><td>200</td><td>1.8s</td><td></td></tr>
+<tr><td>19</td><td>成功</td><td>200</td><td>2.52s</td><td></td></tr>
+<tr><td>20</td><td>成功</td><td>200</td><td>2.39s</td><td></td></tr>
+
+        </tbody>
+      </table>
+    </details>
+
+    <details>
+      <summary>114.236.137.41:21000 — 连续成功 20 次</summary>
+      <table>
+        <thead><tr><th>#</th><th>结果</th><th>状态码</th><th>耗时</th><th>错误信息</th></tr></thead>
+        <tbody>
+        <tr><td>1</td><td>成功</td><td>200</td><td>3.19s</td><td></td></tr>
+<tr><td>2</td><td>成功</td><td>200</td><td>2.97s</td><td></td></tr>
+<tr><td>3</td><td>成功</td><td>200</td><td>3.28s</td><td></td></tr>
+<tr><td>4</td><td>成功</td><td>200</td><td>2.48s</td><td></td></tr>
+<tr><td>5</td><td>成功</td><td>200</td><td>2.4s</td><td></td></tr>
+<tr><td>6</td><td>成功</td><td>200</td><td>2.3s</td><td></td></tr>
+<tr><td>7</td><td>成功</td><td>200</td><td>2.33s</td><td></td></tr>
+<tr><td>8</td><td>成功</td><td>200</td><td>2.86s</td><td></td></tr>
+<tr><td>9</td><td>成功</td><td>200</td><td>2.29s</td><td></td></tr>
+<tr><td>10</td><td>成功</td><td>200</td><td>2.39s</td><td></td></tr>
+<tr><td>11</td><td>成功</td><td>200</td><td>2.42s</td><td></td></tr>
+<tr><td>12</td><td>成功</td><td>200</td><td>2.19s</td><td></td></tr>
+<tr><td>13</td><td>成功</td><td>200</td><td>1.87s</td><td></td></tr>
+<tr><td>14</td><td>成功</td><td>200</td><td>2.01s</td><td></td></tr>
+<tr><td>15</td><td>成功</td><td>200</td><td>1.7s</td><td></td></tr>
+<tr><td>16</td><td>成功</td><td>200</td><td>1.77s</td><td></td></tr>
+<tr><td>17</td><td>成功</td><td>200</td><td>1.84s</td><td></td></tr>
+<tr><td>18</td><td>成功</td><td>200</td><td>2.14s</td><td></td></tr>
+<tr><td>19</td><td>成功</td><td>200</td><td>2.58s</td><td></td></tr>
+<tr><td>20</td><td>成功</td><td>200</td><td>2.19s</td><td></td></tr>
+
+        </tbody>
+      </table>
+    </details>
+
+    <details>
+      <summary>119.188.131.55:17981 — 连续成功 20 次</summary>
+      <table>
+        <thead><tr><th>#</th><th>结果</th><th>状态码</th><th>耗时</th><th>错误信息</th></tr></thead>
+        <tbody>
+        <tr><td>1</td><td>成功</td><td>200</td><td>3.04s</td><td></td></tr>
+<tr><td>2</td><td>成功</td><td>200</td><td>2.51s</td><td></td></tr>
+<tr><td>3</td><td>成功</td><td>200</td><td>3.31s</td><td></td></tr>
+<tr><td>4</td><td>成功</td><td>200</td><td>2.63s</td><td></td></tr>
+<tr><td>5</td><td>成功</td><td>200</td><td>2.52s</td><td></td></tr>
+<tr><td>6</td><td>成功</td><td>200</td><td>2.49s</td><td></td></tr>
+<tr><td>7</td><td>成功</td><td>200</td><td>3.12s</td><td></td></tr>
+<tr><td>8</td><td>成功</td><td>200</td><td>2.53s</td><td></td></tr>
+<tr><td>9</td><td>成功</td><td>200</td><td>2.61s</td><td></td></tr>
+<tr><td>10</td><td>成功</td><td>200</td><td>2.52s</td><td></td></tr>
+<tr><td>11</td><td>成功</td><td>200</td><td>2.58s</td><td></td></tr>
+<tr><td>12</td><td>成功</td><td>200</td><td>2.43s</td><td></td></tr>
+<tr><td>13</td><td>成功</td><td>200</td><td>2.53s</td><td></td></tr>
+<tr><td>14</td><td>成功</td><td>200</td><td>1.95s</td><td></td></tr>
+<tr><td>15</td><td>成功</td><td>200</td><td>2.05s</td><td></td></tr>
+<tr><td>16</td><td>成功</td><td>200</td><td>2.0s</td><td></td></tr>
+<tr><td>17</td><td>成功</td><td>200</td><td>2.96s</td><td></td></tr>
+<tr><td>18</td><td>成功</td><td>200</td><td>2.57s</td><td></td></tr>
+<tr><td>19</td><td>成功</td><td>200</td><td>2.46s</td><td></td></tr>
+<tr><td>20</td><td>成功</td><td>200</td><td>2.18s</td><td></td></tr>
+
+        </tbody>
+      </table>
+    </details>
+
+    <details>
+      <summary>112.64.135.45:8080 — 连续成功 20 次</summary>
+      <table>
+        <thead><tr><th>#</th><th>结果</th><th>状态码</th><th>耗时</th><th>错误信息</th></tr></thead>
+        <tbody>
+        <tr><td>1</td><td>成功</td><td>200</td><td>4.43s</td><td></td></tr>
+<tr><td>2</td><td>成功</td><td>200</td><td>3.28s</td><td></td></tr>
+<tr><td>3</td><td>成功</td><td>200</td><td>2.63s</td><td></td></tr>
+<tr><td>4</td><td>成功</td><td>200</td><td>2.98s</td><td></td></tr>
+<tr><td>5</td><td>成功</td><td>200</td><td>4.26s</td><td></td></tr>
+<tr><td>6</td><td>成功</td><td>200</td><td>3.24s</td><td></td></tr>
+<tr><td>7</td><td>成功</td><td>200</td><td>3.78s</td><td></td></tr>
+<tr><td>8</td><td>成功</td><td>200</td><td>2.76s</td><td></td></tr>
+<tr><td>9</td><td>成功</td><td>200</td><td>2.98s</td><td></td></tr>
+<tr><td>10</td><td>成功</td><td>200</td><td>4.79s</td><td></td></tr>
+<tr><td>11</td><td>成功</td><td>200</td><td>6.99s</td><td></td></tr>
+<tr><td>12</td><td>成功</td><td>200</td><td>5.9s</td><td></td></tr>
+<tr><td>13</td><td>成功</td><td>200</td><td>3.36s</td><td></td></tr>
+<tr><td>14</td><td>成功</td><td>200</td><td>2.73s</td><td></td></tr>
+<tr><td>15</td><td>成功</td><td>200</td><td>2.0s</td><td></td></tr>
+<tr><td>16</td><td>成功</td><td>200</td><td>2.73s</td><td></td></tr>
+<tr><td>17</td><td>成功</td><td>200</td><td>2.04s</td><td></td></tr>
+<tr><td>18</td><td>成功</td><td>200</td><td>3.18s</td><td></td></tr>
+<tr><td>19</td><td>成功</td><td>200</td><td>3.89s</td><td></td></tr>
+<tr><td>20</td><td>成功</td><td>200</td><td>3.6s</td><td></td></tr>
+
+        </tbody>
+      </table>
+    </details>
+
+    <details>
+      <summary>27.185.218.213:17981 — 连续成功 4 次</summary>
+      <table>
+        <thead><tr><th>#</th><th>结果</th><th>状态码</th><th>耗时</th><th>错误信息</th></tr></thead>
+        <tbody>
+        <tr><td>1</td><td>成功</td><td>200</td><td>3.34s</td><td></td></tr>
+<tr><td>2</td><td>成功</td><td>200</td><td>2.86s</td><td></td></tr>
+<tr><td>3</td><td>成功</td><td>200</td><td>3.29s</td><td></td></tr>
+<tr><td>4</td><td>成功</td><td>200</td><td>3.06s</td><td></td></tr>
+<tr><td>5</td><td>失败</td><td>-</td><td>5.04s</td><td>ReadTimeout: HTTPSConnectionPool(host=&#x27;www.24bit.net&#x27;, port=443): Read timed out. (read timeout=5)</td></tr>
+
+        </tbody>
+      </table>
+    </details>
+
+    <details>
+      <summary>58.254.153.146:17981 — 连续成功 1 次</summary>
+      <table>
+        <thead><tr><th>#</th><th>结果</th><th>状态码</th><th>耗时</th><th>错误信息</th></tr></thead>
+        <tbody>
+        <tr><td>1</td><td>成功</td><td>200</td><td>3.62s</td><td></td></tr>
+<tr><td>2</td><td>失败</td><td>-</td><td>0.06s</td><td>ConnectionError: (&#x27;Connection aborted.&#x27;, RemoteDisconnected(&#x27;Remote end closed connection without response&#x27;))</td></tr>
+
+        </tbody>
+      </table>
+    </details>
+
+    <details>
+      <summary>58.254.153.147:17981 — 连续成功 1 次</summary>
+      <table>
+        <thead><tr><th>#</th><th>结果</th><th>状态码</th><th>耗时</th><th>错误信息</th></tr></thead>
+        <tbody>
+        <tr><td>1</td><td>成功</td><td>200</td><td>3.76s</td><td></td></tr>
+<tr><td>2</td><td>失败</td><td>-</td><td>0.07s</td><td>ProxyError: HTTPSConnectionPool(host=&#x27;www.24bit.net&#x27;, port=443): Max retries exceeded with url: /music/c/ffd42eb95819da57e5daaaadf5905bfe (Caused by ProxyError(&#x27;Unable to connect to proxy&#x27;, OSError(&#x27;Tunnel connection failed: 502 Bad Gateway&#x27;)))</td></tr>
+
+        </tbody>
+      </table>
+    </details>
+
+    <details>
+      <summary>181.215.18.40:8181 — 连续成功 0 次</summary>
+      <table>
+        <thead><tr><th>#</th><th>结果</th><th>状态码</th><th>耗时</th><th>错误信息</th></tr></thead>
+        <tbody>
+        <tr><td>1</td><td>失败</td><td>-</td><td>0.71s</td><td>ProxyError: HTTPSConnectionPool(host=&#x27;www.24bit.net&#x27;, port=443): Max retries exceeded with url: /music/c/ffd42eb95819da57e5daaaadf5905bfe (Caused by ProxyError(&#x27;Unable to connect to proxy&#x27;, OSError(&#x27;Tunnel connection failed: 404 Not Found&#x27;)))</td></tr>
+
+        </tbody>
+      </table>
+    </details>
+
+    <details>
+      <summary>165.154.7.156:8888 — 连续成功 0 次</summary>
+      <table>
+        <thead><tr><th>#</th><th>结果</th><th>状态码</th><th>耗时</th><th>错误信息</th></tr></thead>
+        <tbody>
+        <tr><td>1</td><td>失败</td><td>-</td><td>5.01s</td><td>ProxyError: HTTPSConnectionPool(host=&#x27;www.24bit.net&#x27;, port=443): Max retries exceeded with url: /music/c/ffd42eb95819da57e5daaaadf5905bfe (Caused by ProxyError(&#x27;Unable to connect to proxy&#x27;, ConnectTimeoutError(&lt;HTTPSConnection(host=&#x27;165.154.7.156&#x27;, port=8888) at 0x25312c5bbc0&gt;, &#x27;Connection to 165.154.7.156 timed out. (connect timeout=5)&#x27;)))</td></tr>
+
+        </tbody>
+      </table>
+    </details>
+
+    <details>
+      <summary>223.85.21.195:8080 — 连续成功 0 次</summary>
+      <table>
+        <thead><tr><th>#</th><th>结果</th><th>状态码</th><th>耗时</th><th>错误信息</th></tr></thead>
+        <tbody>
+        <tr><td>1</td><td>失败</td><td>-</td><td>5.02s</td><td>ProxyError: HTTPSConnectionPool(host=&#x27;www.24bit.net&#x27;, port=443): Max retries exceeded with url: /music/c/ffd42eb95819da57e5daaaadf5905bfe (Caused by ProxyError(&#x27;Unable to connect to proxy&#x27;, ConnectTimeoutError(&lt;HTTPSConnection(host=&#x27;223.85.21.195&#x27;, port=8080) at 0x25312c2aa50&gt;, &#x27;Connection to 223.85.21.195 timed out. (connect timeout=5)&#x27;)))</td></tr>
+
+        </tbody>
+      </table>
+    </details>
+
+    <details>
+      <summary>183.6.88.12:18181 — 连续成功 0 次</summary>
+      <table>
+        <thead><tr><th>#</th><th>结果</th><th>状态码</th><th>耗时</th><th>错误信息</th></tr></thead>
+        <tbody>
+        <tr><td>1</td><td>失败</td><td>-</td><td>5.03s</td><td>ProxyError: HTTPSConnectionPool(host=&#x27;www.24bit.net&#x27;, port=443): Max retries exceeded with url: /music/c/ffd42eb95819da57e5daaaadf5905bfe (Caused by ProxyError(&#x27;Unable to connect to proxy&#x27;, ConnectTimeoutError(&lt;HTTPSConnection(host=&#x27;183.6.88.12&#x27;, port=18181) at 0x25312c5aed0&gt;, &#x27;Connection to 183.6.88.12 timed out. (connect timeout=5)&#x27;)))</td></tr>
+
+        </tbody>
+      </table>
+    </details>
+
+    <details>
+      <summary>164.52.11.194:18080 — 连续成功 0 次</summary>
+      <table>
+        <thead><tr><th>#</th><th>结果</th><th>状态码</th><th>耗时</th><th>错误信息</th></tr></thead>
+        <tbody>
+        <tr><td>1</td><td>失败</td><td>-</td><td>5.09s</td><td>ReadTimeout: HTTPSConnectionPool(host=&#x27;www.24bit.net&#x27;, port=443): Read timed out. (read timeout=5)</td></tr>
+
+        </tbody>
+      </table>
+    </details>
+
+
+</body>
+</html>

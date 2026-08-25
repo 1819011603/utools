@@ -1,5 +1,9 @@
 /**
- * 整首音频的浏览器端持久缓存（IndexedDB，模块级单例）：TTL 7 天 + 1GB 上限 + 按「最后访问时间」LRU。
+ * 整首音频的浏览器端持久缓存（IndexedDB，模块级单例）：**滑动 TTL 30 天** + 1GB 上限 + LRU。
+ *
+ * TTL 和 LRU 都以「最后一次播放」为准，所以 30 天的含义是**「多久没再听就丢掉」**，
+ * 不是「存满 30 天就丢掉」—— 每播一次就把有效期续满。反复在听的歌永远不会被清走，
+ * 那正是最该留的：重下一次是几十 MB 流量，还要再烧一份站点的每日配额。
  *
  * **存在的首要理由是省站点配额，不是省流量**：24bit 按天按 IP 限额，
  * 而循环播放 / 重听 / 下载已经听过的那首，每一次都要重新取一个带签名的地址（`Track.url` 20 分钟就死）。
@@ -22,16 +26,28 @@ interface MusicCacheRecordMeta {
   trackKey: string
   tier: string
   bytes: number
-  /** 写入时间。**TTL 只看它**——TTL 是「这份数据还新不新鲜」，不该被一次重听续命 */
+  /** 写入时间。只用来展示/排查，**不参与任何淘汰判断** */
   savedAt: number
-  /** 最后一次访问时间。**LRU 只看它**——淘汰要淘汰「最久没听的」，不是「最早下的」 */
+  /**
+   * 最后一次播放时间。**TTL 和 LRU 都只看它。**
+   *
+   * TTL 做成「滑动过期」而不是「写入后 30 天必删」：一首反复在听的歌不该因为
+   * 下载得早就被清掉——那正是最该留着的那份（重下一次就是几十 MB 流量 + 一次配额）。
+   * 所以每播一次就把有效期续满 30 天，真正被清掉的只有「30 天没再碰过」的。
+   */
   lastAt: number
   name?: string
   artist?: string
   format?: string
 }
 
-/** Blob 表里的记录。`savedAt` 冗余一份，让 `getCached` 一次读取就能判 TTL，不必再开一个事务查 meta */
+/**
+ * Blob 表里的记录。
+ *
+ * `savedAt` 只是留个痕迹，**TTL 不看它** —— TTL 改成按「最后播放时间」滑动续期后，
+ * 那个时间戳每播一次就变，冗余在这张表里意味着**每次播放都要重写几十 MB 的 Blob**。
+ * 所以判过期改成读 meta 表（`getCached` 本来就要写它来刷新 lastAt，顺路的事）。
+ */
 interface MusicCacheBlobRecord {
   id: string
   blob: Blob
@@ -58,8 +74,14 @@ const DB_VERSION = 1
 const STORE_BLOB = 'audio'
 const STORE_META = 'meta'
 
-/** 7 天。再久意义不大：追的歌一周内必然又听，而一首没再碰过的无损占着 100MB 不划算 */
-const MUSIC_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000
+/**
+ * 30 天，且**每播一次就续满 30 天**（滑动过期，判据是 `lastAt` 不是 `savedAt`）。
+ *
+ * 所以这个数的真实含义是「多久没再听就丢掉」，而不是「存多久就丢掉」。
+ * 常听的那些永远不会因为下载得早被清走 —— 它们正是最该留的：
+ * 重下一次就是几十 MB 流量，还要再烧一份站点的每日配额。
+ */
+const MUSIC_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000
 
 /** 总量上限 1GB。面板上要显示「已用 xxx MB / 1GB」，所以导出给 UI 用同一个数，别两处各写一份 */
 export const MUSIC_CACHE_MAX_BYTES = 1024 * 1024 * 1024
@@ -195,7 +217,7 @@ export function useMusicAudioCache() {
     for (const m of metas) {
       // 覆写同一个键：旧的那份马上会被 put 顶掉，不该算进预算（否则会误淘汰别人来给自己让位）
       if (m.id === selfId) continue
-      if (now - m.savedAt > MUSIC_CACHE_TTL_MS) { doomed.push(m.id); continue }
+      if (now - m.lastAt > MUSIC_CACHE_TTL_MS) { doomed.push(m.id); continue }
       alive.push(m)
       total += m.bytes
     }
@@ -214,7 +236,12 @@ export function useMusicAudioCache() {
     return total + incomingBytes <= MUSIC_CACHE_MAX_BYTES
   }
 
-  /** 刷新 LRU 的访问时间。**故意不 await、失败也不管**：它只影响淘汰顺序，不该拖慢起播 */
+  /**
+   * 刷新最后播放时间 —— **同时是 LRU 依据和 TTL 续期**（滑动过期，见 MUSIC_CACHE_TTL_MS）。
+   *
+   * **故意不 await、失败也不管**：写的是几百字节的 meta，而起播那一刻的每一毫秒都归用户。
+   * 万一这次没写成，代价只是这首歌的有效期没被续上——下次再播时会补上，不影响正确性。
+   */
   const touch = (db: IDBDatabase, id: string) => {
     try {
       const tx = db.transaction(STORE_META, 'readwrite')
@@ -239,6 +266,23 @@ export function useMusicAudioCache() {
     try {
       const db = await openDb()
       if (!db) return null
+
+      /*
+       * 先读 meta 判过期，再去取 Blob。
+       *
+       * 顺序不能反：TTL 是按**最后播放时间**滑动续期的，那个时间戳只在 meta 表里
+       * （冗余到 blob 表意味着每播一次都要重写几十 MB）。而 meta 只有几百字节，
+       * 先读它还能让「已过期」这条路径完全不必把大 Blob 反序列化出来。
+       */
+      const metaTx = db.transaction(STORE_META, 'readonly')
+      const meta = await idbRequest(
+        metaTx.objectStore(STORE_META).get(key) as IDBRequest<MusicCacheRecordMeta | undefined>,
+      )
+      if (meta && Date.now() - meta.lastAt > MUSIC_CACHE_TTL_MS) {
+        void removeCached(key)   // 到期当 miss，且**顺手删掉**：留着只会占满预算把新的挤出去
+        return null
+      }
+
       const tx = db.transaction(STORE_BLOB, 'readonly')
       const rec = await idbRequest(tx.objectStore(STORE_BLOB).get(key) as IDBRequest<MusicCacheBlobRecord | undefined>)
 
@@ -247,11 +291,8 @@ export function useMusicAudioCache() {
         if (cachedKeys.value.has(key)) void removeCached(key)
         return null
       }
-      if (Date.now() - rec.savedAt > MUSIC_CACHE_TTL_MS) {
-        void removeCached(key)   // TTL 到期当 miss，且**顺手删掉**：留着只会占满预算把新的挤出去
-        return null
-      }
 
+      // 播了就续期：把有效期重新推满 30 天，常听的那些永远不会被 TTL 清掉
       touch(db, key)
       cachedKeys.value.add(key)
       return rec.blob
@@ -323,7 +364,7 @@ export function useMusicAudioCache() {
       const tx = db.transaction(STORE_META, 'readonly')
       const m = await idbRequest(tx.objectStore(STORE_META).get(key) as IDBRequest<MusicCacheRecordMeta | undefined>)
       if (!m) { cachedKeys.value.delete(key); return false }
-      if (Date.now() - m.savedAt > MUSIC_CACHE_TTL_MS) { void removeCached(key); return false }
+      if (Date.now() - m.lastAt > MUSIC_CACHE_TTL_MS) { void removeCached(key); return false }
       cachedKeys.value.add(key)
       return true
     } catch {
@@ -364,7 +405,7 @@ export function useMusicAudioCache() {
       let count = 0
       let bytes = 0
       for (const m of metas) {
-        if (now - m.savedAt > MUSIC_CACHE_TTL_MS) continue   // 过期的不算数（它下一次淘汰就没了）
+        if (now - m.lastAt > MUSIC_CACHE_TTL_MS) continue   // 过期的不算数（它下一次淘汰就没了）
         count++
         bytes += m.bytes
       }
@@ -391,7 +432,7 @@ export function useMusicAudioCache() {
       const fresh = new Set<string>()
       const expired: string[] = []
       for (const m of metas) {
-        if (now - m.savedAt > MUSIC_CACHE_TTL_MS) expired.push(m.id)
+        if (now - m.lastAt > MUSIC_CACHE_TTL_MS) expired.push(m.id)
         else fresh.add(m.id)
       }
       cachedKeys.value = fresh

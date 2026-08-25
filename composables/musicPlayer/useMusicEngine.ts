@@ -362,6 +362,18 @@ export function useMusicEngine(media: MusicMediaState, deps: MusicEngineDeps = {
   const tick = () => {
     const el = audioEl.value
     if (!el) return
+
+    /*
+     * 没有源就一定不在缓冲。**这是道自愈闸**：`isBuffering` 只由 `playing`/`canplay` 熄，
+     * 而一个没有 src 的元素永远等不到这两个事件 —— 只要有任何一条路径把它误置位
+     * （比如空元素上触发的 `waiting`），转圈就再也下不去了。
+     * 靠事件兜不住的状态，就得靠心跳拿地面真值去纠正。
+     */
+    if (!el.currentSrc && !el.src) {
+      isBuffering.value = false
+      return
+    }
+
     if (!el.paused && el.currentTime > lastTick) isBuffering.value = false
     lastTick = el.currentTime
 
@@ -421,7 +433,22 @@ export function useMusicEngine(media: MusicMediaState, deps: MusicEngineDeps = {
 
   const togglePlay = () => {
     const el = audioEl.value
-    if (!el || !current.value) return
+    const track = current.value
+    if (!el || !track) return
+
+    /*
+     * **刷新后的第一次点击必须走完整装载，不能直接 play()。**
+     *
+     * 持久化时地址是被刻意剥掉的（它约 20 分钟就过期，存下来必是死链），
+     * 所以恢复出来的当前曲目只是个占位、`<audio>` 上压根没有 src。
+     * 对着没有源的元素调 `play()` 既不报错也播不动，只会停在 `waiting` ——
+     * 表现就是「刚进来点播放，一直转圈」（用户实测到的正是这个）。
+     */
+    if (!el.currentSrc && !el.src) {
+      void load(track, { autoplay: true })
+      return
+    }
+
     if (el.paused) void attemptPlay(loadSeq)
     else el.pause()
   }
