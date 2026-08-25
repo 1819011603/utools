@@ -67,11 +67,26 @@ const volumeIcon = computed(() => {
 
 const hasQueue = computed(() => queue.value.length > 0)
 
-// 副标题：歌手 · 音质 · 体积。没有的项直接不占位，别显示一串「—」
+// 副标题只放歌手和专辑；音质/格式/体积走下面的彩色标签
+// （混在一行文字里全是「·」，扫一眼分不出哪个是音质哪个是体积）
 const subtitle = computed(() => {
   const t = current.value
   if (!t) return ''
-  return [t.artist, t.quality, t.sizeText].filter(Boolean).join(' · ')
+  return [t.artist, t.album].filter(Boolean).join(' · ')
+})
+
+/**
+ * 音质 / 格式 / 体积三枚标签。**只有取址成功后才有值**——
+ * 这三项都来自详情页，搜索结果里压根没有，所以起播前是空的，别给占位符。
+ */
+const tags = computed(() => {
+  const t = current.value
+  if (!t) return [] as { text: string; color: string }[]
+  const out: { text: string; color: string }[] = []
+  if (t.quality) out.push({ text: t.quality, color: 'primary' })
+  if (t.format) out.push({ text: t.format.toUpperCase(), color: 'amber' })
+  if (t.sizeText) out.push({ text: t.sizeText, color: 'gray' })
+  return out
 })
 
 /** 空格播放/暂停、左右方向键快进退。输入框里不接管，否则打字就没法用了 */
@@ -150,8 +165,22 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           <UIcon v-else name="i-heroicons-musical-note" class="w-5 h-5 text-gray-400" />
         </div>
         <div class="min-w-0">
-          <div class="truncate text-sm font-medium">
-            {{ current?.name || '还没有在播放的曲目' }}
+          <div class="flex items-center gap-2 min-w-0">
+            <span class="truncate text-sm font-medium">
+              {{ current?.name || '还没有在播放的曲目' }}
+            </span>
+            <!-- 音质/格式/体积。窄屏藏起来：那块地方要留给歌名，标签挤进去只会两边都看不清 -->
+            <span class="hidden md:flex items-center gap-1 shrink-0">
+              <UBadge
+                v-for="t in tags"
+                :key="t.text"
+                :color="t.color"
+                variant="soft"
+                size="xs"
+              >
+                {{ t.text }}
+              </UBadge>
+            </span>
           </div>
           <div class="truncate text-xs text-gray-500">
             <template v-if="isResolving">{{ resolveStage || '正在获取播放地址…' }}</template>

@@ -8,8 +8,8 @@
  * **单页 + 底部常驻播放条**，不做「搜索页 + 播放页」两页：
  * 音乐是边听边干别的的事，搜下一首不该把正在听的打断。
  */
-import type { MusicSearchRow, MusicSourceId } from '~/composables/music24bit'
-import { rowToTrack } from '~/composables/music24bit'
+import type { DetailPrefix, MusicSearchRow } from '~/composables/music24bit'
+import { MUSIC_SOURCES, rowToTrack } from '~/composables/music24bit'
 import { MUSIC_PLAYER_KEY, useMusicPlayerController } from '~/composables/musicPlayer/useMusicPlayerController'
 import { useMusicResolveGate } from '~/composables/musicPlayer/useMusicResolveGate'
 
@@ -38,11 +38,19 @@ const resolvingKey = computed(() => (isResolving.value ? current.value?.key : un
 const currentKey = computed(() => current.value?.key)
 
 /**
- * 点一行就播。**整个音源列表都装进队列**（不是只放这一首），
- * 这样「播完自动下一首」立刻可用——用户点第 3 首，后面 27 首自然接着播。
+ * 点某个音质档就播。**整份列表都装进队列**（不是只放这一首），
+ * 这样「播完自动下一首」立刻可用——用户点第 3 首，后面的自然接着播。
+ *
+ * 用户点的那个档作为 `preferred` 传下去，闸门会先试它；那个档没资源时再退另一个。
+ * 队列里其余曲目跟随同一个档 —— 用户选了「无损」，不该播到第二首忽然变成 100MB 的环绕声。
  */
-const onPlay = async (_row: MusicSearchRow, _source: MusicSourceId, list: MusicSearchRow[], index: number) => {
-  await setQueue(list.map(rowToTrack), index)
+const onPlay = async (_row: MusicSearchRow, tier: DetailPrefix, list: MusicSearchRow[], index: number) => {
+  await setQueue(list.map(r => rowToTrack(r, tier)), index)
+}
+
+/** 「加载更多」现在是合并列表的，两个来源一起翻页 */
+const onLoadMore = () => {
+  for (const s of MUSIC_SOURCES) loadMore(s.id)
 }
 
 /**
@@ -89,7 +97,7 @@ onBeforeUnmount(unmount)
       :resolving-key="resolvingKey"
       :current-key="currentKey"
       @play="onPlay"
-      @load-more="loadMore"
+      @load-more="onLoadMore"
       @retry="retry"
     />
 

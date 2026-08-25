@@ -95,16 +95,37 @@ export async function search24bit(
  * 同一次搜索里所有条目完全相同，摆出来只会让整页看起来像同一首歌。
  * 真封面只有详情页的 `itemMusic.cover` 有，取址成功后会回填。
  */
-export function rowToTrack(row: MusicSearchRow): Track {
+export function rowToTrack(row: MusicSearchRow, tier?: DetailPrefix): Track {
   return {
     key: `24bit:${row.id}`,
     name: row.name,
     artist: row.player,
     album: row.album,
     resolver: '24bit',
-    locator: { id: row.id } satisfies Music24bitLocator,
+    // 用户点了哪个音质档就从哪个开始试；没指定时闸门按默认顺序（b → c）
+    locator: { id: row.id, preferred: tier } satisfies Music24bitLocator,
   }
 }
 
 /** 页面上「加载更多」= page 递增（站点每页固定 30 条） */
 export const PAGE_SIZE = 30
+
+/**
+ * 音质档位。**这两个档就是详情页的两个前缀**（见 DETAIL_PREFIXES），
+ * 界面上让用户直接点档位来播，而不是我们替他猜一个。
+ *
+ * ## 为什么不预先探测「这首歌有哪些档可用」
+ *
+ * 那需要对每首歌把两个前缀都请求一遍 —— 一页 30 首就是 60 发，**必被限流**
+ * （限流还是静默的：站点照常回 200，只是页面里不再有曲目数据）。
+ * 所以两个档一律都列出来，点了才去取址；那个档没有资源时提示换另一个。
+ * 多点一次的代价，远小于每次搜索都把站点惹毛。
+ *
+ * `label` 用的是**站点自己在详情页 `quality` 字段里的说法**（实测值），
+ * 不是我们编的规格参数 —— 编一个「24bit 96kHz」出来而实际文件不是那个规格，
+ * 比不写更糟。取址成功后会用详情页返回的真实 `quality` 覆盖显示。
+ */
+export const QUALITY_TIERS = [
+  { tier: 'b' as DetailPrefix, label: '无损音质', hint: '体积小，约 20–50MB', color: 'primary' as const },
+  { tier: 'c' as DetailPrefix, label: '高清环绕声', hint: '体积大，约 45–115MB', color: 'blue' as const },
+]
