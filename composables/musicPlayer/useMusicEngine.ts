@@ -10,6 +10,7 @@
  */
 import type { MusicMediaState } from './useMusicMediaState'
 import type { ResolvedTrack, Track } from './types'
+import { musicCacheKeyOf } from './useMusicAudioCache'
 
 /** 取到地址后多久还没有任何数据就认为地址死了（签名过期最常见）。比 LOAD_TIMEOUT 早一档 */
 const STALE_URL_TIMEOUT = 8000
@@ -18,6 +19,15 @@ const LOAD_TIMEOUT = 20000
 /** 被新的 load 打断后重试 play() 的间隔与次数（见 attemptPlay 的 AbortError 分支） */
 const PLAY_RETRY_MS = 300
 const PLAY_RETRY_MAX = 3
+
+/**
+ * 播够多少秒才值得把整首缓存下来。
+ *
+ * 翻列表试听是常态：点开三秒觉得不对就切下一首。那种情况下缓存整首等于白下几十 MB
+ * （一首无损 20–110MB），既费用户流量也费我们的代理出口。
+ * 熬过这十秒基本就是真在听了。
+ */
+const CACHE_AFTER_SECS = 10
 
 export interface MusicEngineDeps {
   /** 取址。留空表示这个播放器实例只播直链（阶段 1 就是这样） */
@@ -31,6 +41,28 @@ export function useMusicEngine(media: MusicMediaState, deps: MusicEngineDeps = {
     audioEl, current, isPlaying, currentTime, duration, volume, isMuted,
     isBuffering, isResolving, resolveStage, errorMessage, errorKind, isSeeking,
   } = media
+
+  const cache = useMusicAudioCache()
+  // 下载那半边用来把整首拉下来存缓存 —— 播放能直连但 fetch 不能（CORS 挡 Range），
+  // 所以缓存必须走这条，不能拿播放的地址去 fetch（见 useMusicMediaUrl 的文件注释）
+  const { toPlaybackUrl, demotePlayback, toDownloadUrl } = useMusicMediaUrl()
+
+  /**
+   * 缓存键要带音质档：同一首歌的两个档是**两个不同的文件**（体积差 5 倍），
+   * 只按 track.key 存会让「点高清环绕声却放出无损那一份」。
+   */
+  const cacheKeyFor = (t: Track) =>
+    musicCacheKeyOf(t.key, (t.locator as { preferred?: string } | undefined)?.preferred)
+
+  /** 正在用的 blob URL。切歌要 revoke，否则几十 MB 一首地漏 */
+  let objectUrl = ''
+  /** 当前这首是从缓存放出来的（记缓存键）。心跳据此跳过"再存一遍" */
+  let fromCacheKey = ''
+  const releaseObjectUrl = () => {
+    if (!objectUrl) return
+    URL.revokeObjectURL(objectUrl)
+    objectUrl = ''
+  }
 
   /** 本轮加载的序号。切歌很快时旧的那轮回来要能认出自己已经过时，否则会把新曲目的状态覆盖掉 */
   let loadSeq = 0
@@ -120,6 +152,7 @@ export function useMusicEngine(media: MusicMediaState, deps: MusicEngineDeps = {
         sizeText: r.sizeText ?? track.sizeText,
         quality: r.quality ?? track.quality,
         cover: r.cover ?? track.cover,
+        lrc: r.lrc ?? track.lrc,
       })
       return r.url
     } finally {
@@ -160,15 +193,45 @@ export function useMusicEngine(media: MusicMediaState, deps: MusicEngineDeps = {
     duration.value = 0
     isBuffering.value = true
 
-    let url: string
-    try {
-      url = await resolveUrl(track)
-    } catch (e: any) {
-      if (seq !== loadSeq) return
-      // 文案**不能写死「没有资源」**：实测站点限流时照常回 200、只是不给地址，
-      // 与「这首真没资源」在响应上完全无法区分，说死了就是在冤枉站点、也误导用户
-      fail('resolve', e?.message || '暂时取不到播放地址（可能没有资源，也可能是站点限流）')
-      return
+    releaseObjectUrl()
+
+    /*
+     * 先查本地缓存 —— 命中的话**连取址都不用发**。
+     * 这是整个缓存功能最主要的收益：站点按天按 IP 限配额，而循环播放、重听、
+     * 从收藏里再点开都是常态，每一次都去要一条 20 分钟就过期的新地址纯属浪费额度。
+     *
+     * 只查有 resolver 的（站点解析来的）：手粘直链本来就没有配额问题，
+     * 而且用户可能粘一个巨大的文件，没理由替他缓存。
+     */
+    let url = ''
+    let fromCache = false
+    fromCacheKey = ''
+    cachedFor = ''
+    if (track.resolver) {
+      const key = cacheKeyFor(track)
+      const blob = await cache.getCached(key)
+      if (blob && seq === loadSeq) {
+        objectUrl = URL.createObjectURL(blob)
+        url = objectUrl
+        fromCache = true
+        fromCacheKey = key
+        console.log(`[music] 命中缓存《${track.name}》，未发任何请求`)
+      }
+    }
+    if (seq !== loadSeq) return
+
+    if (!url) {
+      try {
+        // 播放走 toPlaybackUrl：<audio> 不受 CORS 约束，绝大多数 CDN 直连就能播，
+        // 没理由让几十上百 MB 白绕我们的出口
+        url = toPlaybackUrl(await resolveUrl(track))
+      } catch (e: any) {
+        if (seq !== loadSeq) return
+        // 文案**不能写死「没有资源」**：实测站点配额耗尽时照常回 200、只是不给地址，
+        // 与「这首真没资源」在响应上完全无法区分，说死了就是在冤枉站点、也误导用户
+        fail('resolve', e?.message || '暂时取不到播放地址（可能没有资源，也可能是站点限流）')
+        return
+      }
     }
     if (seq !== loadSeq) return
 
@@ -183,20 +246,61 @@ export function useMusicEngine(media: MusicMediaState, deps: MusicEngineDeps = {
     el.muted = isMuted.value
     el.load()
 
-    // 两档闹钟：早的那档静默重取（它**必然误伤**慢源，不该弹任何提示），晚的那档才报错
-    staleTimer = setTimeout(() => {
-      if (seq !== loadSeq) return
-      if ((el.buffered?.length ?? 0) > 0) return   // 已经有数据了，只是慢
-      void refetchAndReload('加载 8s 无数据')
-    }, STALE_URL_TIMEOUT)
+    /*
+     * 两档闹钟：早的那档静默重取（它**必然误伤**慢源，不该弹任何提示），晚的那档才报错。
+     * **缓存命中时一档都不挂**：blob URL 是本地数据，不存在"地址过期"或"源站慢"，
+     * 挂着只会在某些慢解码的机器上误触发一次毫无意义的重新取址（还白烧一份配额）。
+     */
+    if (!fromCache) {
+      staleTimer = setTimeout(() => {
+        if (seq !== loadSeq) return
+        if ((el.buffered?.length ?? 0) > 0) return   // 已经有数据了，只是慢
+        void refetchAndReload('加载 8s 无数据')
+      }, STALE_URL_TIMEOUT)
 
-    hardTimer = setTimeout(() => {
-      if (seq !== loadSeq) return
-      if ((el.buffered?.length ?? 0) > 0) return
-      fail('network', '加载超时，音频地址可能已失效')
-    }, LOAD_TIMEOUT)
+      hardTimer = setTimeout(() => {
+        if (seq !== loadSeq) return
+        if ((el.buffered?.length ?? 0) > 0) return
+        fail('network', '加载超时，音频地址可能已失效')
+      }, LOAD_TIMEOUT)
+    }
 
     if (opts.autoplay !== false) void attemptPlay(seq)
+  }
+
+  // ── 后台缓存 ──
+
+  /** 这一轮已经安排过缓存了，别在心跳里反复触发 */
+  let cachedFor = ''
+
+  /**
+   * 把整首拉下来存本地。**与播放并行、不阻塞起播**（方案 A）：
+   * `<audio>` 那边直连秒开，这边悄悄下一份，用户下次重听/循环就零请求。
+   *
+   * 走 `toDownloadUrl` 而不是播放那条地址：播放能直连是因为 `<audio>` 不受 CORS 约束，
+   * 而这里是 `fetch`，跨域拿不到（`Range` 触发预检、CDN 不放行）——拿播放地址来 fetch 必失败。
+   */
+  const cacheInBackground = async (track: Track) => {
+    if (!track.resolver || !track.url) return
+    const key = cacheKeyFor(track)
+    if (await cache.hasCached(key)) return
+
+    try {
+      const src = await toDownloadUrl(track.url)
+      const res = await fetch(src, { referrerPolicy: 'no-referrer' })
+      if (!res.ok) return
+      const blob = await res.blob()
+      // 全或无：交给 putCached 用 expectedBytes 核对，对不上一个字节都不写
+      const expected = Number(res.headers.get('content-length')) || 0
+      const ok = await cache.putCached(key, blob, {
+        trackKey: track.key,
+        expectedBytes: expected || undefined,
+        format: track.format,
+      })
+      if (ok) console.log(`[music] 已缓存《${track.name}》${(blob.size / 1048576).toFixed(1)}MB`)
+    } catch {
+      // 缓存是锦上添花，失败一声不吭 —— 用户正在听歌，不该为这个弹任何东西
+    }
   }
 
   // ── 事件 ──
@@ -260,6 +364,19 @@ export function useMusicEngine(media: MusicMediaState, deps: MusicEngineDeps = {
     if (!el) return
     if (!el.paused && el.currentTime > lastTick) isBuffering.value = false
     lastTick = el.currentTime
+
+    /*
+     * 播够十秒才把整首存下来。翻列表试听是常态（点开三秒觉得不对就切），
+     * 那种情况下缓存整首等于白下几十 MB。熬过十秒基本就是真在听了。
+     *
+     * 判据用 `currentTime` 而不是"播了多久"：拖到中段听十秒也算真在听。
+     */
+    const t = current.value
+    if (!t || fromCacheKey === cacheKeyFor(t)) return          // 本来就是从缓存放的，别再存一遍
+    if (el.currentTime < CACHE_AFTER_SECS) return
+    if (cachedFor === t.key) return
+    cachedFor = t.key
+    void cacheInBackground(t)
   }
 
   let heartbeat: ReturnType<typeof setInterval> | null = null
@@ -284,6 +401,8 @@ export function useMusicEngine(media: MusicMediaState, deps: MusicEngineDeps = {
     const el = audioEl.value
     clearTimers()
     stopResolveTicker()
+    // blob URL 不 revoke 的话，一首无损就是几十 MB 挂在内存里出不去
+    releaseObjectUrl()
     if (heartbeat) { clearInterval(heartbeat); heartbeat = null }
     if (!el) return
     el.removeEventListener('loadedmetadata', onLoadedMetadata)

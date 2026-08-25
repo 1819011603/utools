@@ -39,6 +39,9 @@ export function useMusicPlayerController(options: MusicPlayerOptions = {}) {
    */
   const download = useMusicDownload({ resolve: options.resolve })
 
+  // 缓存层的状态要能被界面读到（「已缓存」标记、已用空间），所以一起平铺出去
+  const audioCache = useMusicAudioCache()
+
   // ── 队列 ──
 
   /** 播队列里的第 n 首。越界自动收敛，调用方不必先判断 */
@@ -209,6 +212,7 @@ export function useMusicPlayerController(options: MusicPlayerOptions = {}) {
     ...media,
     ...engine,
     ...download,
+    ...audioCache,
     playAt, playNext, playPrev, setQueue, enqueue, removeAt, clearQueue, cycleRepeat,
     playDirectUrl, dismissError,
     mount, unmount, save,

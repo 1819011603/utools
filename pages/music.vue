@@ -37,7 +37,7 @@ provide(MUSIC_PLAYER_KEY, player)
 
 const {
   urlInput, playDirectUrl, setQueue, current, isResolving, errorMessage, errorKind,
-  downloadTrack, showDownloads, showFavorites, mount, unmount,
+  downloadTrack, showDownloads, showFavorites, showQueue, showLyrics, mount, unmount,
 } = player
 
 // 收藏是页面级能力，不经过播放器上下文（播放器不该认识「收藏」这回事）
@@ -151,7 +151,8 @@ onBeforeUnmount(unmount)
       @retry="retry"
     />
 
-    <!-- 三个面板都由播放条上的按钮开合，放在这里而不是浮层：长列表浮起来会盖住播放条本身 -->
+    <!-- 面板都由播放条上的按钮开合，放在这里而不是浮层：长列表浮起来会盖住播放条本身 -->
+    <MusicLyrics v-if="showLyrics" />
     <MusicQueuePanel v-if="showQueue" />
     <MusicFavoritesPanel v-if="showFavorites" />
     <MusicDownloadPanel v-if="showDownloads" />

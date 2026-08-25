@@ -10,7 +10,8 @@ import { formatTrackTime, SEEK_STEP, VOLUME_STEP } from '~/composables/musicPlay
 const {
   audioEl, current, isPlaying, currentTime, duration, volume, isMuted,
   isBuffering, isResolving, resolveStage, errorMessage, errorKind,
-  queue, queueIndex, repeat, shuffle, seekPreview, isSeeking, showQueue, showDownloads, showFavorites,
+  queue, queueIndex, repeat, shuffle, seekPreview, isSeeking,
+  showQueue, showDownloads, showFavorites, showLyrics,
   togglePlay, seekTo, setVolume, toggleMuted, playNext, playPrev, cycleRepeat, dismissError,
   downloadTrack,
 } = useMusicPlayerCtx()
@@ -171,16 +172,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
     <div class="px-3 sm:px-4 py-2 flex items-center gap-3">
       <!-- 封面 + 标题 -->
       <div class="flex items-center gap-3 min-w-0 flex-1">
-        <div class="w-10 h-10 sm:w-12 sm:h-12 rounded-lg overflow-hidden bg-gray-100 dark:bg-gray-800 shrink-0 grid place-items-center">
-          <img
-            v-if="current?.cover"
-            :src="current.cover"
-            referrerpolicy="no-referrer"
-            class="w-full h-full object-cover"
-            alt=""
-          >
-          <UIcon v-else name="i-heroicons-musical-note" class="w-5 h-5 text-gray-400" />
-        </div>
+        <!-- 封面走公共组件：这些图床（如 img1.kuwo.cn）浏览器直连会超时，要能自动退到 /api/thumb -->
+        <MusicCoverArt
+          :src="current?.cover"
+          :alt="current?.name"
+          size-class="w-10 h-10 sm:w-12 sm:h-12"
+        />
         <div class="min-w-0">
           <div class="flex items-center gap-2 min-w-0">
             <span class="truncate text-sm font-medium">
@@ -308,6 +305,15 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           :title="shuffle ? '随机播放' : '顺序播放'"
           aria-label="随机播放"
           @click="shuffle = !shuffle"
+        />
+        <UButton
+          icon="i-heroicons-document-text"
+          :color="showLyrics ? 'primary' : 'gray'"
+          variant="ghost"
+          size="sm"
+          title="歌词"
+          aria-label="歌词"
+          @click="showLyrics = !showLyrics"
         />
         <UButton
           icon="i-heroicons-star"

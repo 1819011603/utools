@@ -77,6 +77,15 @@ export interface MusicDownloadDeps {
 }
 
 export function useMusicDownload(deps: MusicDownloadDeps = {}) {
+  // 下载和播放的可达性限制不一样（播放走 <audio> 不受 CORS 约束，下载走 fetch 受）——
+  // 这里只用下载那一半，见 useMusicMediaUrl 的文件注释
+  const { toDownloadUrl } = useMusicMediaUrl()
+  const cache = useMusicAudioCache()
+
+  /** 缓存键要带音质档：同一首歌两个档是两个不同的文件（体积差 5 倍） */
+  const cacheKeyFor = (t: Track) =>
+    musicCacheKeyOf(t.key, (t.locator as { preferred?: string } | undefined)?.preferred)
+
   /** 界面直接渲染这一份。ref 对对象数组是深响应的，所以逐字段改 item 就能刷新进度条 */
   const downloads = ref<MusicDownloadItem[]>([])
 
@@ -176,6 +185,23 @@ export function useMusicDownload(deps: MusicDownloadDeps = {}) {
       let url = track.url
       let format = track.format || item.format
 
+      /*
+       * 先查本地缓存：播过的歌整份都在这儿，命中就直接存盘 ——
+       * **零请求、零流量、零配额**。站点按天按 IP 限量，这一步省下的额度最实在。
+       */
+      if (track.resolver) {
+        const hit = await cache.getCached(cacheKeyFor(track))
+        if (hit) {
+          item.totalBytes = hit.size
+          item.receivedBytes = hit.size
+          item.percent = 100
+          saveBlob(hit, buildFileName(track.name, track.artist, format))
+          item.format = format
+          item.status = 'done'
+          return
+        }
+      }
+
       // 曲目手上没有地址（列表里存的是占位）→ 现取。取址可能要好几秒，界面上得有交代
       if (!url) {
         item.status = 'resolving'
@@ -205,6 +231,19 @@ export function useMusicDownload(deps: MusicDownloadDeps = {}) {
       // `content-type` 还谎报成 audio/mpeg（内容其实常是 flac）——跟着它走会存下一个
       // 扩展名错误、名字是一串 hash 的文件（见 display.ts 的 buildFileName）
       saveBlob(blob!, buildFileName(track.name, track.artist, format))
+
+      /*
+       * 下完顺手存进缓存：用户下过的歌多半也会在页面里听，
+       * 存一份下次播放就零请求。这里的 blob 是完整的（走到这说明分块全部成功），
+       * 正好满足「要么全缓存、要么全不缓存」。
+       */
+      if (track.resolver && blob) {
+        void cache.putCached(cacheKeyFor(track), blob, {
+          trackKey: track.key,
+          expectedBytes: blob.size,
+          format,
+        })
+      }
 
       item.format = format
       item.status = 'done'
@@ -244,7 +283,19 @@ export function useMusicDownload(deps: MusicDownloadDeps = {}) {
    * （否则 4MB 之后的字节会被当成「下一块」再请求一遍，等于把整首歌下 N 遍）。
    * 判据是**状态码 206**，不是「有没有 content-range」——有的节点会回 200 却带着这个头。
    */
-  const fetchInChunks = async (url: string, item: MusicDownloadItem, signal: AbortSignal): Promise<Blob> => {
+  const fetchInChunks = async (rawUrl: string, item: MusicDownloadItem, signal: AbortSignal): Promise<Blob> => {
+    /*
+     * **下载必须先过这一步，直连多半是走不通的。**
+     *
+     * 实测同一个地址：`<audio>` 直连能播，但 `fetch` 直连 `Failed to fetch`（114ms 就挂）。
+     * 原因不是网络而是 CORS —— `Range` 不是 CORS 安全头、会触发预检，而这些 CDN
+     * 不在 `access-control-allow-headers` 里放行它。所以「能播放却下载失败」是必然，
+     * 不是偶发故障（用户报的就是这个症状）。
+     *
+     * toDownloadUrl 按 host 探一次再记住：放行的直连、不放行的走 /api/proxy。
+     */
+    const url = await toDownloadUrl(rawUrl)
+
     const parts: BlobPart[] = []
     let offset = 0
 

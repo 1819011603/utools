@@ -56,6 +56,7 @@ export function useMusicMediaState() {
   const showQueue = ref(false)
   const showDownloads = ref(false)
   const showFavorites = ref(false)
+  const showLyrics = ref(false)
 
   const progressPercent = computed(() =>
     duration.value ? Math.min(100, (currentTime.value / duration.value) * 100) : 0,
@@ -68,7 +69,7 @@ export function useMusicMediaState() {
     errorMessage, errorKind,
     queue, queueIndex, repeat, shuffle,
     seekPreview, isSeeking,
-    showQueue, showDownloads, showFavorites,
+    showQueue, showDownloads, showFavorites, showLyrics,
     progressPercent,
   }
 }

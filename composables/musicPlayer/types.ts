@@ -35,6 +35,12 @@ export interface Track {
   duration?: number
 
   /**
+   * 歌词原文（LRC 格式或纯文本）。取址时顺带拿到，**经常是空的**
+   * ——实测酷我那个源回的是长度 2 的空占位，所以界面必须做成「有才显示」。
+   */
+  lrc?: string
+
+  /**
    * 播放地址。**这个字段绝不能被持久化**（写进 localStorage 的地址下次打开必定是死链）。
    * 留空 = 还没取址，播放前要先过 `TrackResolver`。
    */
@@ -61,13 +67,24 @@ export interface Track {
  */
 export type TrackResolver = (track: Track) => Promise<ResolvedTrack>
 
-/** 取址结果。除了地址，站点通常还会顺手给回更准的元数据（真封面、体积、格式） */
+/**
+ * 取址结果。
+ *
+ * ⚠️ **`name`/`artist`/`album` 不可信，不要拿去覆盖 `Track` 上原有的值。**
+ * 实测站点在某些 id 下存的元数据是串的：请求「想你就写信」那个 id，回来的 `id` 与请求
+ * 完全一致，`name`/`player`/`album` 却是另一首完全无关的歌（音频文件本身是对的 ——
+ * 体积、音质都对得上，是它那边曲库匹配错了）。覆盖的表现就是「点了 A，播放条显示 B」。
+ * 用户点的是搜索结果里那一条，那条才是身份来源；这里只该采信**文件属性**。
+ */
 export interface ResolvedTrack {
   url: string
   format?: string
   sizeText?: string
   quality?: string
   cover?: string
+  /** 歌词原文。经常是空的（见 Track.lrc） */
+  lrc?: string
+  /** 以下三项**仅供参考**，理由见上方注释 */
   name?: string
   artist?: string
   album?: string

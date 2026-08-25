@@ -35,6 +35,26 @@ const emit = defineEmits<{
 
 const keyOf = (row: MusicSearchRow) => `24bit:${row.id}`
 
+/**
+ * 用户点的是哪一档。**只让被点的那颗转圈** ——
+ * 早先只按 `resolvingKey === keyOf(row)` 判断，同一行的两颗按钮都成立，
+ * 于是点「无损音质」时「高清环绕声」也跟着转，看着像两个档同时在取址（并没有）。
+ */
+const pickedTier = ref<{ key: string; tier: DetailPrefix } | null>(null)
+
+const isTierLoading = (row: MusicSearchRow, tier: DetailPrefix) =>
+  props.resolvingKey === keyOf(row)
+  && pickedTier.value?.key === keyOf(row)
+  && pickedTier.value?.tier === tier
+
+const onPickTier = (row: MusicSearchRow, tier: DetailPrefix, index: number) => {
+  pickedTier.value = { key: keyOf(row), tier }
+  emit('play', row, tier, merged.value, index)
+}
+
+// 取址结束（不论成败）就把转圈状态收掉，否则那颗按钮会一直转下去
+watch(() => props.resolvingKey, (k) => { if (!k) pickedTier.value = null })
+
 /** 交替取，两个来源的结果都能靠前露脸 */
 const merged = computed<MusicSearchRow[]>(() => {
   const lists = props.states.map(s => s.rows)
@@ -119,9 +139,9 @@ const firstError = computed(() => props.states.find(s => s.status === 'error')?.
             size="2xs"
             :color="q.color"
             variant="soft"
-            :loading="resolvingKey === keyOf(row)"
+            :loading="isTierLoading(row, q.tier)"
             :title="q.hint"
-            @click="emit('play', row, q.tier, merged, i)"
+            @click="onPickTier(row, q.tier, i)"
           >
             {{ q.label }}
           </UButton>

@@ -26,6 +26,8 @@ interface ItemMusic {
   name?: string
   player?: string
   album?: string
+  /** 歌词。**不是所有源都有**：实测酷我那条（`b`）回的是长度 2 的空占位 */
+  lrc?: string
 }
 
 /**
@@ -131,6 +133,11 @@ export default defineEventHandler(async (event) => {
     sizeText: item.size,
     quality: item.quality,
     cover: item.cover,
+    /*
+     * 歌词原样透传，解析交给前端。**不是所有源都有**——实测酷我那条（`b`）
+     * 回的是长度 2 的空占位，网易云那条才可能有内容，所以前端必须容忍它为空。
+     */
+    lrc: item.lrc,
     name: item.name,
     artist: item.player,
     album: item.album,
