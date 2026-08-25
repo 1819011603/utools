@@ -1,24 +1,5 @@
 {
   "name": "utools",
   "compatibility_date": "2024-09-23",
-  "pages_build_output_dir": "dist",
-  "//": "账号与清单同步用的 D1。database_id 要换成 `npx wrangler d1 create utools-users` 输出的那一串。Pages 的 production 和 preview 是两套绑定，两处都要写，只写顶层的话预览部署上账号功能会 500。",
-  "d1_databases": [
-    {
-      "binding": "USER_DB",
-      "database_name": "utools-users",
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID"
-    }
-  ],
-  "env": {
-    "preview": {
-      "d1_databases": [
-        {
-          "binding": "USER_DB",
-          "database_name": "utools-users",
-          "database_id": "REPLACE_WITH_D1_DATABASE_ID"
-        }
-      ]
-    }
-  }
+  "pages_build_output_dir": "dist"
 }

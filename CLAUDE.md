@@ -488,10 +488,24 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
 - **本地 `nuxt dev` 没有 D1 绑定** → `userStore` 有一份 `.data/*.json` 的开发兜底（判据是 `process` 存在），
   没有它账号功能在本地一步都跑不动
 
-**部署四步**（少一步就是线上 503）：`npx wrangler d1 create utools-users` →
-把 `database_id` 填进 `wrangler.json`（**顶层和 `env.preview` 两处都要**）→
-`npx wrangler d1 execute utools-users --remote --file=./server/db/schema.sql`
-（`userStore` 也有懒建表兜底）→ `npx wrangler pages secret put USER_TOKEN_SECRET`。
+**部署四步**（做完之前账号功能就是线上 503，但**其余功能一切正常** —— `wrangler.json` 里
+默认压根没有 `d1_databases` 这一段，就是为了不拖累部署）：
+
+1. `npx wrangler d1 create utools-users` → 记下 `database_id`
+2. 把下面这段加进 `wrangler.json`（**顶层 = production，`env.preview` 再来一份**，Pages 两个环境各自绑）：
+   ```json
+   "d1_databases": [{ "binding": "USER_DB", "database_name": "utools-users", "database_id": "真的 UUID" }],
+   "env": { "preview": { "d1_databases": [{ "binding": "USER_DB", "database_name": "utools-users", "database_id": "真的 UUID" }] } }
+   ```
+3. `npx wrangler d1 execute utools-users --remote --file=./server/db/schema.sql`（`userStore` 也有懒建表兜底）
+4. `npx wrangler pages secret put USER_TOKEN_SECRET`（32 字节随机 hex）
+
+**`database_id` 绝不能留占位串**：Cloudflare 在 publish 阶段就校验它，
+`Error 8000022: Invalid database UUID` 会让**整个 Function 发布失败**（资源已经上传完了才报，
+日志上半段全是 `Success`，很容易误读成别的问题）—— 也就是说一个假 UUID 会连带把
+放映厅、解析、音乐那些跟账号毫无关系的接口一起弄挂。宁可先不写这一段。
+另外 **JSON 里不要塞 `"//"` 当注释键**：wrangler 每次都会警告
+`Unexpected fields found in top-level field: "//"`，构建日志里多一条噪音。
 
 ## 踩过的坑（通用）
 
