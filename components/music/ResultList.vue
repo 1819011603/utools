@@ -138,11 +138,19 @@ watch(() => props.resolvingKey, (k) => { if (!k) pickedTier.value = null })
           这个音乐源没有「{{ keyword }}」，换上面另一个页签试试
         </div>
 
+        <!--
+          卡片上的 `min-w-0` **不能省，也不能只挂在里面那个文字列上**。
+          网格项（和弹性项一样）默认 `min-width: auto` —— 它不肯缩到「内容最小宽度」以下，
+          于是一条长歌名就把整张卡撑成 641px 塞进 296px 的格子里，
+          右边那列（音质档 / 收藏 / 下载）被推到 x≈650，**在 360px 的手机上整列在屏幕外**，
+          还被布局根上的 `overflow-x-clip` 裁掉 —— 表现就是「安卓上搜索结果没有按钮」。
+          里层那个 `min-w-0 flex-1` 也因此从来没生效过：truncate 要有个不肯变宽的祖先才谈得上截断。
+        -->
         <div v-else class="grid gap-3 sm:grid-cols-2">
           <div
             v-for="(row, i) in active.rows"
             :key="row.id"
-            class="rounded-xl border p-3 flex gap-3 transition-colors"
+            class="rounded-xl border p-3 flex gap-3 min-w-0 transition-colors"
             :class="currentKey === keyOf(row)
               ? 'border-primary-300 dark:border-primary-700 bg-primary-50/50 dark:bg-primary-950/20'
               : 'border-gray-200 dark:border-gray-800 hover:border-gray-300 dark:hover:border-gray-700'"

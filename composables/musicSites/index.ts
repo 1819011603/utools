@@ -39,14 +39,34 @@ export function rowToTrack(row: MusicSearchRow, tier?: string): Track {
   }
 }
 
-/** 按 id 找站点。找不到返回 undefined —— 老数据里可能有已经下线的站点名 */
-export const siteById = (id?: string): MusicSite | undefined =>
-  MUSIC_SITES.find(s => s.id === id)
+/**
+ * 全部站点（含只在本地可用的那些）。
+ *
+ * **写成函数而不是数组常量**：文件顶上那条规矩是「数组常量必须留在最后」，
+ * 而这份列表要被 `siteById` 用到，只能排在它前面 —— 换成函数就绕开了整件事。
+ */
+const allSites = (): MusicSite[] => [SITE_FANGPI, SITE_24BIT]
 
 /**
- * 注册表。**顺序决定界面上分区的先后**，排序按的是**「点下去多半能播」而不是音质**：
+ * 按 id 找站点。找不到返回 undefined —— 老数据里可能有已经下线的站点名。
+ *
+ * **查的是 `allSites()` 而不是 `MUSIC_SITES`**：线上被摘掉的站点（`localOnly`）仍然要查得到，
+ * 否则存量收藏里那些曲目会落到「不认识这个音源」那句含糊话上，
+ * 而准确的说法是「这个源线上用不了」。
+ */
+export const siteById = (id?: string): MusicSite | undefined =>
+  allSites().find(s => s.id === id)
+
+/**
+ * 搜索界面用的注册表。**顺序决定界面上分区的先后**，排序按的是**「点下去多半能播」而不是音质**：
  * 24bit 对匿名访问按天限量（配额一满，整天所有曲目都只回一句 429，音质再好也播不了），
  * fangpi 没有这回事。把「有资源但可能取不到地址」的那段摆在前面，
  * 用户点第一排点到的多半是 429，得往下翻才有能播的——先后一换就没这回事了。
+ *
+ * **线上摘掉 `localOnly` 的站点**：那些站点在 CF 上是「点了必报错」，摆着只是个坑。
+ * 判据用 `import.meta.dev`（构建时就是常量，客户端和服务端都有），不做任何运行时探测 ——
+ * 于是线上那几个站点的代码顺带也被摇掉了。**两个环境的界面因此不一样，这是有意的。**
  */
-export const MUSIC_SITES: MusicSite[] = [SITE_FANGPI, SITE_24BIT]
+export const MUSIC_SITES: MusicSite[] = import.meta.dev
+  ? allSites()
+  : allSites().filter(s => !s.localOnly)

@@ -408,8 +408,17 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
 
 只有一档 128K MP3，但**不要 cookie、没发现配额、而且自带歌词**——24bit 撞配额时它照常能用。
 
+- 🚫 **这个源在 CF Pages 上根本用不了，只有本地能用**（实测：本机直连 + 浏览器 UA → 200 / 80KB；
+  线上 `/api/music/fangpi/search` → 502 `Just a moment`）。原因是源站也在 Cloudflare 后面，
+  它的 WAF 拦的正是数据中心出口，而**我们从 Workers 里唯一能改的只有请求头，UA 早就照浏览器发了**
+  ——出口 IP 和 TLS 指纹都不在我们手里。
+  **也不能让浏览器自己抓**：响应连一个 `Access-Control-Allow-*` 都没有（`Origin` 试过了）。
+  所以这不是「还没修」，是**没有能修的东西**；线上要音乐只能走 24bit（实测正常）。
+  配套：`CF_WALL_MESSAGE` 按 `import.meta.dev` 分成两句 —— 线上念「你的 dev server 带了代理」
+  是纯误导，而它听起来太像个具体线索，足够让人往「配置写错了」查半天（**已经发生过一次**）
 - **CF 按客户端指纹拦人**：curl 和 **Node 的 `fetch`（undici）都过**，Python urllib 恒 403；
-  **经 `HTTPS_PROXY` 的出口恒 403**（`Just a moment`）→ 靠 `musicFetch`「代理在前、撞墙退直连」自愈
+  **经 `HTTPS_PROXY` 的出口恒 403**（`Just a moment`）→ 靠 `musicFetch`「代理在前、撞墙退直连」自愈。
+  注意这条只在本地成立：线上没有 `HTTPS_PROXY`，那套双通道退化成单条直连，而直连就是被拦的那条
 - **搜索页没有分页**：`?page=2` 回的还是第一页原文，结果一次给全 → 描述符里 `pageSize: 0`，
   界面上一个「加载更多」都不画（按了没反应比没有更让人以为坏了）
 - **取址是两跳，绕不开**：`/music/<id>` 抠 `window.appData.play_id`（Laravel `encrypt()` 的产物，
@@ -509,7 +518,16 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
 
 ## 踩过的坑（通用）
 
-- **CF Workers 无 `process`**：判空后再动态 `import('undici')`，specifier 必须用变量 + `@vite-ignore`
+- **CF Workers 上没有 Node 的那套 API**（`undici`、`node:fs`…）：判空后再动态 `import()`，
+  specifier 必须用变量 + `@vite-ignore`。
+  ⚠️ **但别拿 `process` 来判「是不是在 Node 里」**：workerd 上 `globalThis.process.env` **是存在的**
+  （一个空对象），`globalThis.process?.env` 这个判据在线上恒为真。
+  `siteFetch`/`musicFetch` 用它读 `HTTPS_PROXY` 没事（读出来是 undefined，正好等于「不走代理」），
+  但**凡是「Node 才有的能力要不要走」这类分支，一律用 `import.meta.dev`**（Nitro/Nuxt 构建时替换成常量，
+  客户端和服务端都有，还能顺带把另一条分支摇掉）。
+  **踩过**：`userStore` 曾用 `process?.env` 判断该不该退回本地文件存储，
+  于是线上把整条本地兜底路走通了——`/api/user/quota` 一本正经地回 `0/5`（其实是 `node:fs` 导入失败
+  被当成了「文件不存在」），注册 500，日志里一句「绑定没配」都没有
 - **服务端的 module 级缓存在 CF Pages 上只活在当前 isolate 里**，换个 isolate 就是空的——**本地 Node 单进程反而一直命中，
   所以这类 bug 只在线上偶发**。凡是「服务端记着、客户端不带」的都踩得到：ncat22 的反爬令牌就是这样，按需取址那一发
   `?step=extract&only=1` 读不到缓存 → **409**，而这条路径走不到 `step=challenge`、没有算 PoW 的出路 →

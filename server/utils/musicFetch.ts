@@ -113,10 +113,23 @@ export function isCloudflareWall(status: number, body: string): boolean {
   return body.includes('Just a moment') || body.includes('challenges.cloudflare.com')
 }
 
-/** 撞上 CF 墙时统一的说法。本地开发最常见的原因就是 dev server 带了 HTTPS_PROXY */
-export const CF_WALL_MESSAGE
-  = '音乐站返回了人机校验页。本地开发时最常见的原因是 dev server 带了 HTTPS_PROXY —— '
+/**
+ * 撞上 CF 墙时统一的说法。**本地和线上必须说不同的话，因为根因完全不同**：
+ *
+ *   · 本地：几乎总是 dev server 带了 HTTPS_PROXY，代理出口被拦，去掉就好 —— 是个能修的事
+ *   · 线上：拦的是 **Cloudflare 自己的出口**（源站也在 CF 后面，WAF 拦数据中心 ASN）。
+ *     Workers 改不了出口 IP，请求头早就照浏览器发了，**没有能修的东西**
+ *
+ * 这个区别不做出来的话，线上会对着用户念「你的 dev server 带了代理」——
+ * 一句在 pages.dev 上毫无意义的话，而它偏偏听起来很像个具体线索，
+ * 足以让人往「配置写错了」的方向查半天（**已经发生过一次**）。
+ * 判据用 `import.meta.dev`（Nitro 构建时替换成常量），不用任何运行时探测。
+ */
+export const CF_WALL_MESSAGE = import.meta.dev
+  ? '音乐站返回了人机校验页。本地开发时最常见的原因是 dev server 带了 HTTPS_PROXY —— '
     + '这个站必须直连，代理的出口 IP 会被 Cloudflare 拦。'
+  : '这个音源在线上用不了：源站的人机校验拦的是 Cloudflare 的出口 IP，而 Workers 改不了出口。'
+    + '请换用另一个音源（24bit 线上正常）。'
 
 /**
  * 认出「今日访问已达限额」。

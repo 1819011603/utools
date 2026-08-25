@@ -27,6 +27,14 @@ export const SITE_FANGPI: MusicSite = {
   name: '放屁音乐网',
   tagline: 'MP3 128K · 体积小、多数歌带歌词',
 
+  /**
+   * **线上用不了，只在本地开发时出现。** 源站也在 Cloudflare 后面，它的 WAF 拦的正是
+   * 数据中心出口 —— 实测本机直连 200（80KB 正常 HTML），CF Pages 上恒 502 `Just a moment`。
+   * 从 Workers 里能改的只有请求头（UA 早就照浏览器发了），出口 IP 改不了；
+   * 让浏览器自己抓也不行，响应连一个 `Access-Control-Allow-*` 都没有。详见 CLAUDE.md 那一节。
+   */
+  localOnly: true,
+
   /** 只有一条搜索路径（`/s/<kw>`），所以就一条泳道 */
   sources: [{ id: 'main', name: '默认' }],
 

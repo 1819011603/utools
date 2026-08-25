@@ -284,7 +284,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           color="gray"
           variant="ghost"
           size="sm"
-          class="hidden sm:inline-flex"
+          class="hidden md:inline-flex"
           :disabled="!hasQueue"
           aria-label="上一首"
           @click="playPrev"
@@ -317,13 +317,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         而手机上那点宽度留给歌名比留给一串数字值 —— 原来只藏总时长，
         剩下的「00:00」照样占位，右侧图标被顶到屏幕外（安卓上表现是「播放、收藏都看不见」）。
       -->
-      <div class="hidden sm:block text-xs tabular-nums text-gray-500 shrink-0">
+      <div class="hidden md:block text-xs tabular-nums text-gray-500 shrink-0">
         {{ formatTrackTime(shownTime) }} / {{ formatTrackTime(duration) }}
       </div>
 
       <!-- 右侧：音量（窄屏不渲染，触摸端没有 hover，滑条展不开）+ 循环 + 队列 -->
       <div class="flex items-center gap-1 shrink-0">
-        <div class="hidden sm:flex items-center gap-1">
+        <div class="hidden md:flex items-center gap-1">
           <UButton
             :icon="volumeIcon"
             color="gray"
@@ -338,7 +338,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
             max="1"
             step="0.01"
             :value="isMuted ? 0 : volume"
-            class="w-20 accent-primary-500"
+            class="hidden lg:inline-block w-20 accent-primary-500"
             aria-label="音量"
             @input="setVolume(Number(($event.target as HTMLInputElement).value))"
           >
@@ -360,7 +360,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           color="gray"
           variant="ghost"
           size="sm"
-          class="hidden sm:inline-flex"
+          class="hidden md:inline-flex"
           title="下载这首"
           aria-label="下载这首"
           @click="onDownloadCurrent"
@@ -370,7 +370,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           :color="repeat === 'off' ? 'gray' : 'primary'"
           variant="ghost"
           size="sm"
-          class="hidden sm:inline-flex"
+          class="hidden md:inline-flex"
           :title="repeatLabel"
           :aria-label="repeatLabel"
           @click="cycleRepeat"
@@ -380,7 +380,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           :color="shuffle ? 'primary' : 'gray'"
           variant="ghost"
           size="sm"
-          class="hidden sm:inline-flex"
+          class="hidden md:inline-flex"
           :title="shuffle ? '随机播放' : '顺序播放'"
           aria-label="随机播放"
           @click="shuffle = !shuffle"
@@ -390,7 +390,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           :color="showLyrics ? 'primary' : 'gray'"
           variant="ghost"
           size="sm"
-          class="hidden sm:inline-flex"
+          class="hidden md:inline-flex"
           title="歌词"
           aria-label="歌词"
           @click="showLyrics = !showLyrics"
@@ -401,7 +401,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           :color="showFavorites ? 'primary' : 'gray'"
           variant="ghost"
           size="sm"
-          class="hidden sm:inline-flex"
+          class="hidden md:inline-flex"
           :title="showFavorites ? '收起我的收藏' : '我的收藏'"
           aria-label="我的收藏"
           @click="showFavorites = !showFavorites"
@@ -415,14 +415,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           aria-label="播放队列"
           @click="showQueue = !showQueue"
         >
-          <span v-if="queue.length" class="hidden sm:inline text-xs tabular-nums">{{ queueIndex + 1 }}/{{ queue.length }}</span>
+          <span v-if="queue.length" class="hidden md:inline text-xs tabular-nums">{{ queueIndex + 1 }}/{{ queue.length }}</span>
         </UButton>
 
         <!--
           「更多」**只在窄屏出现**：手机上一行放不下九个图标，硬摆的结果是右边几个被顶出屏幕
           （用户看到的就是「播放、收藏按钮不见了」）。宽屏一个不藏，不需要这一层。
         -->
-        <UDropdown :items="moreItems" :popper="{ placement: 'top-end' }" class="sm:hidden">
+        <UDropdown :items="moreItems" :popper="{ placement: 'top-end' }" class="md:hidden">
           <UButton
             icon="i-heroicons-ellipsis-horizontal"
             color="gray"

@@ -172,9 +172,16 @@ async function fsMod(): Promise<any> {
   return await import(/* @vite-ignore */ spec)
 }
 
+/**
+ * **`fsMod()` 放在 try 外面**：里面那个 catch 是为了「文件还不存在」这种正常情况，
+ * 不能顺手把「压根没有 node:fs」也吞掉 —— 吞掉的后果是线上把「读不到」当成「库是空的」，
+ * 于是 `/api/user/quota` 一本正经地回 0/5，而注册会 500。**踩过一次**：
+ * 曾用 `globalThis.process?.env` 判断「是不是在 Node 里」，而 CF Workers 上
+ * `process.env` 是存在的（一个空对象），判据当场失效，整条兜底路在线上被走通了。
+ */
 async function devRead<T>(file: string, fallback: T): Promise<T> {
+  const fs = await fsMod()
   try {
-    const fs = await fsMod()
     return JSON.parse(await fs.readFile(`${DEV_DIR}/${file}`, 'utf8')) as T
   } catch { return fallback }
 }
@@ -258,15 +265,17 @@ export function getUserStore(event: H3Event): UserStore {
   const db = (event.context as any)?.cloudflare?.env?.USER_DB
   if (db) return d1Store(db)
   /*
-   * 没有 D1 绑定。**只有本地 Node 才允许退回文件存储**——判据是 `process` 存在
-   * （CF Workers 上没有它，同 `siteFetch.ts:36`）。
+   * 没有 D1 绑定。**只有本地开发才允许退回文件存储**，线上必须当场说清是「绑定没配」
+   * ——不然报出来的是 `Dynamic require of "node:fs/promises" is not supported`，
+   * 一句跟真实原因（`database_id` 没填、或者 preview 环境漏了那份绑定）毫无关系的话。
    *
-   * 线上少了绑定时必须当场说清是「绑定没配」：让它掉进文件存储那条路的话，
-   * 报出来的是 `Dynamic require of "node:fs/promises" is not supported`
-   * ——一句跟真实原因毫无关系的话，而真实原因（wrangler.json 里的 database_id 没换、
-   * 或者 preview 环境漏了那份绑定）光看这句是想不到的。
+   * 判据只能用 `import.meta.dev`（Nitro 在**构建时**就把它替换成常量）。
+   * **不能用 `globalThis.process?.env` 来判「是不是在 Node 里」**：CF Workers 上
+   * `process.env` 是存在的（一个空对象），这个判据在线上恒为真 —— 于是整条本地兜底路
+   * 在线上被走通，`quota` 一本正经地回 0/5、注册 500，而日志里一句「绑定没配」都没有。
+   * 这条**已经在线上踩到过一次**，别再改回运行时探测。
    */
-  if (!(globalThis as any).process?.env) {
+  if (!import.meta.dev) {
     throw createError({ statusCode: 503, statusMessage: '服务端没有绑定 D1 数据库（USER_DB），账号功能暂不可用' })
   }
   return devStore()
