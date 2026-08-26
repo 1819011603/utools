@@ -176,15 +176,15 @@ export function useCloudSync() {
       }
       m.tomb[spec.id] = tomb
       m.clearedAt[spec.id] = clearedAt
-      m.rev[spec.id] = row?.rev ?? 0
+      m.rev[spec.id] = row.rev
 
+      // 走到这说明云端**确实有**这一份（没有的那些在上面就 continue 了），
+      // 所以不必再判「别白占一行」——那道闸挪到了上面那条快路径里
       const next = { v: 1 as const, items: merged, tomb, clearedAt }
       const cloudSide = { v: 1 as const, items: cp.items, tomb: cp.tomb, clearedAt: cp.clearedAt }
-      // 云端压根没有这一份、而本地也确实没东西 → 不要白占一行
-      const trivial = !row && isEmptyItems(spec.kind, merged) && !Object.keys(tomb).length && !clearedAt
-      if (!trivial && !sameJson(next, cloudSide)) {
+      if (!sameJson(next, cloudSide)) {
         dirtyAt[spec.id] = m.dirty[spec.id]
-        pushes.push({ coll: spec.id, baseRev: row?.rev ?? 0, payload: JSON.stringify(next) })
+        pushes.push({ coll: spec.id, baseRev: row.rev, payload: JSON.stringify(next) })
       } else {
         // 这一段整个是同步的，localStorage 不可能在中途变，所以这里清脏标记是安全的
         delete m.dirty[spec.id]
@@ -246,7 +246,10 @@ export function useCloudSync() {
     // 节流的时钟在**尝试**时就往前走，失败也算（否则出错时会被每一次改动反复撞）
     patchMeta(m => { m.lastSyncAt = Date.now() })
     try {
-      if (await cycle()) await cycle()   // 只重试一次：两台设备来回撞的话再多试也是撞
+      // 只重试一次：两台设备来回撞的话再多试也是撞。
+      // **重来那一轮走全量**：撞 rev 说明别的设备刚写过，本机记的 rev 已经不可信，
+      // 「rev 一样 = 云端没动」那条推断在这里正好不成立
+      if (await cycle()) await cycle(true)
       const m = patchMeta(x => { x.lastOkAt = Date.now() })
       lastOkAt.value = m.lastOkAt
       pendingChanges.value = Object.keys(m.dirty).length > 0
