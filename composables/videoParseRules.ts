@@ -486,6 +486,11 @@ export interface ParseResult {
   ruleId: string
   ruleName: string
   title?: string         // 影片名（取自 <title>）
+  /**
+   * 封面图（取自 `og:image` 这类分享用元信息，见 server/parsers/utils.ts 的 parseCover）。
+   * 只给「播放历史 / 收藏影片」当缩略图用，抠不到就没有，界面上退回占位块。
+   */
+  cover?: string
   pageUrl: string
   currentVideoUrl?: string
   /**

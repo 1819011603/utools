@@ -172,6 +172,11 @@ export interface QueryVideoParams {
    */
   lineName?: string
   ep?: string
+  /**
+   * 起播秒数。播放历史那份清单里点一条进来时带上——它记的是「第 10 集 12:34」，
+   * 而播放器按 URL 存的进度不上云（键是带签名的地址），换台设备就只剩这个数字能用。
+   */
+  t?: number
 }
 
 /**
@@ -186,5 +191,5 @@ export interface QueryVideoParams {
 // 原样接到最近那个视频地址后面去。同 proxy/noref/manifestOnly——认得出、然后忽略。
 export const PAGE_QUERY_KEYS = new Set([
   'url', 'urls', 'index', 'origin', 'referer', 'proxy', 'noref', 'manifestOnly', 'handoff',
-  'parseUrl', 'line', 'lineName', 'ep',
+  'parseUrl', 'line', 'lineName', 'ep', 't',
 ])

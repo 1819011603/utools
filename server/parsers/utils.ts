@@ -48,6 +48,28 @@ export function parseTitle(html: string, strips: RegExp[] = []): string | undefi
 }
 
 /**
+ * 取封面图。
+ *
+ * **一律走 `og:image` 这类通用元信息，不为每个站写选择器**：站点改版时正文里那个
+ * `<img>` 的类名说变就变，而分享卡片用的 meta 各站都有、且是站点自己要维护的
+ *（改坏了它自家的微信/推特分享卡就没图了）。抠不到就返回 undefined ——
+ * 封面是锦上添花，界面上退回一个占位块即可，绝不能因此让整次解析失败。
+ *
+ * 属性顺序两种都试：`content` 写在 `property` 前面的模板并不少见（实测 MacCMS 有）。
+ */
+export function parseCover(html: string, pageUrl: string): string | undefined {
+  const pick = (re: RegExp) => html.match(re)?.[1]
+  const raw =
+    pick(/<meta[^>]+property=["']og:image["'][^>]*content=["']([^"']+)["']/i)
+    ?? pick(/<meta[^>]+content=["']([^"']+)["'][^>]*property=["']og:image["']/i)
+    ?? pick(/<meta[^>]+name=["']twitter:image["'][^>]*content=["']([^"']+)["']/i)
+    ?? pick(/<link[^>]+rel=["']image_src["'][^>]*href=["']([^"']+)["']/i)
+  if (!raw) return undefined
+  const url = absolutize(decodeEntities(raw), pageUrl)
+  return /^https?:\/\//i.test(url) ? url : undefined
+}
+
+/**
  * 苹果 CMS（`player_aaaa`）系站点的播放地址解码。
  *
  * 站点按 `encrypt` 字段给三种形态：0=明文、1=percent、2=base64 套 percent。

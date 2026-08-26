@@ -214,7 +214,7 @@ export function useVideoPlayerController() {
       //（否则分享链接会跳到收链接的人本机上一部剧的集数，实测抓到过）
       const idx = queryParams.index ?? 0
       await nextTick()
-      await playlist.loadFromParseSource(queryParams.parseUrl, line, idx, queryParams.lineName, queryParams.ep)
+      await playlist.loadFromParseSource(queryParams.parseUrl, line, idx, queryParams.lineName, queryParams.ep, queryParams.t)
     } else if (queryParams.urls.length) {
       media.videoUrlInput.value = queryParams.urls.join('\n')
       await nextTick()

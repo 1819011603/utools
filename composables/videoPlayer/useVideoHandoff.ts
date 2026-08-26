@@ -17,8 +17,21 @@ import type { PlaylistSource } from './types'
 export function useVideoHandoff() {
   // 剧名。播放器和播放列表的标题位都用它顶掉泛称
   const playlistTitle = ref('')
+  /**
+   * 封面图地址（解析结果的 `og:image`）。播放器自己一个像素都不画它——
+   * 它的用处是**记进播放历史和收藏**，让那两份清单里有图可看。抠不到就是空串。
+   */
+  const playlistCover = ref('')
   // 播放列表的来源，有值才显示「刷新链接」
   const playlistSource = ref<PlaylistSource | null>(null)
+  /**
+   * 这部剧有哪些线路（换源面板用）。
+   *
+   * 存的是解析结果 `lines` 的**精简副本**：整份 lines 里每条都挂着几十上百集的地址，
+   * 而换源只需要「叫什么、有几集、在第几位」。下标即线路序号（`?line=` 用的就是它），
+   * 与解析结果严格对齐，所以只能整份一起赋值，不能挑着塞。
+   */
+  const playlistLines = ref<{ name: string; sublabel?: string; count: number }[]>([])
   // 显示名；查不到时 getVideoName 退回从 URL 猜文件名。
   // 长剧每一集的地址都叫 index.m3u8，光看文件名分不清第几集
   const playlistNames = ref<Record<string, string>>({})
@@ -52,7 +65,9 @@ export function useVideoHandoff() {
   const clearHandoffMeta = () => {
     playlistNames.value = {}
     playlistTitle.value = ''
+    playlistCover.value = ''
     playlistSource.value = null
+    playlistLines.value = []
     setLazyTask(null, [])
   }
 
@@ -70,7 +85,9 @@ export function useVideoHandoff() {
 
   return {
     playlistTitle,
+    playlistCover,
     playlistSource,
+    playlistLines,
     playlistNames,
     lazyTask,
     lazyIndexByUrl,

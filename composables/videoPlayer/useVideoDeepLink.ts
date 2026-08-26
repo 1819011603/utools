@@ -8,6 +8,9 @@
  *   index          起播第几个（0 基）
  *   origin/referer 注入的防盗链头；proxy=1 全程代理；noref=1 伪装下载器；manifestOnly=0/1
  *   parseUrl/line  源站播放页地址 + 线路，列表由播放器自己解析（解析来的列表首选这个）
+ *   t              起播秒数。**只入不出**：它是「这一次从哪儿接着看」的一次性指令，
+ *                  写回地址栏的话，刷新一次就又被拽回那个位置（正常刷新该接着当前进度走）
+ *
  *   handoff=1      历史键，交接槽已删除 → 认得出但忽略（留着只为别被当成视频地址的尾巴）
  */
 import type { QueryVideoParams } from './types'
@@ -76,6 +79,12 @@ export function useVideoDeepLink(deps: VideoDeepLinkDeps) {
         case 'parseUrl': result.parseUrl = dec(val).trim(); break
         case 'lineName': result.lineName = dec(val).trim(); break
         case 'ep': result.ep = dec(val).trim(); break
+        case 't': {
+          // 秒数可能带小数（进度就是个浮点数），用 parseFloat 不是 parseInt
+          const n = Number.parseFloat(dec(val))
+          if (Number.isFinite(n) && n > 0) result.t = n
+          break
+        }
         case 'line': {
           const n = Number.parseInt(dec(val), 10)
           if (Number.isFinite(n) && n >= 0) result.line = n

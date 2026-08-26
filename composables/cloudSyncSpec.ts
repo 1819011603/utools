@@ -26,6 +26,15 @@ export const SYNC_COLLECTIONS: SyncSpec[] = [
     timeOf: r => Number(r?.at) || 0,
   },
   {
+    id: 'video-fav',
+    lsKey: 'video-favorites',
+    label: '收藏影片',
+    kind: 'map',
+    // 与 useFavorites 的 MAX_FAVS 一致
+    cap: 500,
+    timeOf: r => Number(r?.at) || 0,
+  },
+  {
     id: 'video-search',
     lsKey: 'utools-history-video-search',
     label: '片名搜索历史',

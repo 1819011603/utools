@@ -6,7 +6,7 @@
  */
 import type { HtmlSourceTask, ParseRule, ParsedEpisode, ParsedLine, ParseResult } from '../../composables/videoParseRules'
 import type { ParserContext, SiteParser } from './types'
-import { absolutize, decodeEntities, decodeMaccmsUrl, decodeScannedBase64, hostOf, parseTitle, pool } from './utils'
+import { absolutize, decodeEntities, decodeMaccmsUrl, decodeScannedBase64, hostOf, parseCover, parseTitle, pool } from './utils'
 import { cdndefendChallenge } from './challenges/cdndefend'
 import { isM3u8Url } from '../../utils/mediaUrl'
 
@@ -213,6 +213,8 @@ export function createHtmlParser(rule: ParseRule): SiteParser {
         ruleId: rule.id,
         ruleName: rule.name,
         title: (rule.titleRe && decodeEntities(html.match(new RegExp(rule.titleRe, 'i'))?.[1] ?? '')) || parseTitle(html),
+        // 封面：只给「播放历史 / 收藏」那两份清单当缩略图用，抠不到就没有（见 parseCover）
+        cover: parseCover(html, ctx.pageUrl),
         pageUrl: ctx.pageUrl,
         currentVideoUrl,
         embedUrl: source.embedUrl,

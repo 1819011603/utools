@@ -28,8 +28,19 @@ export interface WatchRecord {
   epName?: string
   /** 当时这条线路一共多少集，用来显示「10/78」 */
   total?: number
-  /** 最后一次观看时间戳 */
-  at: number
+  /**
+   * 封面图（解析结果里的 `og:image`）。存**地址**而不是缩略图数据：这份记录要整份上云，
+   * 塞 base64 缩略图会让一条记录从几百字节涨到几十 KB，200 部就顶到 D1 的单行上限。
+   * 图挂了就退回占位块，不影响这条记录本身的用处。
+   */
+  cover?: string
+  /**
+   * 这一集播到第几秒 / 这一集总长。**跨设备续播全靠它**——播放器那份按 URL 存的
+   * `savedProgress` 不上云（键是带签名的地址，换台设备对不上），换设备打开只能靠这两个数字
+   * 直接跳到「第 10 集 12:34」。也用来在列表里画那行「第1集 · 0:09 · 1%」。
+   */
+  time?: number
+  duration?: number
 }
 
 // 云同步的记事本（删一部剧要记墓碑，否则另一台设备会把它推回来）
@@ -75,7 +86,9 @@ export function useWatchHistory() {
     const k = showKeyOf(r)
     if (!k) return
     const s = load()
-    s[k] = { ...r, at: Date.now() }
+    // 封面「只补不删」：换条线路解析时那一页未必有 og:image，整条覆盖会把上次抠到的封面冲掉，
+    // 表现是「列表里的图看着看着自己没了」。老记录（这个字段上线前存的）也靠这一句慢慢补齐
+    s[k] = { ...r, cover: r.cover || s[k]?.cover, at: Date.now() }
     // 超量就按最久没看的淘汰
     const keys = Object.keys(s)
     if (keys.length > MAX_SHOWS) {

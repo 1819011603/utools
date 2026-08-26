@@ -32,6 +32,8 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
 
   const isRefreshingLinks = ref(false)
   const lastRefreshAt = ref(0)
+  /** 换源进行中（要重解析一整条线路，慢站几秒）。面板上那一条只换转圈图标，不 disabled */
+  const isSwitchingLine = ref(false)
 
   // ── 进度记忆 ──
 
@@ -88,6 +90,11 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
       index: currentIndex.value,
       epName: handoff.getVideoName(playlist.value[currentIndex.value] || '', currentIndex.value),
       total: playlist.value.length,
+      cover: handoff.playlistCover.value || undefined,
+      // 秒数一并记进这份**按剧**的记录里：按 URL 存的 savedProgress 不上云（键是带签名的地址），
+      // 换台设备打开时只有这两个数字能把人送回「第 10 集 12:34」
+      time: media.currentTime.value,
+      duration: media.duration.value || undefined,
     })
   }
 
@@ -343,6 +350,13 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
     index = 0,
     lineName?: string,
     epName?: string,
+    /**
+     * 起播位置（秒）。用在两处：从播放历史点进来（`?t=`，跨设备续播的唯一依据），
+     * 以及换线路时把当前进度搬到新线路上。
+     * **不直接 seek**，而是写进 `savedProgress` 让原有的起播路径去落位——
+     * HLS 那条是 hls.js 的 `startPosition`，手动 seek 会打断刚起播的加载。
+     */
+    startTime?: number,
   ) => {
     media.isResolvingUrl.value = true
     media.resolveStage.value = '正在获取页面…'
@@ -374,6 +388,11 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
       handoff.setPlaylistNames(urls, names)
       handoff.setLazyTask(result.clientTask?.lazy ? result.clientTask : null, urls)
       if (result.title) handoff.playlistTitle.value = result.title
+      if (result.cover) handoff.playlistCover.value = result.cover
+      // 线路表存精简副本，供换源面板用（见 useVideoHandoff.playlistLines）
+      handoff.playlistLines.value = result.lines.map(l => ({
+        name: l.name, sublabel: l.sublabel, count: l.episodes.length,
+      }))
       // 线路记解析结果实际用的那条：传入的 line 越界时服务端会退回 active 线路，
       // 记成传入值会让地址栏与实际播的对不上，分享出去又是另一条线路
       handoff.playlistSource.value = {
@@ -393,6 +412,13 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
       const byName = epName ? names.indexOf(epName) : -1
       const from = byName >= 0 ? byName : (index >= 0 && index < urls.length ? index : 0)
       currentIndex.value = from
+      // 起播位置交给 savedProgress，下面 playByIndex → loadVideo 那条路会把它落成
+      // hls.js 的 startPosition（见 startTime 参数上的说明）。
+      // 只在**比已有记录更靠后**时写：本机看过的进度多半比链接里带的那个新，
+      // 拿旧的盖掉等于「点一下续看反而倒退了」
+      if (startTime && startTime > 1 && urls[from]) {
+        if (startTime > (savedProgress.value[urls[from]] || 0)) savedProgress.value[urls[from]] = startTime
+      }
       deps.onDirty()
       media.isRestoringFromSaved.value = true
       await playByIndex(from)
@@ -402,6 +428,36 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
     } finally {
       media.isResolvingUrl.value = false
       media.resolveStage.value = ''
+    }
+  }
+
+  /**
+   * 换线路（换源）：同一部剧换一条线路重解析，**落在同一集、同一进度上**。
+   *
+   * 「同一集」按集名认、序号兜底（同 `?ep=` 那条规矩）：各线路的集数常常不一样
+   *（有的线路少几集、有的把上下集拆成两条），照序号硬套会换到别的集去。
+   * 「同一进度」把当前秒数当 `startTime` 交给 loadFromParseSource——换源多半是因为
+   * 这条线路卡或画质差，而用户已经看到一半了，从头开始等于白看。
+   *
+   * 走的是与分享链接落地**同一条路**（loadFromParseSource），不是另起一套：
+   * 按需取址的作业单、防盗链候选、集名表这些都在那里面装好，另写一份必然漏掉某一项。
+   */
+  const switchLine = async (lineIndex: number) => {
+    const src = handoff.playlistSource.value
+    if (!src?.pageUrl || isSwitchingLine.value) return
+    if (lineIndex === src.line) return       // 已经在这条线路上，点它是无操作
+    const target = handoff.playlistLines.value[lineIndex]
+    if (!target) return
+    const epName = handoff.getVideoName(playlist.value[currentIndex.value] || '', currentIndex.value)
+    const at = media.currentTime.value
+    const idx = currentIndex.value
+    isSwitchingLine.value = true
+    try {
+      // 旧线路那一集的进度先落库：这一轮之后 playlist 会被整份换掉，那份进度就再也写不回去了
+      saveCurrentProgress()
+      await loadFromParseSource(src.pageUrl, lineIndex, idx, target.name, epName, at)
+    } finally {
+      isSwitchingLine.value = false
     }
   }
 
@@ -550,6 +606,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
 
   return {
     playlist, currentIndex, hasPrev, hasNext, isRefreshingLinks, lastRefreshAt, isSwitching,
+    isSwitchingLine, switchLine,
     progressKey, currentVideoName, saveCurrentProgress, getSavedProgress, clearAllProgress,
     parseAndLoad, playByIndex, playPrev, playNext, clearPlaylist, loadExample, dropSavedProgress,
     resumeHint, resumeToHint, dismissResumeHint,

@@ -16,7 +16,7 @@
  */
 import type { ParseResult, WasmSignerTask } from '../../../composables/videoParseRules'
 import type { ParserContext, SiteParser } from '../types'
-import { absolutize, decodeEntities, innerTexts, parseTitle } from '../utils'
+import { absolutize, decodeEntities, innerTexts, parseCover, parseTitle } from '../utils'
 
 const SITE_ID = 'nbmovie'
 const SITE_NAME = '4k影视 (4kvm / ziziys)'
@@ -116,6 +116,7 @@ export const nbmovieParser: SiteParser = {
       ruleName: SITE_NAME,
       // 标题形如「片名 - 第185集 -4k影视」，站名后缀由 parseTitle 削，这里再削集号
       title: parseTitle(html, [/\s*[-—]\s*第\s*\d+\s*集\s*$/]),
+      cover: parseCover(html, ctx.pageUrl),
       pageUrl: ctx.pageUrl,
       lines,
       activeLineIndex: targetIndex,
