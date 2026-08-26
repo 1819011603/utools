@@ -22,6 +22,8 @@ export function useVideoHandoff() {
    * 它的用处是**记进播放历史和收藏**，让那两份清单里有图可看。抠不到就是空串。
    */
   const playlistCover = ref('')
+  /** 分类（「电视剧」「动漫」…）。同 playlistCover：播放器自己不用，只为记进那两份清单 */
+  const playlistCat = ref('')
   // 播放列表的来源，有值才显示「刷新链接」
   const playlistSource = ref<PlaylistSource | null>(null)
   /**
@@ -66,6 +68,7 @@ export function useVideoHandoff() {
     playlistNames.value = {}
     playlistTitle.value = ''
     playlistCover.value = ''
+    playlistCat.value = ''
     playlistSource.value = null
     playlistLines.value = []
     setLazyTask(null, [])
@@ -86,6 +89,7 @@ export function useVideoHandoff() {
   return {
     playlistTitle,
     playlistCover,
+    playlistCat,
     playlistSource,
     playlistLines,
     playlistNames,

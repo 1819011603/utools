@@ -70,6 +70,38 @@ export function parseCover(html: string, pageUrl: string): string | undefined {
 }
 
 /**
+ * 分类（「电视剧」「电影」「动漫」…）。给播放历史/收藏那两份清单当筛选项用。
+ *
+ * 各站页面结构千差万别，**唯一稳定的共同点是分类链接**：MacCMS 系是 `/vodtype/4/`、
+ * 别的站是 `/type/…`、`/show/…`、`/list/…`，链接文字就是分类名。所以按「链接指向分类页」
+ * 找候选，再用一张白名单卡一道 —— 没有白名单的话，站点导航里的「首页」「排行榜」「留言」
+ * 都会被当成分类，筛选栏当场变成一排垃圾。
+ *
+ * 抠不到就 undefined：那条记录不属于任何分类，筛选栏里「全部」照样看得到它，
+ * 而分类按钮本身是按**实际出现过的值**动态生成的，不会冒出一个点进去空空如也的分类。
+ */
+const CATEGORY_WORDS = [
+  '电视剧', '连续剧', '电影', '动漫', '动画', '综艺', '纪录片', '记录片',
+  '短剧', '微短剧', '国产剧', '日韩剧', '欧美剧', '港台剧', '海外剧', '体育',
+]
+
+export function parseCategory(html: string): string | undefined {
+  const re = /<a[^>]+href="[^"]*\/(?:vodtype|voddetail|type|show|list|category)\/[^"]*"[^>]*>([^<]{1,12})<\/a>/gi
+  for (const m of html.matchAll(re)) {
+    const text = decodeEntities(m[1])
+    const hit = CATEGORY_WORDS.find(w => text.includes(w))
+    if (hit) return hit
+  }
+  // 退一步：不少站把分类塞进 keywords（「仙逆,动漫,…」）。同样只认白名单里的词
+  const kw = html.match(/<meta[^>]+name=["']keywords["'][^>]*content=["']([^"']+)["']/i)?.[1]
+  if (kw) {
+    const hit = CATEGORY_WORDS.find(w => kw.includes(w))
+    if (hit) return hit
+  }
+  return undefined
+}
+
+/**
  * 苹果 CMS（`player_aaaa`）系站点的播放地址解码。
  *
  * 站点按 `encrypt` 字段给三种形态：0=明文、1=percent、2=base64 套 percent。

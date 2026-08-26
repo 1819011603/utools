@@ -491,6 +491,8 @@ export interface ParseResult {
    * 只给「播放历史 / 收藏影片」当缩略图用，抠不到就没有，界面上退回占位块。
    */
   cover?: string
+  /** 分类（「电视剧」「动漫」…）。同 cover，只给那两份清单当筛选项用，抠不到就没有 */
+  cat?: string
   pageUrl: string
   currentVideoUrl?: string
   /**

@@ -91,12 +91,16 @@
           </header>
 
           <div class="flex-1 overflow-y-auto overscroll-contain px-3 py-3">
-            <VideoPlayerLibraryPanel v-if="active === 'library'" @close="close" />
+            <VideoPlayerLibraryPanel v-if="active === 'library'" @close="close" @browse="browse" />
             <VideoPlayerLinePicker v-else @close="close" />
           </div>
         </aside>
       </Transition>
     </Teleport>
+
+    <!-- 「查看更多」：整份清单 + 搜索/筛选/管理。自己也是 Teleport 到 body 的浮层，
+         层级排在抽屉之上（它是从抽屉里点开的，盖住抽屉才对） -->
+    <VideoPlayerLibraryBrowser :kind="browsing" @close="browsing = null" />
   </div>
 </template>
 
@@ -110,6 +114,8 @@
  * 本组件只管开合与版式，两块内容各自成组件（数据也各自去取），
  * 免得这里变成一个什么都知道的大文件。
  */
+import type { LibraryKind } from '~/composables/useLibrary'
+
 const { isFullscreen, playlistLines, canFavorite, isFavorited, toggleFavorite } = useVideoPlayerCtx()
 
 type TabId = 'library' | 'lines'
@@ -127,6 +133,14 @@ const tabs = computed(() => {
 const active = ref<TabId | null>(null)
 const close = () => { active.value = null }
 const toggle = (id: TabId) => { active.value = active.value === id ? null : id }
+
+/** 「查看更多」打开的是哪一份清单（null = 没开） */
+const browsing = ref<LibraryKind | null>(null)
+const browse = (kind: LibraryKind) => {
+  // 抽屉一起收掉：大面板几乎占满屏，底下压着一条抽屉只是徒增层次
+  active.value = null
+  browsing.value = kind
+}
 
 // 线路表没了（换成一份手工列表）而面板正停在换源页 → 退回媒体库，别留个空面板
 watch(tabs, list => {

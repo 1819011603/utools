@@ -91,6 +91,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
       epName: handoff.getVideoName(playlist.value[currentIndex.value] || '', currentIndex.value),
       total: playlist.value.length,
       cover: handoff.playlistCover.value || undefined,
+      cat: handoff.playlistCat.value || undefined,
       // 秒数一并记进这份**按剧**的记录里：按 URL 存的 savedProgress 不上云（键是带签名的地址），
       // 换台设备打开时只有这两个数字能把人送回「第 10 集 12:34」。
       //
@@ -394,6 +395,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
       handoff.setLazyTask(result.clientTask?.lazy ? result.clientTask : null, urls)
       if (result.title) handoff.playlistTitle.value = result.title
       if (result.cover) handoff.playlistCover.value = result.cover
+      if (result.cat) handoff.playlistCat.value = result.cat
       // 线路表存精简副本，供换源面板用（见 useVideoHandoff.playlistLines）
       handoff.playlistLines.value = result.lines.map(l => ({
         name: l.name, sublabel: l.sublabel, count: l.episodes.length,
@@ -559,6 +561,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
       clearLazyUrlCache()   // 预热的地址是用旧令牌取的，跟着一起作废
       if (result.title) handoff.playlistTitle.value = result.title
       if (result.cover) handoff.playlistCover.value = result.cover
+      if (result.cat) handoff.playlistCat.value = result.cat
       // 线路表也跟着刷新：源站增删线路之后，换源面板里那份不更新就会指到别的线路去
       handoff.playlistLines.value = result.lines.map(l => ({
         name: l.name, sublabel: l.sublabel, count: l.episodes.length,

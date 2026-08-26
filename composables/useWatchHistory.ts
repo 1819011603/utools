@@ -34,6 +34,8 @@ export interface WatchRecord {
    * 图挂了就退回占位块，不影响这条记录本身的用处。
    */
   cover?: string
+  /** 分类（「电视剧」「动漫」…），给「查看更多」里那排筛选按钮用。同 cover：抠不到就没有 */
+  cat?: string
   /**
    * 这一集播到第几秒 / 这一集总长。**跨设备续播全靠它**——播放器那份按 URL 存的
    * `savedProgress` 不上云（键是带签名的地址，换台设备对不上），换设备打开只能靠这两个数字
@@ -86,9 +88,10 @@ export function useWatchHistory() {
     const k = showKeyOf(r)
     if (!k) return
     const s = load()
-    // 封面「只补不删」：换条线路解析时那一页未必有 og:image，整条覆盖会把上次抠到的封面冲掉，
-    // 表现是「列表里的图看着看着自己没了」。老记录（这个字段上线前存的）也靠这一句慢慢补齐
-    s[k] = { ...r, cover: r.cover || s[k]?.cover, at: Date.now() }
+    // 封面和分类「只补不删」：换条线路解析时那一页未必有 og:image / 分类链接，
+    // 整条覆盖会把上次抠到的冲掉（表现是「列表里的图看着看着自己没了」）。
+    // 老记录（这两个字段上线前存的）也靠这一句慢慢补齐
+    s[k] = { ...r, cover: r.cover || s[k]?.cover, cat: r.cat || s[k]?.cat, at: Date.now() }
     // 超量就按最久没看的淘汰
     const keys = Object.keys(s)
     if (keys.length > MAX_SHOWS) {
@@ -121,5 +124,25 @@ export function useWatchHistory() {
 
   const allWatched = (): WatchRecord[] => Object.values(load()).sort((a, b) => b.at - a.at)
 
-  return { recordWatch, findWatch, forgetWatch, allWatched }
+  /**
+   * 补封面/分类（后台慢慢抓回来的，见 useCoverBackfill）。
+   *
+   * **绝不动 `at`**：那是「最近看过」，列表按它排序，补一张图就把这部剧顶到最前面
+   * 等于把用户的观看顺序搅乱了。也只补空位不覆盖已有值——已有的那张是解析当时拿到的，
+   * 比事后补抓的更贴合当时那条线路。
+   */
+  const patchWatchMeta = (q: { title?: string; pageUrl?: string }, patch: { cover?: string; cat?: string }) => {
+    const k = showKeyOf(q)
+    if (!k) return false
+    const s = load()
+    const r = s[k]
+    if (!r) return false
+    let changed = false
+    if (patch.cover && !r.cover) { r.cover = patch.cover; changed = true }
+    if (patch.cat && !r.cat) { r.cat = patch.cat; changed = true }
+    if (changed) save(s)
+    return changed
+  }
+
+  return { recordWatch, findWatch, forgetWatch, allWatched, patchWatchMeta }
 }

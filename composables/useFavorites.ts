@@ -23,6 +23,8 @@ export interface FavoriteRecord {
   lineName?: string
   /** 封面图地址。理由同 WatchRecord.cover：存地址不存图 */
   cover?: string
+  /** 分类（「电视剧」「动漫」…），给「查看更多」里那排筛选按钮用 */
+  cat?: string
   /** 收藏时间，列表按它倒序 */
   at: number
 }
@@ -65,6 +67,7 @@ export function useFavorites() {
       ...old,
       ...r,
       cover: r.cover || old?.cover,
+      cat: r.cat || old?.cat,
       at: old?.at ?? Date.now(),
     }
     const keys = Object.keys(s)
@@ -94,5 +97,19 @@ export function useFavorites() {
 
   const allFavorites = (): FavoriteRecord[] => Object.values(load()).sort((a, b) => b.at - a.at)
 
-  return { isFav, addFav, removeFav, toggleFav, allFavorites, favKeyOf }
+  /** 补封面/分类。同 `patchWatchMeta`：**不动 `at`**（那是收藏时间，列表按它排序），只补空位 */
+  const patchFavMeta = (q: { title?: string; pageUrl?: string }, patch: { cover?: string; cat?: string }) => {
+    const k = favKeyOf(q)
+    if (!k) return false
+    const s = load()
+    const r = s[k]
+    if (!r) return false
+    let changed = false
+    if (patch.cover && !r.cover) { r.cover = patch.cover; changed = true }
+    if (patch.cat && !r.cat) { r.cat = patch.cat; changed = true }
+    if (changed) save(s)
+    return changed
+  }
+
+  return { isFav, addFav, removeFav, toggleFav, allFavorites, favKeyOf, patchFavMeta }
 }

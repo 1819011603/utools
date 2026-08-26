@@ -558,6 +558,7 @@ const toggleFavCurrent = () => {
     line: r.activeLineIndex,
     lineName: currentLine.value?.name,
     cover: r.cover,
+    cat: r.cat,
   })
 }
 

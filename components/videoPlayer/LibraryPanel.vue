@@ -11,53 +11,43 @@
       :class="isFavorited
         ? 'bg-rose-500/10 text-rose-600 dark:text-rose-300 ring-1 ring-rose-400/30'
         : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'"
-      @click="toggleCurrent"
+      @click="toggleFavorite"
     >
       <UIcon :name="isFavorited ? 'i-heroicons-heart-solid' : 'i-heroicons-heart'" class="w-4 h-4 shrink-0" />
       <span class="truncate">{{ isFavorited ? '已收藏' : '收藏' }}{{ playlistTitle ? '《' + playlistTitle + '》' : '这部剧' }}</span>
     </button>
 
-    <section>
+    <section v-for="sec in sections" :key="sec.kind">
       <header class="flex items-center gap-2 mb-2">
-        <UIcon name="i-heroicons-clock" class="w-4 h-4 text-violet-500" />
-        <h3 class="text-sm font-semibold text-gray-900 dark:text-white">播放历史</h3>
-        <UBadge v-if="history.length" color="gray" variant="soft" size="xs">{{ history.length }}</UBadge>
+        <UIcon :name="sec.icon" class="w-4 h-4" :class="sec.iconClass" />
+        <h3 class="text-sm font-semibold text-gray-900 dark:text-white">{{ sec.title }}</h3>
+        <UBadge v-if="sec.all.length" color="gray" variant="soft" size="xs">{{ sec.all.length }}</UBadge>
+        <!--
+          「查看更多」**有没有超出都给**：那扇门后面还有搜索、筛选、批量删除，
+          只按「条数 > 4」才给的话，只有 3 条的人永远找不到清空按钮
+        -->
+        <button
+          v-if="sec.all.length"
+          type="button"
+          class="ml-auto text-xs text-rose-500 hover:text-rose-400 transition-colors"
+          @click="emit('browse', sec.kind)"
+        >
+          查看更多
+        </button>
       </header>
-      <p v-if="!history.length" class="text-xs text-gray-400 px-1 py-3">还没有记录。看过的剧会自动出现在这里。</p>
-      <ul v-else class="space-y-1">
-        <li v-for="r in history" :key="'h' + keyOf(r)">
-          <VideoPlayerLibraryRow
-            :title="r.title || r.pageUrl || '未知影片'"
-            :cover="r.cover"
-            :sub="watchSub(r)"
-            :percent="percentOf(r)"
-            :current="isCurrent(r)"
-            :playable="!!r.pageUrl"
-            @open="play(r)"
-            @remove="dropWatch(r)"
-          />
-        </li>
-      </ul>
-    </section>
 
-    <section>
-      <header class="flex items-center gap-2 mb-2">
-        <UIcon name="i-heroicons-heart" class="w-4 h-4 text-rose-500" />
-        <h3 class="text-sm font-semibold text-gray-900 dark:text-white">收藏影片</h3>
-        <UBadge v-if="favorites.length" color="gray" variant="soft" size="xs">{{ favorites.length }}</UBadge>
-      </header>
-      <p v-if="!favorites.length" class="text-xs text-gray-400 px-1 py-3">还没有收藏。点上面那颗心把这部剧留下来。</p>
+      <p v-if="!sec.all.length" class="text-xs text-gray-400 px-1 py-3">{{ sec.empty }}</p>
       <ul v-else class="space-y-1">
-        <li v-for="r in favorites" :key="'f' + keyOf(r)">
+        <li v-for="r in sec.top" :key="sec.kind + keyOf(r)">
           <VideoPlayerLibraryRow
             :title="r.title || r.pageUrl || '未知影片'"
             :cover="r.cover"
-            :sub="favSub(r)"
-            :percent="percentOf(watchOf(r))"
+            :sub="sec.kind === 'history' ? watchSub(r as any) : favSub(r as any)"
+            :percent="sec.kind === 'history' ? percentOf(r as any) : percentOf(watchOf(r as any))"
             :current="isCurrent(r)"
             :playable="!!r.pageUrl"
-            @open="play({ ...r, ...pickResume(r) })"
-            @remove="dropFav(r)"
+            @open="open(sec.kind, r)"
+            @remove="remove(sec.kind, r)"
           />
         </li>
       </ul>
@@ -67,170 +57,63 @@
 
 <script setup lang="ts">
 /**
- * 侧边抽屉里的「播放历史 / 收藏影片」两份清单。
+ * 侧边抽屉里的「播放历史 / 收藏影片」——**只摆前 4 条**。
  *
- * 两份清单都**按剧**存、都能整份上云（见 cloudSyncSpec.ts），所以这里显示的东西
- * 在另一台设备上也一样 —— 这正是它存在的理由：换台设备打开就能接着看。
- *
- * 点一条要落到「同一集 + 同一进度」，两条路：
- *   · 就是正在播的这部剧这条线路 → 直接跳集，不重解析（快，且不打断已经建好的连接）；
- *   · 别的剧 → 走 `?parseUrl=…&t=…` **整页重进**。不用 router 跳：本页只在 mount 时读一次
- *     地址栏，同路由换 query 不会重新装配，页面看着像没反应。
+ * 抽屉是给「接着看上次那部」用的，四条就覆盖了绝大多数场景；再往下翻要的是找片，
+ * 那件事该在一个有搜索和筛选的地方做（`LibraryBrowser`，由「查看更多」打开）。
+ * 数据本身在 `useLibrary` 的共享快照里，删一条三处一起变。
  */
-import type { WatchRecord } from '~/composables/useWatchHistory'
-import type { FavoriteRecord } from '~/composables/useFavorites'
-// 显式 import 而不是靠自动导入：这几个是**普通导出**（不是 use* 组合式），
-// 一旦谁往那两个文件里加了数组常量，紧跟其后的导出会被 unimport 静默漏掉（CLAUDE.md 里那条）
-import { showKeyOf } from '~/composables/useWatchHistory'
-import { onSyncApplied } from '~/composables/cloudSyncLocal'
+import type { LibraryItem, LibraryKind } from '~/composables/useLibrary'
 
-const emit = defineEmits<{ (e: 'close'): void }>()
+const emit = defineEmits<{ (e: 'close'): void; (e: 'browse', kind: LibraryKind): void }>()
 
 const {
-  playlistTitle, playlistSource, playlist, currentIndex,
-  savedProgress, currentTime, duration, getVideoName, playByIndex, saveCurrentProgress,
+  playlistTitle,
   // 收藏状态由控制器持有：画面顶栏和左侧那颗常驻按钮也在改它，各自读一份就会对不上
   canFavorite, isFavorited, toggleFavorite, refreshFavorite,
 } = useVideoPlayerCtx()
 
-const { allWatched, forgetWatch, findWatch } = useWatchHistory()
-const { allFavorites, removeFav } = useFavorites()
+const { history, favorites, remove: removeItem, keyOf } = useLibrary()
+const { play, isCurrent, percentOf, watchSub, favSub, watchOf, pickResume } = useLibraryPlay()
 
-const history = ref<WatchRecord[]>([])
-const favorites = ref<FavoriteRecord[]>([])
+// 抽屉一打开就开始把老记录缺的封面慢慢抓回来（串行 + 间隔，见 useCoverBackfill）；
+// 抽屉关掉（组件卸载）就停手 —— 那时用户已经回去看片了
+const backfill = useCoverBackfill()
+onMounted(() => void backfill.start())
+onBeforeUnmount(() => backfill.stop())
 
-const reload = () => {
-  history.value = allWatched()
-  favorites.value = allFavorites()
-}
-reload()
+/** 抽屉里只摆这么多条，其余去「查看更多」 */
+const TOP_N = 4
 
-// 云同步把另一台设备的改动写进 localStorage 之后，这里的两份快照要重读，
-// 否则得刷新页面才看得到（同两处搜索历史那条）
-const offs = [
-  onSyncApplied('video-watch', reload),
-  onSyncApplied('video-fav', reload),
-]
-onBeforeUnmount(() => offs.forEach(off => off()))
+const sections = computed(() => [
+  {
+    kind: 'history' as LibraryKind,
+    title: '播放历史',
+    icon: 'i-heroicons-clock',
+    iconClass: 'text-violet-500',
+    empty: '还没有记录。看过的剧会自动出现在这里。',
+    all: history.value as LibraryItem[],
+    top: history.value.slice(0, TOP_N) as LibraryItem[],
+  },
+  {
+    kind: 'favorite' as LibraryKind,
+    title: '收藏影片',
+    icon: 'i-heroicons-heart',
+    iconClass: 'text-rose-500',
+    empty: '还没有收藏。点上面那颗心把这部剧留下来。',
+    all: favorites.value as LibraryItem[],
+    top: favorites.value.slice(0, TOP_N) as LibraryItem[],
+  },
+])
 
-const keyOf = (r: { title?: string; pageUrl?: string }) => showKeyOf(r) || (r.pageUrl ?? r.title ?? '')
-
-// ── 当前这部剧 ──
-
-const currentRef = computed(() => ({
-  title: playlistTitle.value || '',
-  pageUrl: playlistSource.value?.pageUrl,
-}))
-
-/** 收藏动作本身在控制器里，这里只补一件它管不着的事：把下面那份收藏列表重读一遍 */
-const toggleCurrent = () => {
-  toggleFavorite()
-  reload()
-}
-
-const isCurrent = (r: { title?: string; pageUrl?: string }) =>
-  canFavorite.value && keyOf(r) === keyOf(currentRef.value)
-
-// ── 副行文案与进度 ──
-
-/** 正在播的这部剧用**实时**秒数，别用记录里那份（它每隔一会儿才落一次库，看着像不动） */
-const liveTime = (r: { title?: string; pageUrl?: string }) => isCurrent(r) ? currentTime.value : 0
-const liveDur = (r: { title?: string; pageUrl?: string }) => isCurrent(r) ? duration.value : 0
-
-const percentOf = (r?: WatchRecord | null) => {
-  if (!r) return 0
-  const dur = liveDur(r) || r.duration || 0
-  const t = liveTime(r) || r.time || 0
-  if (!dur || !t) return 0
-  return Math.min(100, Math.max(0, Math.round((t / dur) * 100)))
+const open = async (kind: LibraryKind, r: LibraryItem) => {
+  emit('close')
+  await play(kind === 'history' ? (r as any) : { ...r, ...pickResume(r as any) })
 }
 
-// 集名多半就是个纯数字（「10」），孤零零一个数字看不出是什么 → 补成「第10集」
-const epLabel = (r: WatchRecord) =>
-  r.epName && !/^\d{1,4}$/.test(r.epName) ? r.epName : `第${r.index + 1}集`
-
-const watchSub = (r: WatchRecord) => {
-  const parts = [epLabel(r)]
-  const t = liveTime(r) || r.time || 0
-  if (t > 0) parts.push(formatTime(t))
-  const p = percentOf(r)
-  if (p > 0) parts.push(p + '%')
-  return parts.join(' · ')
-}
-
-const watchOf = (r: FavoriteRecord) => findWatch({ title: r.title, pageUrl: r.pageUrl })
-
-const favSub = (r: FavoriteRecord) => {
-  const w = watchOf(r)
-  if (w) return watchSub(w)
-  return r.lineName || '未看过'
-}
-
-/** 收藏条目本身不记进度，点进去时借用同一部剧的观看记录（两份清单共用 showKeyOf） */
-const pickResume = (r: FavoriteRecord) => {
-  const w = watchOf(r)
-  return w ? { index: w.index, epName: w.epName, time: w.time, line: w.line ?? r.line, lineName: w.lineName ?? r.lineName } : {}
-}
-
-// ── 打开一条 ──
-
-interface OpenTarget {
-  title?: string
-  pageUrl?: string
-  line?: number
-  lineName?: string
-  index?: number
-  epName?: string
-  time?: number
-}
-
-/** 落到哪一集：集名优先、序号兜底（源站往中间加塞时序号会指到别人身上） */
-const targetIndex = (r: OpenTarget) => {
-  const byName = r.epName
-    ? playlist.value.findIndex((u, i) => getVideoName(u, i) === r.epName)
-    : -1
-  if (byName >= 0) return byName
-  return Math.min(Math.max(r.index ?? 0, 0), Math.max(playlist.value.length - 1, 0))
-}
-
-const play = async (r: OpenTarget) => {
-  if (!r.pageUrl) return
-  const src = playlistSource.value
-  saveCurrentProgress()
-
-  // 同一部剧同一条线路：列表已经在手上，重解析纯属白等几秒
-  if (src?.pageUrl === r.pageUrl && (r.line === undefined || r.line === src.line) && playlist.value.length) {
-    const idx = targetIndex(r)
-    const url = playlist.value[idx]
-    // 本机记的进度多半比清单里那份新（那份每隔一会儿才落一次库），取靠后的那个
-    if (url && r.time && r.time > (savedProgress.value[url] || 0)) savedProgress.value[url] = r.time
-    emit('close')
-    if (idx !== currentIndex.value) await playByIndex(idx)
-    return
-  }
-
-  // 换一部剧：整页重进。手工拼 query 而不用 URLSearchParams——后者把空格编码成 `+`，
-  // 而播放器那边刻意「不把 + 当空格」（视频签名里常有裸 +），剧名/集名带空格时会串成字面的 +
-  const q = ['parseUrl=' + encodeURIComponent(r.pageUrl)]
-  if (r.line) q.push('line=' + r.line)
-  if (r.lineName) q.push('lineName=' + encodeURIComponent(r.lineName))
-  q.push('index=' + (r.index ?? 0))
-  if (r.epName) q.push('ep=' + encodeURIComponent(r.epName))
-  if (r.time && r.time > 1) q.push('t=' + Math.floor(r.time))
-  window.location.href = '/video-player?' + q.join('&')
-}
-
-// ── 删一条 ──
-
-const dropWatch = (r: WatchRecord) => {
-  forgetWatch({ title: r.title, pageUrl: r.pageUrl })
-  reload()
-}
-
-const dropFav = (r: FavoriteRecord) => {
-  removeFav({ title: r.title, pageUrl: r.pageUrl })
-  // 删掉的可能正是当前这部剧 → 三处按钮共用的那份状态要跟着变回空心
-  refreshFavorite()
-  reload()
+const remove = (kind: LibraryKind, r: LibraryItem) => {
+  removeItem(kind, r)
+  // 删掉的可能正是当前这部剧 → 三处按钮共用的那份收藏状态要跟着变回空心
+  if (kind === 'favorite') refreshFavorite()
 }
 </script>

@@ -46,6 +46,7 @@ export function useVideoFavorite(deps: { handoff: VideoHandoff }) {
       lineName: src?.lineName,
       // 封面只在解析那一下拿得到；没有就不写，别把已有的那张覆盖成空（addFav 里也兜了一道）
       cover: handoff.playlistCover.value || undefined,
+      cat: handoff.playlistCat.value || undefined,
     })
   }
 
