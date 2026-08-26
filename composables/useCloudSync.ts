@@ -25,7 +25,7 @@ import type { SyncSpec } from './cloudSyncMerge'
 import { emptyItems, isEmptyItems, mergeItems, mergeTomb, parsePayload, sameJson } from './cloudSyncMerge'
 import { SYNC_COLLECTIONS } from './cloudSyncSpec'
 import type { SyncMeta } from './cloudSyncLocal'
-import { notifyApplied, onDirty, patchMeta, readMeta, writeMeta } from './cloudSyncLocal'
+import { notifyApplied, onDirty, onFlushRequest, patchMeta, readMeta, writeMeta } from './cloudSyncLocal'
 
 const THROTTLE_MS = 5 * 60_000
 /** 连着改好几下（连点几个收藏）只算一次 */
@@ -174,7 +174,7 @@ export function useCloudSync() {
    * 不该被 5 分钟窗口挡在外面（「有变更才同步」那道闸对它同样豁免——
    * 用户点它往往正是因为想把另一台设备的改动拉过来）。
    */
-  const syncNow = async (opts: { force?: boolean } = {}): Promise<boolean> => {
+  const syncNow = async (opts: { force?: boolean; skipThrottle?: boolean } = {}): Promise<boolean> => {
     if (typeof window === 'undefined' || !auth.token.value || syncing.value) return false
 
     const meta = pruneUnknown(readMeta())
@@ -182,8 +182,12 @@ export function useCloudSync() {
     const neverSynced = Object.keys(meta.rev).length === 0
 
     if (!opts.force) {
+      // 「有变更才同步」这道闸**对谁都不豁免**（除了用户手点的 force）：
+      // 没改过还发一轮请求纯属白跑
       if (!hasDirty && !neverSynced) return false
-      if (Date.now() - meta.lastSyncAt < THROTTLE_MS) {
+      // `skipThrottle` 给「按下暂停」那一路：它是个真实的好时机（进度刚落库、人要走开了），
+      // 不该被 5 分钟窗口挡住。跑完 lastSyncAt 就更新了，窗口自然从那一刻重新开始算
+      if (!opts.skipThrottle && Date.now() - meta.lastSyncAt < THROTTLE_MS) {
         pendingChanges.value = hasDirty
         return false
       }
@@ -225,6 +229,9 @@ export function useCloudSync() {
     pendingChanges.value = Object.keys(m.dirty).length > 0
 
     onDirty(schedule)
+    // 「现在就同步」——目前唯一的发起方是**用户按下暂停**（见 cloudSyncLocal.requestSyncFlush）。
+    // 豁免 5 分钟节流但仍要求有改动；跑完节流窗口从那一刻重新开始算
+    onFlushRequest(() => { void syncNow({ skipThrottle: true }) })
     // 切走/关页时补一发，但仍受两道闸约束（没改过就不发）
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') void syncNow()

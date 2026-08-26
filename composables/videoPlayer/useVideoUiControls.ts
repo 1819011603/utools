@@ -8,6 +8,8 @@
 import type { VideoMediaState } from './useVideoMediaState'
 import type { VideoAutoTune } from './useVideoAutoTune'
 import type { VideoPlaylistCtl } from './useVideoPlaylistCtl'
+// 只依赖最底层的本机账本，不认识同步引擎本身（方向与 useWatchHistory 一致，见 cloudSyncLocal 文件头）
+import { requestSyncFlush } from '../cloudSyncLocal'
 
 export interface VideoUiControlsDeps {
   media: VideoMediaState
@@ -43,11 +45,27 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     if (videoEl.value) videoEl.value.muted = false
   }
 
+  /**
+   * 「用户自己动了看到哪儿」→ 落进度 + 请求同步一次（暂停 / 拖进度，切集在 playlist 那边）。
+   *
+   * **必须挂在用户动作上，绝不能挂 `<video>` 的 `pause`/`seeked` 事件**：那两个事件
+   * 在抗卡时也会发（缓冲不够时引擎会主动 pause 去攒秒数、卡死自救会微跳播放头，
+   * 见 useVideoEvents / engine/stallRecovery），一卡就同步一轮是把网络往火上浇。
+   * 这里的调用点只有用户够得着——控制栏按钮、空格/方向键、手势层的单击和横滑。
+   *
+   * 去重（30 秒）在 `requestSyncFlush` 里做，三处调用方不用各写一份。
+   */
+  const flushAfterUserMove = () => {
+    playlist.saveCurrentProgress()          // 先把这一刻的秒数落库，同步的才是最新的那份
+    requestSyncFlush()
+  }
+
   const togglePlay = () => {
     if (!videoEl.value) return
     restoreSound()
     if (isPlaying.value) {
       videoEl.value.pause()
+      flushAfterUserMove()
     } else {
       // 「开播这一下顺便进全屏」**只在触摸端做**（见 isTouchPrimary）。
       // 手机上它是必需的：浏览器不给用户激活就不准全屏，页面加载时那一发必被拒，
@@ -71,6 +89,8 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   const skip = (seconds: number) => {
     if (!videoEl.value) return
     videoEl.value.currentTime = Math.max(0, Math.min(duration.value, videoEl.value.currentTime + seconds))
+    // 双击 ±5s / 方向键都汇到这里，都是用户自己在挪位置
+    flushAfterUserMove()
   }
 
   // ── 进度条 ──
@@ -111,6 +131,8 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
       seekPreviewTime.value = null
       if (progressBar.value && videoEl.value) {
         videoEl.value.currentTime = percentAt(ev) * duration.value
+        // 松手才 seek，也才是「他确实要看这儿」的那一刻（拖动过程中不发）
+        flushAfterUserMove()
       }
       document.removeEventListener('pointermove', onMove)
       document.removeEventListener('pointerup', onUp)

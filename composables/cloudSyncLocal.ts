@@ -71,6 +71,40 @@ export function markDirty(collId: string): void {
   fireDirty()
 }
 
+/**
+ * 「现在就同步一次」的请求信号。
+ *
+ * 与 `markDirty` 的区别是**时机**而不是内容：markDirty 只说「有东西改了」，
+ * 引擎按自己的节奏（5 秒防抖 + 5 分钟节流）挑时间；这个说的是「**此刻**是个好时机」。
+ *
+ * 发起方只有三种**用户主动**的动作：按下暂停、手动拖进度、切换集数。
+ * 它们的共同点是「看到哪儿」刚刚被用户自己改过、而且改完往往就要走开或换设备，
+ * 那一刻进度已落库、网络也闲着，正该把它推上去。引擎收到后豁免节流跑一轮，
+ * 跑完节流时钟自然从那一刻重新开始算。
+ *
+ * **绝不能由自动行为触发**：抗卡主动 pause、播完自动切下一集、跳过片尾——
+ * 那些每分钟都可能发生好几次，一发就同步等于把网络往火上浇。
+ *
+ * 同样走「存储模块只管发、引擎订阅」的单向依赖（见文件头）：播放器不认识同步引擎。
+ */
+const flushListeners: Listener[] = []
+/** 两次「现在就同步」之间的最小间隔。去重放在这里而不是各调用方，免得三处各写一份必然漂移 */
+const FLUSH_GAP_MS = 30_000
+let lastFlushAt = 0
+
+export function onFlushRequest(cb: Listener): void {
+  flushListeners.push(cb)
+}
+
+export function requestSyncFlush(): void {
+  if (typeof window === 'undefined') return
+  // 连着拖几下进度条、连点两下「下一集」不该发好几轮请求
+  const now = Date.now()
+  if (now - lastFlushAt < FLUSH_GAP_MS) return
+  lastFlushAt = now
+  for (const cb of flushListeners) { try { cb() } catch { /* 一个订阅者炸了不该带走别人 */ } }
+}
+
 /** 删了某一条。记墓碑，否则别的设备会把它推回来 */
 export function recordDelete(collId: string, key: string): void {
   if (typeof window === 'undefined' || !collId || !key) return

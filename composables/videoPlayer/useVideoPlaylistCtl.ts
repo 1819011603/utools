@@ -4,6 +4,8 @@
 import type { VideoMediaState } from './useVideoMediaState'
 import type { VideoHandoff } from './useVideoHandoff'
 import { useLazyUrlResolver } from './playlist/lazyUrlResolver'
+// 只依赖最底层的本机账本，不认识同步引擎本身（方向见 cloudSyncLocal 文件头）
+import { requestSyncFlush } from '../cloudSyncLocal'
 
 export interface VideoPlaylistDeps {
   media: VideoMediaState
@@ -278,6 +280,15 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
 
   const playByIndex = async (index: number, opts: { auto?: boolean } = {}) => {
     if (index < 0 || index >= playlist.value.length) return
+    /**
+     * **用户自己换集** → 请求同步一次（豁免 5 分钟节流，见 cloudSyncLocal.requestSyncFlush）。
+     * 换集这一下正是「这部剧我看到这儿了」最值得推上去的时刻，而且换完他往往还会走开。
+     *
+     * `opts.auto` 那条一律不发：播完自动下一集、跳过片尾都走它，一集一次太频；
+     * 而且下面 `doPlayByIndex` 会把旧集进度落库、`recordWatch` 会标脏，
+     * 该同步的东西一样也不会丢，只是等下一个 5 分钟窗口而已。
+     */
+    if (!opts.auto) requestSyncFlush()
     if (switching) { queuedIndex = index; return }
     switching = true
     inFlightAuto = !!opts.auto
