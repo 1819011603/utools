@@ -34,7 +34,8 @@ const DEBOUNCE_MS = 5_000
 interface PullRes {
   user: { uid: string; username: string }
   store: 'd1' | 'local'
-  colls: Array<{ coll: string; rev: number; payload: string }>
+  /** `?meta=1` 那一发只有版本号，没有 payload */
+  colls: Array<{ coll: string; rev: number; payload?: string }>
 }
 
 interface PushRes {
@@ -93,13 +94,37 @@ const pruneUnknown = (m: SyncMeta): SyncMeta => {
 export function useCloudSync() {
   const auth = useUserAuth()
 
-  /** 跑一轮。返回 true = 有冲突（外层据此再来一次） */
-  const cycle = async (): Promise<boolean> => {
-    const res = await auth.authFetch<PullRes>('/api/user/sync')
-    storeKind.value = res.store || ''
-    if (res.user) auth.adoptUser(res.user)
+  /**
+   * 跑一轮。返回 true = 有冲突（外层据此再来一次）。
+   *
+   * **拉取分两发**（`full` 为真时退回一发全量）：
+   *   ① `?meta=1` 只要版本号 —— 几十字节；
+   *   ② 只有「云端 rev 跟本机记的对不上」的那几份才去取正文（`?colls=`）。
+   *
+   * 同步的常态是云端一份都没变（多数人只有一台设备在用），那时第二发压根不发。
+   * 原来每轮都把四份全文（几十~几百 KB）拉一遍，「拉取慢」就是这么来的。
+   *
+   * rev 没变时**不需要云端正文也能算合并结果**：上一轮结束时已经把云端并进本地了，
+   * 之后云端没动过 → 本地当前值就是并集，要不要推只看脏标记。
+   * `full` 那条路留给首次同步和撞 rev 之后的重来 —— 那两种情况下本地那份推断不成立。
+   */
+  const cycle = async (full = false): Promise<boolean> => {
+    const head = await auth.authFetch<PullRes>(full ? '/api/user/sync' : '/api/user/sync?meta=1')
+    storeKind.value = head.store || ''
+    if (head.user) auth.adoptUser(head.user)
 
-    const cloud = new Map(res.colls.map(c => [c.coll, c]))
+    const cloudRev = new Map(head.colls.map(c => [c.coll, c.rev]))
+    const m0 = readMeta()
+    // 哪几份要取正文：云端有而本机没记过、或两边 rev 对不上
+    const stale = full
+      ? []
+      : SYNC_COLLECTIONS.filter(s => (cloudRev.get(s.id) ?? 0) !== (m0.rev[s.id] ?? 0)).map(s => s.id)
+
+    const res: PullRes = full || !stale.length
+      ? head
+      : await auth.authFetch<PullRes>('/api/user/sync?colls=' + encodeURIComponent(stale.join(',')))
+
+    const cloud = new Map(res.colls.filter(c => c.payload !== undefined).map(c => [c.coll, c]))
     const now = Date.now()
     const m = readMeta()
     const pushes: Array<{ coll: string; baseRev: number; payload: string }> = []
@@ -113,9 +138,32 @@ export function useCloudSync() {
     const dirtyAt: Record<string, number | undefined> = {}
 
     for (const spec of SYNC_COLLECTIONS) {
-      const row = cloud.get(spec.id)
-      const cp = parsePayload(row?.payload, spec.kind)
       const local = readLocal(spec)
+      const row = cloud.get(spec.id)
+
+      /**
+       * 这一份没取正文 = 它的 rev 跟本机记的一样 = **云端没动过**。
+       * 那么合并结果就是本地当前值（上一轮已经把云端并进来了），只需决定推不推。
+       * 墓碑仍要过一遍 `mergeTomb` 做 TTL 修剪，否则它只增不减。
+       */
+      if (!row) {
+        const tomb = mergeTomb(m.tomb[spec.id] || {}, {}, now)
+        const clearedAt = m.clearedAt[spec.id] || 0
+        m.tomb[spec.id] = tomb
+        const rev = cloudRev.get(spec.id) ?? 0
+        m.rev[spec.id] = rev
+        // 云端还没有这一份而本地也确实没东西 → 不要白占一行（同下面那个 trivial）
+        const trivial = !rev && isEmptyItems(spec.kind, local) && !Object.keys(tomb).length && !clearedAt
+        if (m.dirty[spec.id] && !trivial) {
+          dirtyAt[spec.id] = m.dirty[spec.id]
+          pushes.push({ coll: spec.id, baseRev: rev, payload: JSON.stringify({ v: 1 as const, items: local, tomb, clearedAt }) })
+        } else {
+          delete m.dirty[spec.id]
+        }
+        continue
+      }
+
+      const cp = parsePayload(row.payload, spec.kind)
 
       // 墓碑和「清空」时间两边都要取并集/取大：只认自己那份的话，对方的删除就传不过来
       const tomb = mergeTomb(m.tomb[spec.id] || {}, cp.tomb, now)

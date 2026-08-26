@@ -56,7 +56,18 @@ export interface UserStore {
   /** 名额判断**必须和插入在同一条语句里**，否则两个人同时注册会双双通过 */
   createUser(row: UserRow): Promise<CreateResult>
   setFail(uid: string, failCount: number, lockUntil: number): Promise<void>
-  readColls(uid: string): Promise<CollRow[]>
+  /**
+   * 读清单。`colls` 给了就只读那几份 —— 同步的常态是「云端一份都没变」，
+   * 那时一个 payload 都不用取（见 sync.get.ts 的 `meta=1`）。
+   */
+  readColls(uid: string, colls?: string[]): Promise<CollRow[]>
+  /**
+   * 只读版本号，**不读 payload**。
+   *
+   * 这是拉取慢的解药：payload 是几份几十~几百 KB 的 JSON，而每一轮同步真正要问的
+   * 只有「云端变了没有」——那是每份十几个字节的事。变了的才去取正文。
+   */
+  readCollRevs(uid: string): Promise<Array<{ coll: string; rev: number; updatedAt: number }>>
   writeColl(uid: string, coll: string, baseRev: number, payload: string): Promise<WriteResult>
 }
 
@@ -137,11 +148,23 @@ function d1Store(db: any): UserStore {
       await db.prepare('UPDATE users SET fail_count = ?, lock_until = ? WHERE uid = ?')
         .bind(failCount, lockUntil, uid).run()
     },
-    async readColls(uid) {
+    async readColls(uid, colls) {
       await ensureSchema(db)
-      const r = await db.prepare('SELECT coll, rev, payload, updated_at FROM user_blobs WHERE uid = ?').bind(uid).all()
+      // 占位符按份数现拼，**值仍然全部 bind**（payload 那条铁律同理：绝不拼进 SQL）
+      const r = colls?.length
+        ? await db.prepare(
+            `SELECT coll, rev, payload, updated_at FROM user_blobs WHERE uid = ? AND coll IN (${colls.map(() => '?').join(',')})`,
+          ).bind(uid, ...colls).all()
+        : await db.prepare('SELECT coll, rev, payload, updated_at FROM user_blobs WHERE uid = ?').bind(uid).all()
       return (r?.results ?? []).map((x: any) => ({
         coll: String(x.coll), rev: Number(x.rev), payload: String(x.payload), updatedAt: Number(x.updated_at),
+      }))
+    },
+    async readCollRevs(uid) {
+      await ensureSchema(db)
+      const r = await db.prepare('SELECT coll, rev, updated_at FROM user_blobs WHERE uid = ?').bind(uid).all()
+      return (r?.results ?? []).map((x: any) => ({
+        coll: String(x.coll), rev: Number(x.rev), updatedAt: Number(x.updated_at),
       }))
     },
     async writeColl(uid, coll, baseRev, payload) {
@@ -239,9 +262,14 @@ function devStore(): UserStore {
         await devWrite('users.json', all)
       })
     },
-    async readColls(uid) {
+    async readColls(uid, colls) {
       const b = await devRead<Blobs>('blobs.json', {})
-      return Object.values(b[uid] ?? {})
+      const mine = Object.values(b[uid] ?? {})
+      return colls?.length ? mine.filter(x => colls.includes(x.coll)) : mine
+    },
+    async readCollRevs(uid) {
+      const b = await devRead<Blobs>('blobs.json', {})
+      return Object.values(b[uid] ?? {}).map(x => ({ coll: x.coll, rev: x.rev, updatedAt: x.updatedAt }))
     },
     writeColl(uid, coll, baseRev, payload) {
       return withLock(async () => {
