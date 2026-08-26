@@ -328,6 +328,25 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
   显示走 `PosterImg.vue`：`no-referrer` → 失败退 `/api/thumb` → 再失败画占位块
 - **`recordWatch` 的封面「只补不删」**：换条线路解析时那一页未必有 `og:image`，整条覆盖会把上次抠到的图冲掉
   （表现是「列表里的图看着看着自己没了」），老记录也靠这一句慢慢补齐
+- **抽屉里只摆前 4 条，其余进「查看更多」**（`LibraryBrowser.vue`：搜索 / 分类 / 按天分组 / 多选删除 / 清空）。
+  **「查看更多」有没有超出都给**——只按「条数 > 4」才给的话，只有 3 条的人永远找不到清空按钮。
+  清空走 `recordClear`（一个 `clearedAt` 时间戳）而不是逐条删（200 条 = 200 个墓碑要上云），
+  且**要二次确认**：它跨设备生效。**管理模式下点整行是「选中」不是「播放」**（点一条就跳走的话根本选不完）
+- **分类（`cat`）是抠出来的，不是配的**（`parseCategory`）：优先 JSON-LD 面包屑
+  （`"name":"国产动漫","item":".../vodtype/31/"` —— 它是**这一部片**的分类），再退回正文里的分类链接、
+  `description`/`keywords`。**绝不能取导航栏里第一个分类链接**：那排「电影/电视剧/综艺/动漫」每页都全，
+  取到的永远是排第一的那个。筛选按钮**按实际出现过的值动态生成**，不写死一张分类表
+  （抠不到分类的站点很多，写死只会摆出一排点进去空空如也的按钮）
+- **老记录的封面靠后台慢慢补**（`useCoverBackfill` + `GET /api/cover`）：三条纪律——**串行 + 1.2s 间隔**
+  （并发抓等于给源站来一轮压测，还跟正在播的那一集抢带宽）、**只在媒体库开着时跑**（关掉即停手）、
+  **抓不到就记进 `video-cover-miss`，24 小时内不再试**（有的站压根没有 og:image、有的片已下架，
+  不记的话每次打开都要把这些必然失败的重跑一遍）。`/api/cover` 只抓页 + 两条正则，**不走 `/api/resolve`**
+  （那条要抠整季选集表、可能过反爬握手、按需取址的站还会被限流）。补进记录时**绝不动 `at`**
+  ——那是「最近看过」，补一张图就把这部剧顶到列表最前面
+- **搜索支持拼音**（`usePinyinMatch`，`xianni` / `xn` 都能命中《仙逆》）：字典 40 多 KB，
+  **敲了纯字母才动态 import**，加载完 `ready` 变真让 computed 自己重算一遍。
+  匹配**按单个字段问**，不拼成一整条 haystack——拼起来「仙逆」+「动漫」会连成 `xiannidongman`，
+  搜 `nid` 这种跨字段的乱码反而能命中
 
 ### URL 参数直链
 
@@ -421,7 +440,8 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
 `video-player-state` · `video-probe-dead-direct`（按 host 记「直连是黑洞」）· `video-player-learned-profiles` ·
 `video-player-origin-history` / `-referer-history` · `video-parse-rules` /
 `-embed-sandbox` / `video-parse-last-result`（1 小时）· `video-watch-history`（**看到第几集**，按剧名存）·
-`video-show-prefs`（**倍速与片头片尾**，按剧名存）· 各页 `*-settings` · `utools-history-<page>`。
+`video-show-prefs`（**倍速与片头片尾**，按剧名存）· `video-favorites`（**收藏影片**，按剧名存）·
+`video-cover-miss`（封面补不到的剧，24 小时内不再试）· 各页 `*-settings` · `utools-history-<page>`。
 
 同步账号那侧：`cloud-sync-token` / `cloud-sync-user`（令牌与用户名）· `cloud-sync-meta`（见下）。
 
@@ -431,8 +451,11 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
 
 ## 账号与云同步（Cloudflare D1）
 
-登录后把 **3 份清单**同步到 D1，换设备接着看：`video-watch-history`（追剧进度）·
-`utools-history-video-search`（片名搜索历史）· `video-show-prefs`（每部剧的倍速与片头片尾）。
+登录后把 **4 份清单**同步到 D1，换设备接着看：`video-watch-history`（追剧进度，含封面地址/分类/秒数）·
+`video-favorites`（收藏影片）· `utools-history-video-search`（片名搜索历史）·
+`video-show-prefs`（每部剧的倍速与片头片尾）。**新增一份要改三处**：`cloudSyncSpec.ts` 的清单表、
+服务端白名单 `server/utils/syncColls.ts`、以及那份数据自己的 `markDirty`/`recordDelete` 调用点
+（漏最后一处的表现是「那一类数据永远同步不上去」）。
 **一律只同步「清单信息」**：播放地址带时效签名（存下来必是死链且失败静默），不上传；
 视频解析历史（2000 条）也不收 —— 它比其余几份加起来还大，而它的价值本来就依赖那个站还活着。
 

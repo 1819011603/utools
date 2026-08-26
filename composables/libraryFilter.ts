@@ -13,15 +13,27 @@ const startOfDay = (ts: number) => {
   return d.getTime()
 }
 
-/** 按标题/分类/线路名模糊找。**大小写与空白都归一化**：用户搜「仙逆」不该被标题里的空格挡住 */
-export function filterLibrary(items: LibraryItem[], kw: string, cat: string): LibraryItem[] {
+/**
+ * 按标题/分类/线路名模糊找。**大小写与空白都归一化**：用户搜「仙逆」不该被标题里的空格挡住。
+ *
+ * `pinyinMatch` 是可选的第四个参数（拼音字典是动态加载的，没加载好时就是 undefined，
+ * 那时退回纯子串匹配）。它按**单个字段**问，而不是拼成一整条 haystack 再问：
+ * 拼起来的话「仙逆」+「动漫」会连成 `xiannidongman`，搜 `nid` 这种跨字段的乱码反而能命中。
+ */
+export function filterLibrary(
+  items: LibraryItem[],
+  kw: string,
+  cat: string,
+  pinyinMatch?: (text: string, q: string) => boolean,
+): LibraryItem[] {
   const q = kw.trim().replace(/\s+/g, '').toLowerCase()
   return items.filter((r) => {
     if (cat && (r.cat || '') !== cat) return false
     if (!q) return true
-    const hay = [r.title, r.cat, (r as any).lineName, r.pageUrl]
-      .filter(Boolean).join(' ').replace(/\s+/g, '').toLowerCase()
-    return hay.includes(q)
+    const fields = [r.title, r.cat, (r as any).lineName].filter(Boolean) as string[]
+    const hay = [...fields, r.pageUrl].filter(Boolean).join(' ').replace(/\s+/g, '').toLowerCase()
+    if (hay.includes(q)) return true
+    return !!pinyinMatch && fields.some(f => pinyinMatch(f, q))
   })
 }
 

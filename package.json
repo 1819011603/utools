@@ -32,6 +32,7 @@
     "p2p-media-loader-hlsjs": "^2.2.2",
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^5.4.624",
+    "pinyin-pro": "^3.29.3",
     "plyr": "^3.8.4",
     "quantize": "^1.0.2",
     "upng-js": "^2.1.0",

@@ -35,7 +35,7 @@
               size="sm"
               class="flex-1"
               icon="i-heroicons-magnifying-glass"
-              placeholder="搜索片名、分类、线路"
+              placeholder="搜索片名、分类、线路（可用拼音 xianni / xn）"
               :ui="{ rounded: 'rounded-xl' }"
             />
             <!--
@@ -122,6 +122,7 @@ import type { LibraryItem, LibraryKind } from '~/composables/useLibrary'
 import type { WatchRecord } from '~/composables/useWatchHistory'
 import type { FavoriteRecord } from '~/composables/useFavorites'
 import { filterLibrary, groupByDay, libraryCategories } from '~/composables/libraryFilter'
+import { isPinyinQuery } from '~/composables/usePinyinMatch'
 
 const props = defineProps<{ kind: LibraryKind | null }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
@@ -147,7 +148,16 @@ const source = computed<LibraryItem[]>(() =>
 const kw = ref('')
 const cat = ref('')
 const cats = computed(() => libraryCategories(source.value))
-const filtered = computed(() => filterLibrary(source.value, kw.value, cat.value))
+
+// 拼音搜中文（`xianni` / `xn` → 仙逆）。字典 40 多 KB，敲了纯字母才去加载；
+// 加载完 `pinyin.ready` 变真，下面这个 computed 会自己重算一遍
+const pinyin = usePinyinMatch()
+watch(kw, (v) => { if (isPinyinQuery(v.trim())) void pinyin.ensure() })
+
+const filtered = computed(() => filterLibrary(
+  source.value, kw.value, cat.value,
+  pinyin.ready.value && isPinyinQuery(kw.value.trim()) ? pinyin.matches : undefined,
+))
 const groups = computed(() => groupByDay(filtered.value))
 
 // 换一份清单（历史 ↔ 收藏）时把筛选条件和选中态全清掉：留着上一份的关键词

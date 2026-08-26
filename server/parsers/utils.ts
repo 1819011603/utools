@@ -86,19 +86,30 @@ const CATEGORY_WORDS = [
 ]
 
 export function parseCategory(html: string): string | undefined {
-  const re = /<a[^>]+href="[^"]*\/(?:vodtype|voddetail|type|show|list|category)\/[^"]*"[^>]*>([^<]{1,12})<\/a>/gi
-  for (const m of html.matchAll(re)) {
-    const text = decodeEntities(m[1])
-    const hit = CATEGORY_WORDS.find(w => text.includes(w))
+  const pick = (s?: string) => (s ? CATEGORY_WORDS.find(w => s.includes(w)) : undefined)
+
+  /**
+   * ① JSON-LD 的面包屑最准：它就是**这一部片**所属的分类（`"name":"国产动漫","item":".../vodtype/31/"`），
+   * 而页面导航栏里「电影/电视剧/综艺/动漫」全都在，随便取一个只会抓到排在最前面的那个。
+   * 判据是「name 后面跟着的 item 指向分类页」，不依赖任何一家的字段顺序之外的东西。
+   */
+  const ld = /"name"\s*:\s*"([^"]{1,24})"\s*,\s*"item"\s*:\s*"[^"]*\/(?:vodtype|type|show|list|category)\//gi
+  for (const m of html.matchAll(ld)) {
+    const hit = pick(decodeEntities(m[1]))
     if (hit) return hit
   }
-  // 退一步：不少站把分类塞进 keywords（「仙逆,动漫,…」）。同样只认白名单里的词
-  const kw = html.match(/<meta[^>]+name=["']keywords["'][^>]*content=["']([^"']+)["']/i)?.[1]
-  if (kw) {
-    const hit = CATEGORY_WORDS.find(w => kw.includes(w))
+
+  // ② 正文里直接写着的分类链接（`<a href="/vodtype/4/">动漫</a>`）
+  const link = /<a[^>]+href="[^"]*\/(?:vodtype|type|show|list|category)\/[^"]*"[^>]*>([^<]{1,12})<\/a>/gi
+  for (const m of html.matchAll(link)) {
+    const hit = pick(decodeEntities(m[1]))
     if (hit) return hit
   }
-  return undefined
+
+  // ③ 退回 meta。description 通常是「《仙逆》动漫在线观看…」这种句子，比 keywords 更常带分类词
+  const meta = (name: string) =>
+    html.match(new RegExp(`<meta[^>]+(?:name|property)=["'][^"']*${name}["'][^>]*content=["']([^"']+)["']`, 'i'))?.[1]
+  return pick(meta('description')) ?? pick(meta('keywords'))
 }
 
 /**
