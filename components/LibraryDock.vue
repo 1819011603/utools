@@ -3,7 +3,7 @@
     全屏时整块不渲染：`fixed` 定位的元素挂在全屏元素**外面**，全屏下一个像素都看不见，
     留着只是让它在退出全屏的那一瞬间闪一下。全屏里要换集有画面内的选集抽屉。
   -->
-  <div v-if="!isFullscreen">
+  <div v-if="!hidden">
     <!--
       贴着左边缘的一竖条按钮。放左边而不是右边：右下角归控制栏和手势（长按 2x 就在那一带），
       而这两颗是「看片之外」的入口，离得越远越不容易误触。
@@ -106,17 +106,31 @@
 
 <script setup lang="ts">
 /**
- * 播放页左侧的悬浮抽屉：**媒体库**（播放历史 / 收藏影片）与**换源**（线路表）。
+ * 左侧悬浮抽屉：**收藏** / **媒体库**（播放历史 + 收藏影片） / **换源**（线路表）。
  *
- * 做成常驻悬浮按钮而不是页面下方又一张折叠卡：这两件事都是「看着看着想起来要做」的
- * ——想换部剧、想换条线路——那时画面在最上面，而折叠卡在滑三屏之外。
+ * **同一套挂在三个页面上**：放映厅、按片名搜索、视频解析。追剧这件事在这三处是连着的
+ * ——搜片时想看看上次追到哪、解析页里想接着看昨天那部——为它们各做一套入口只会漂移。
  *
- * 本组件只管开合与版式，两块内容各自成组件（数据也各自去取），
+ * 做成常驻悬浮按钮而不是页面下方又一张折叠卡：这些都是「看着看着想起来要做」的事，
+ * 而折叠卡在滑三屏之外。
+ *
+ * 本组件只管开合与版式，每块内容各自成组件、数据也各自去取，
  * 免得这里变成一个什么都知道的大文件。
  */
 import type { LibraryKind } from '~/composables/useLibrary'
 
-const { isFullscreen, playlistLines, canFavorite, isFavorited, toggleFavorite } = useVideoPlayerCtx()
+/**
+ * **可选**上下文：这套 dock 同时挂在播放页、搜索页、解析页上，后两个页面没有播放器。
+ * 没有 ctx 时只剩「媒体库」一个入口——「换源」和「收藏当前」都要有正在播的那部剧才谈得上。
+ */
+const ctx = useVideoPlayerCtxOptional()
+
+// 全屏时整块不渲染：`fixed` 元素挂在全屏元素**外面**，全屏下一个像素都看不见，
+// 留着只会在退出全屏那一瞬间闪一下。没有播放器的页面自然不存在全屏这回事
+const hidden = computed(() => !!ctx?.isFullscreen.value)
+const canFavorite = computed(() => !!ctx?.canFavorite.value)
+const isFavorited = computed(() => !!ctx?.isFavorited.value)
+const toggleFavorite = () => ctx?.toggleFavorite()
 
 type TabId = 'library' | 'lines'
 
@@ -126,7 +140,8 @@ const tabs = computed(() => {
   const list: { id: TabId; label: string; icon: string }[] = [
     { id: 'library', label: '媒体库', icon: 'i-heroicons-rectangle-stack' },
   ]
-  if (playlistLines.value.length > 1) list.push({ id: 'lines', label: '换源', icon: 'i-heroicons-arrows-right-left' })
+  // 换源只在播放器里有意义：搜索页/解析页压根没有播放列表，更没有「当前这一集」可保留
+  if ((ctx?.playlistLines.value.length ?? 0) > 1) list.push({ id: 'lines', label: '换源', icon: 'i-heroicons-arrows-right-left' })
   return list
 })
 

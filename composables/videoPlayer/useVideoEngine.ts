@@ -757,7 +757,6 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     getAheadBuffered, getCachedAhead, primePrefetch, startOnePrefetch, prefetchTick,
     abortAllPrefetches, triggerAdaptivePrefetch, purgePlayedSegments, stageSegments,
     aggregateKBps, aggregateMbps, deadLaneLabel,
-    // getSegBuf 给缩略图用：主播放已经下过的分片一律零网络复用（见 useVideoThumbnails）
     getSegBuf,
     // 起播锚点 / 起播窄口
     clearStartAnchor, isArrivingAtStart, getAppliedStartPos,

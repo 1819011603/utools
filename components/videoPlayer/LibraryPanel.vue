@@ -11,7 +11,7 @@
       :class="isFavorited
         ? 'bg-rose-500/10 text-rose-600 dark:text-rose-300 ring-1 ring-rose-400/30'
         : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'"
-      @click="toggleFavorite"
+      @click="toggleCurrent"
     >
       <UIcon :name="isFavorited ? 'i-heroicons-heart-solid' : 'i-heroicons-heart'" class="w-4 h-4 shrink-0" />
       <span class="truncate">{{ isFavorited ? '已收藏' : '收藏' }}{{ playlistTitle ? '《' + playlistTitle + '》' : '这部剧' }}</span>
@@ -67,13 +67,17 @@ import type { LibraryItem, LibraryKind } from '~/composables/useLibrary'
 
 const emit = defineEmits<{ (e: 'close'): void; (e: 'browse', kind: LibraryKind): void }>()
 
-const {
-  playlistTitle,
-  // 收藏状态由控制器持有：画面顶栏和左侧那颗常驻按钮也在改它，各自读一份就会对不上
-  canFavorite, isFavorited, toggleFavorite, refreshFavorite,
-} = useVideoPlayerCtx()
+/**
+ * **可选**上下文：这块也挂在搜索页和解析页的侧边抽屉里，那两个页面没有播放器。
+ * 拿不到时「收藏当前这部剧」那颗按钮整个不出（没有"当前"可言），列表照常。
+ * 收藏状态本身由控制器持有——画面顶栏和左侧那颗常驻按钮也在改它，各自读一份就会对不上。
+ */
+const ctx = useVideoPlayerCtxOptional()
+const playlistTitle = computed(() => ctx?.playlistTitle.value ?? '')
+const canFavorite = computed(() => !!ctx?.canFavorite.value)
+const isFavorited = computed(() => !!ctx?.isFavorited.value)
 
-const { history, favorites, remove: removeItem, keyOf } = useLibrary()
+const { history, favorites, remove: removeItem, keyOf, reload } = useLibrary()
 const { play, isCurrent, percentOf, watchSub, favSub, watchOf, pickResume } = useLibraryPlay()
 
 // 抽屉一打开就开始把老记录缺的封面慢慢抓回来（串行 + 间隔，见 useCoverBackfill）；
@@ -106,6 +110,12 @@ const sections = computed(() => [
   },
 ])
 
+/** 收藏动作在控制器里，这里只补一件它管不着的事：把下面那份收藏列表重读一遍 */
+const toggleCurrent = () => {
+  ctx?.toggleFavorite()
+  reload()
+}
+
 const open = async (kind: LibraryKind, r: LibraryItem) => {
   emit('close')
   await play(kind === 'history' ? (r as any) : { ...r, ...pickResume(r as any) })
@@ -114,6 +124,6 @@ const open = async (kind: LibraryKind, r: LibraryItem) => {
 const remove = (kind: LibraryKind, r: LibraryItem) => {
   removeItem(kind, r)
   // 删掉的可能正是当前这部剧 → 三处按钮共用的那份收藏状态要跟着变回空心
-  if (kind === 'favorite') refreshFavorite()
+  if (kind === 'favorite') ctx?.refreshFavorite()
 }
 </script>

@@ -83,20 +83,6 @@ export function useVideoPlayerController() {
   // 右键菜单/媒体信息面板：只读裸状态 + 问引擎要一眼当前档位，不参与任何加载决策
   const contextMenu = useVideoContextMenu({ media, getHls: engine.getHls })
 
-  // 进度条悬浮缩略图。挂心跳「顺手截一帧」那一路是零成本的；要花网络的那一路
-  // 由 healthZone 一票否决——缩略图永远不该是画面卡住的原因
-  const thumbs = useVideoThumbnails({
-    media,
-    getSegBuf: engine.getSegBuf,
-    // 分片表从主播放的 hls 实例上现读：缩略图自己一次清单都不取（见 useVideoThumbnails）
-    getHls: engine.getHls,
-    // 缓存里没有那一片、要自己下时，连接方式必须跟主播放**完全一致**：
-    // 直连的源就直连（走代理只会慢一大截），该注入防盗链头的才走 /api/proxy
-    getProxyUrl: conn.getProxyUrl,
-    healthZone: () => engine.strategy.value.healthZone,
-  })
-  engine.registerTickHook(thumbs.captureTick)
-
   // ── 持久化 ──
 
   const loadSavedState = (): SavedState | null => {
@@ -252,7 +238,6 @@ export function useVideoPlayerController() {
     controls.unbindGlobalKeys()
     gestures.disposeGestures()
     contextMenu.disposeContextMenu()
-    thumbs.disposeThumbnails()
     events.disposeEvents()
     window.removeEventListener('beforeunload', playlist.saveCurrentProgress)
   }
@@ -274,7 +259,6 @@ export function useVideoPlayerController() {
     ...controls,
     ...gestures,
     ...contextMenu,
-    ...thumbs,
     ...events,
     ...query,
     saveState, mount, unmount,
@@ -290,4 +274,16 @@ export function useVideoPlayerCtx(): VideoPlayerCtx {
   const ctx = inject(VIDEO_PLAYER_KEY)
   if (!ctx) throw new Error('useVideoPlayerCtx 必须在 video-player 页面内使用')
   return ctx
+}
+
+/**
+ * 「在播放器里就用，不在也能活」——媒体库那套组件（左侧悬浮抽屉、播放历史、收藏）
+ * 同时挂在播放页、搜索页、解析页上，后两个页面**根本没有播放器**。
+ *
+ * 所以它们一律走这个可选版：拿不到就是 `null`，调用方按「没有正在播的那部剧」处理
+ *（点一条走整页跳转、不显示「换源」和「收藏当前」）。用抛错那版的话，
+ * 那两个页面一挂上就白屏。
+ */
+export function useVideoPlayerCtxOptional(): VideoPlayerCtx | null {
+  return inject(VIDEO_PLAYER_KEY, null)
 }

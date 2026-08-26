@@ -130,7 +130,8 @@ const emit = defineEmits<{ (e: 'close'): void }>()
 const toast = useToast()
 const { history, favorites, remove, removeMany, clearAll, keyOf } = useLibrary()
 const { play, isCurrent, percentOf, watchSub, favSub, watchOf, pickResume } = useLibraryPlay()
-const { refreshFavorite } = useVideoPlayerCtx()
+// 可选：搜索页/解析页没有播放器，那时没有「当前这部剧」的收藏状态要刷
+const ctx = useVideoPlayerCtxOptional()
 const backfill = useCoverBackfill()
 
 const open = computed(() => !!props.kind)
@@ -206,13 +207,13 @@ const removeSelected = () => {
   const picks = filtered.value.filter(r => selected.value.has(keyOf(r)))
   removeMany(kind.value, picks)
   selected.value = new Set()
-  if (kind.value === 'favorite') refreshFavorite()
+  if (kind.value === 'favorite') ctx?.refreshFavorite()
   toast.add({ title: `已删除 ${picks.length} 条`, color: 'green', timeout: 2000 })
 }
 
 const removeOne = (r: LibraryItem) => {
   remove(kind.value, r)
-  if (kind.value === 'favorite') refreshFavorite()
+  if (kind.value === 'favorite') ctx?.refreshFavorite()
 }
 
 /**
@@ -226,7 +227,7 @@ const askClear = () => {
   if (!ok) return
   clearAll(kind.value)
   selected.value = new Set()
-  if (kind.value === 'favorite') refreshFavorite()
+  if (kind.value === 'favorite') ctx?.refreshFavorite()
   toast.add({ title: title.value + '已清空', color: 'green', timeout: 2000 })
 }
 

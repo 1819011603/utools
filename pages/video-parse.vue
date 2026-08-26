@@ -1,5 +1,11 @@
 <template>
   <div class="max-w-5xl mx-auto space-y-6">
+    <!--
+      左侧悬浮的媒体库（播放历史 + 收藏影片），与放映厅、搜索页共用同一个组件。
+      解析页上最常见的下一步就是「接着看昨天那部」，而那条记录本来就在这儿
+    -->
+    <LibraryDock />
+
     <div>
       <h1 class="text-2xl font-bold text-gray-900 dark:text-white">视频解析</h1>
       <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">
