@@ -129,17 +129,21 @@ watch(activeIndex, async (i) => {
       </p>
     </div>
 
-    <div v-else ref="listEl" class="max-h-72 overflow-y-auto space-y-1 py-2">
+    <!--
+      网易云/QQ 音乐式跟唱：只有当前句放大加粗居中，其余按离当前句的距离依次压暗压小；
+      上下用遮罩渐隐（首尾各留半屏空白，配合 scrollIntoView 的 `center` 才能真把当前句顶到正中间）。
+    -->
+    <div v-else ref="listEl" class="lyrics-scroll relative max-h-80 overflow-y-auto py-28">
       <p
         v-for="(l, i) in parsed.lines"
         :key="i"
         :data-lrc="i"
-        class="text-sm leading-relaxed transition-colors px-2 py-0.5 rounded"
+        class="text-center leading-loose transition-all duration-300 ease-out px-4 py-1.5"
         :class="[
-          parsed.synced && 'cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/60',
+          parsed.synced && l.time >= 0 && 'cursor-pointer',
           i === activeIndex
-            ? 'text-primary-600 dark:text-primary-400 font-medium'
-            : 'text-gray-500 dark:text-gray-400',
+            ? 'text-base sm:text-lg font-semibold text-primary-600 dark:text-primary-400'
+            : 'text-sm text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300',
         ]"
         @click="parsed.synced && l.time >= 0 && seekTo(l.time)"
       >
@@ -148,3 +152,14 @@ watch(activeIndex, async (i) => {
     </div>
   </UCard>
 </template>
+
+<style scoped>
+.lyrics-scroll {
+  mask-image: linear-gradient(to bottom, transparent, black 20%, black 80%, transparent);
+  -webkit-mask-image: linear-gradient(to bottom, transparent, black 20%, black 80%, transparent);
+  scrollbar-width: none;
+}
+.lyrics-scroll::-webkit-scrollbar {
+  display: none;
+}
+</style>

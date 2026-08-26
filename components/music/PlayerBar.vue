@@ -11,7 +11,7 @@ const {
   audioEl, current, isPlaying, currentTime, duration, volume, isMuted,
   isBuffering, isResolving, resolveStage, errorMessage, errorKind,
   queue, queueIndex, repeat, shuffle, seekPreview, isSeeking,
-  showQueue, showDownloads, showFavorites, showLyrics,
+  showQueue, showDownloads, showFavorites, showLyrics, showImmersive,
   togglePlay, seekTo, setVolume, toggleMuted, playNext, playPrev, cycleRepeat, dismissError,
   downloadTrack,
 } = useMusicPlayerCtx()
@@ -158,6 +158,7 @@ const moreItems = computed(() => [
     { label: showQueue.value ? '收起播放列表' : `播放列表（${queue.value.length}）`, icon: 'i-heroicons-queue-list', click: () => { showQueue.value = !showQueue.value } },
     { label: showFavorites.value ? '收起我的收藏' : '我的收藏', icon: 'i-heroicons-heart', click: () => { showFavorites.value = !showFavorites.value } },
     { label: showLyrics.value ? '收起歌词' : '歌词', icon: 'i-heroicons-document-text', click: () => { showLyrics.value = !showLyrics.value } },
+    { label: '沉浸模式', icon: 'i-heroicons-arrows-pointing-out', disabled: !current.value, click: () => { showImmersive.value = true } },
   ],
   [
     { label: repeatLabel.value, icon: repeatIcon.value, click: () => cycleRepeat() },
@@ -394,6 +395,18 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           title="歌词"
           aria-label="歌词"
           @click="showLyrics = !showLyrics"
+        />
+        <!-- 沉浸模式：黑底大字歌词，仿桌面播放器的「大屏」视图。没有正在播的曲目时没什么可展开的 -->
+        <UButton
+          icon="i-heroicons-arrows-pointing-out"
+          color="gray"
+          variant="ghost"
+          size="sm"
+          class="hidden md:inline-flex"
+          :disabled="!current"
+          title="沉浸模式"
+          aria-label="沉浸模式"
+          @click="showImmersive = true"
         />
         <!-- 收藏栏（左侧抽屉）的开关。窄屏收进「更多」，但**一定要有入口** —— 抽屉在窄屏是滑出屏幕的 -->
         <UButton
