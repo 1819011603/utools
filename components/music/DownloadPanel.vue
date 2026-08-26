@@ -128,6 +128,7 @@ const subtitle = (d: MusicDownloadItem) =>
               color="gray"
               variant="ghost"
               size="2xs"
+              title="关闭"
               aria-label="关闭下载面板"
               @click="showDownloads = false"
             />

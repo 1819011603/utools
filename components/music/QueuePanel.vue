@@ -107,6 +107,7 @@ watch([queueIndex, showQueue], async () => {
           :color="i === queueIndex ? 'primary' : 'gray'"
           variant="ghost"
           size="2xs"
+          :title="`播放《${t.name}》`"
           :aria-label="`播放 ${t.name}`"
           @click.stop="playAt(i)"
         />
@@ -131,6 +132,7 @@ watch([queueIndex, showQueue], async () => {
           variant="ghost"
           size="2xs"
           class="lg:invisible lg:group-hover:visible"
+          title="从队列移除"
           aria-label="从队列移除"
           @click.stop="removeAt(i)"
         />

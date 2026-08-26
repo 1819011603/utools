@@ -231,4 +231,5 @@ onBeforeUnmount(unmount)
   <MusicSideLibrary />
   <MusicQueuePanel />
   <MusicPlayerBar />
+  <MusicImmersive />
 </template>

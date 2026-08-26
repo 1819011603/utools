@@ -188,7 +188,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 </script>
 
 <template>
-  <div class="fixed bottom-0 inset-x-0 z-40 border-t border-gray-200 dark:border-gray-800 bg-white/95 dark:bg-gray-900/95 backdrop-blur">
+  <!--
+    永远深色，不跟系统/站点的浅色主题走：桌面音乐播放器的播放条本来就是深色的（QQ音乐/网易云都是），
+    跟设置里的深浅色开关是两回事。`dark` 这个类名本身就会让下面所有 `dark:` 前缀的类生效——
+    Tailwind 的 class 策略生成的选择器是 `.dark .xxx`，挂在任意祖先节点上都算数，不必是 `<html>`，
+    所以不用把这一大片模板里已经写好的 `dark:bg-gray-900` 之类的类全部翻一遍。
+  -->
+  <div class="dark fixed bottom-0 inset-x-0 z-40 border-t border-gray-800 bg-gray-900/95 backdrop-blur">
     <!--
       不加 crossorigin：加了就把媒体请求变成 CORS 模式，凭空多一层约束。
       两个 CDN 虽然都给 ACAO:*，但这个属性对我们没有任何用处（不读像素、不做 AudioContext 分析）。
@@ -210,6 +216,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         color="gray"
         variant="ghost"
         size="2xs"
+        title="关闭"
         aria-label="关闭提示"
         @click="dismissError"
       />
@@ -287,6 +294,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           size="sm"
           class="hidden md:inline-flex"
           :disabled="!hasQueue"
+          title="上一首"
           aria-label="上一首"
           @click="playPrev"
         />
@@ -299,6 +307,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           variant="solid"
           size="sm"
           :disabled="!current"
+          :title="isPlaying ? '暂停' : '播放'"
           :aria-label="isPlaying ? '暂停' : '播放'"
           @click="togglePlay"
         />
@@ -308,6 +317,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           variant="ghost"
           size="sm"
           :disabled="!hasQueue"
+          title="下一首"
           aria-label="下一首"
           @click="playNext"
         />
@@ -330,6 +340,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
             color="gray"
             variant="ghost"
             size="sm"
+            :title="isMuted ? '取消静音' : '静音'"
             :aria-label="isMuted ? '取消静音' : '静音'"
             @click="toggleMuted"
           />
@@ -340,6 +351,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
             step="0.01"
             :value="isMuted ? 0 : volume"
             class="hidden lg:inline-block w-20 accent-primary-500"
+            style="color-scheme: dark"
             aria-label="音量"
             @input="setVolume(Number(($event.target as HTMLInputElement).value))"
           >
