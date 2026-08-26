@@ -59,6 +59,13 @@ const activeId = computed<MusicSiteId | undefined>(() =>
 const active = computed(() => props.sections.find(s => s.site.id === activeId.value))
 
 /**
+ * 「去源站搜」的落点。**我们服务端撞人机校验时，用户自己的浏览器去源站过一次校验往往就通了**
+ * ——校验要的是浏览器指纹，我们服务端天然给不出来，用户的真实浏览器反而没有这个问题。
+ * 拼不出带关键词的地址（站点没给 `buildSearchUrl`）就退到首页，用户自己在源站搜索框里输一遍。
+ */
+const siteSearchUrl = (s: MusicSection) => s.site.buildSearchUrl?.(props.keyword) ?? s.site.homepage
+
+/**
  * 用户点的是哪一档。**只让被点的那颗转圈** ——
  * 早先只按 `resolvingKey === keyOf(row)` 判断，同一行的两颗按钮都成立，
  * 于是点「无损音质」时「高清环绕声」也跟着转，看着像两个档同时在取址（并没有）。
@@ -120,13 +127,27 @@ watch(() => props.resolvingKey, (k) => { if (!k) pickedTier.value = null })
         <!-- 窄屏放不下就挪到页签下面，别把它挤掉 -->
         <p class="text-xs text-gray-400 sm:hidden">{{ active.site.tagline }}</p>
 
-        <!-- 这个源整个挂了。别的源照常能用，所以只在它自己的页签里报 -->
+        <!--
+          这个源整个挂了。别的源照常能用，所以只在它自己的页签里报。
+          **人机校验一类的失败留个「去源站搜」的出路**——我们服务端过不去的校验，
+          用户自己浏览器打开源站往往一次就过（同 video-search 的 `blocked` 状态那套逻辑）。
+        -->
         <div
           v-if="active.failed"
           class="rounded-xl border border-amber-200 dark:border-amber-900/50 bg-amber-50/50 dark:bg-amber-950/20 p-4 flex items-center gap-3 text-sm"
         >
           <UIcon name="i-heroicons-exclamation-triangle" class="w-5 h-5 text-amber-500 shrink-0" />
           <span class="text-gray-600 dark:text-gray-300 min-w-0 flex-1">{{ active.error }}</span>
+          <UButton
+            size="2xs"
+            color="gray"
+            variant="soft"
+            icon="i-heroicons-arrow-top-right-on-square"
+            :to="siteSearchUrl(active)"
+            target="_blank"
+          >
+            去源站搜
+          </UButton>
           <UButton size="2xs" color="gray" @click="emit('retry', active.site.id)">重试</UButton>
         </div>
 

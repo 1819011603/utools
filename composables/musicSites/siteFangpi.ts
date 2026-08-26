@@ -54,6 +54,10 @@ export const SITE_FANGPI: MusicSite = {
    */
   pageSize: 0,
 
+  /** 「去源站搜」的落点。搜索页地址就是 `/s/<kw>`（服务端也是照这个格式抓的，见 search.ts） */
+  homepage: 'https://www.fangpi.net/',
+  buildSearchUrl: kw => `https://www.fangpi.net/s/${encodeURIComponent(kw)}`,
+
   async search(_source, kw, _page, signal): Promise<MusicSearchRow[]> {
     // 站点不分页，`page` 收下但用不上（形状要和别的站点一致）
     const res = await $fetch<{ items: Omit<MusicSearchRow, 'site'>[] }>('/api/music/fangpi/search', {

@@ -63,6 +63,13 @@ export const SITE_24BIT: MusicSite = {
   /** 站点每页固定 30 条。它不报总数，只能按「这一页给满了」推断还有下一页 */
   pageSize: 30,
 
+  /**
+   * 「去源站搜」的落点。**没给 `buildSearchUrl`**——站点是前端路由的 SPA，没能确认过
+   * 带关键词直达搜索结果的地址格式，瞎编一个格式错了比不给更误导人。
+   * 退到首页：用户自己在源站的搜索框里输一遍，一样能过它自己的人机校验。
+   */
+  homepage: 'https://www.24bit.net/',
+
   async search(source, kw, page, signal): Promise<MusicSearchRow[]> {
     const res = await $fetch<{ items: Omit<MusicSearchRow, 'site'>[] }>('/api/music/search', {
       query: { source, kw, page },

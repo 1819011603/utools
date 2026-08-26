@@ -23,7 +23,7 @@
  * 实现约束同 proxy.ts：不静态 import 任何 `node:*`（Nitro preset 是 cloudflare-pages）。
  */
 import { parseSearchRows, parseTotal } from '../../../utils/fangpi'
-import { CF_WALL_MESSAGE, isCloudflareWall, musicFetch } from '../../../utils/musicFetch'
+import { cfWallMessage, isCloudflareWall, musicFetch } from '../../../utils/musicFetch'
 
 const BASE = 'https://www.fangpi.net'
 
@@ -45,7 +45,7 @@ export default defineEventHandler(async (event) => {
    * `musicFetch` 已经会在撞墙后自动退一次直连，所以走到这里说明两条路都没成。
    */
   if (isCloudflareWall(res.status, res.body)) {
-    throw createError({ statusCode: 502, statusMessage: CF_WALL_MESSAGE })
+    throw createError({ statusCode: 502, statusMessage: cfWallMessage('放屁音乐网') })
   }
   if (res.status !== 200) {
     throw createError({ statusCode: 502, statusMessage: `搜索页返回 ${res.status}` })

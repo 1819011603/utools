@@ -18,7 +18,7 @@
  *
  * 实现约束同 proxy.ts：不静态 import 任何 `node:*`（Nitro preset 是 cloudflare-pages）。
  */
-import { CF_WALL_MESSAGE, isCloudflareWall, musicFetch } from '../../utils/musicFetch'
+import { cfWallMessage, isCloudflareWall, musicFetch } from '../../utils/musicFetch'
 
 const BASE = 'https://www.24bit.net'
 
@@ -67,7 +67,7 @@ export default defineEventHandler(async (event) => {
   // 撞 CF 墙时说人话。本地开发下这几乎总是「dev server 带了 HTTPS_PROXY」造成的，
   // 而报一句「搜索接口返回 403」会让人往规则失效的方向查，差得很远
   if (isCloudflareWall(res.status, res.body)) {
-    throw createError({ statusCode: 502, statusMessage: CF_WALL_MESSAGE })
+    throw createError({ statusCode: 502, statusMessage: cfWallMessage('24bit') })
   }
   if (res.status !== 200) {
     throw createError({ statusCode: 502, statusMessage: `搜索接口返回 ${res.status}` })

@@ -21,7 +21,7 @@
  * 实现约束同 proxy.ts：不静态 import 任何 `node:*`（Nitro preset 是 cloudflare-pages）。
  */
 import { parseAppData, parseDuration, parseInlineLrc } from '../../../utils/fangpi'
-import { CF_WALL_MESSAGE, isCloudflareWall, musicFetch } from '../../../utils/musicFetch'
+import { cfWallMessage, isCloudflareWall, musicFetch } from '../../../utils/musicFetch'
 import { readUrlCache, writeUrlCache } from '../../../utils/musicUrlCache'
 
 const BASE = 'https://www.fangpi.net'
@@ -79,7 +79,7 @@ export default defineEventHandler(async (event) => {
 
   // 撞 CF 墙：本地开发下几乎总是 dev server 带了 HTTPS_PROXY（这个站经代理恒 403）
   if (isCloudflareWall(page.status, page.body)) {
-    throw createError({ statusCode: 502, statusMessage: CF_WALL_MESSAGE })
+    throw createError({ statusCode: 502, statusMessage: cfWallMessage('放屁音乐网') })
   }
   if (page.status === 404) {
     throw createError({ statusCode: 404, statusMessage: '这个站点上没有这首歌' })

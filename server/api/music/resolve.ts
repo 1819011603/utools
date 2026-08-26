@@ -10,7 +10,7 @@
  *
  * 实现约束同 proxy.ts：不静态 import 任何 `node:*`（Nitro preset 是 cloudflare-pages）。
  */
-import { CF_WALL_MESSAGE, isCloudflareWall, isQuotaExhausted, musicFetch, QUOTA_MESSAGE } from '../../utils/musicFetch'
+import { cfWallMessage, isCloudflareWall, isQuotaExhausted, musicFetch, QUOTA_MESSAGE } from '../../utils/musicFetch'
 import { readUrlCache, writeUrlCache } from '../../utils/musicUrlCache'
 
 const BASE = 'https://www.24bit.net'
@@ -104,7 +104,7 @@ export default defineEventHandler(async (event) => {
   // 撞 CF 墙时说人话：本地开发下这几乎总是「dev server 带了 HTTPS_PROXY」造成的
   // （代理出口 IP 会被 Cloudflare 拦，实测直连 200、经代理 403）
   if (isCloudflareWall(page.status, page.body)) {
-    throw createError({ statusCode: 502, statusMessage: CF_WALL_MESSAGE })
+    throw createError({ statusCode: 502, statusMessage: cfWallMessage('24bit') })
   }
   if (page.status !== 200) {
     throw createError({ statusCode: 502, statusMessage: `源站返回 ${page.status}` })
