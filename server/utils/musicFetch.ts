@@ -117,19 +117,29 @@ export function isCloudflareWall(status: number, body: string): boolean {
  * 撞上 CF 墙时统一的说法。**本地和线上必须说不同的话，因为根因完全不同**：
  *
  *   · 本地：几乎总是 dev server 带了 HTTPS_PROXY，代理出口被拦，去掉就好 —— 是个能修的事
- *   · 线上：拦的是 **Cloudflare 自己的出口**（源站也在 CF 后面，WAF 拦数据中心 ASN）。
- *     Workers 改不了出口 IP，请求头早就照浏览器发了，**没有能修的东西**
+ *   · 线上：拦的是 **Cloudflare 自己的出口**（源站也在 CF 后面，WAF 拦数据中心 ASN 或触发了
+ *     行为风控），Workers 改不了出口 IP，请求头早就照浏览器发了，**没有能修的东西**
  *
  * 这个区别不做出来的话，线上会对着用户念「你的 dev server 带了代理」——
  * 一句在 pages.dev 上毫无意义的话，而它偏偏听起来很像个具体线索，
  * 足以让人往「配置写错了」的方向查半天（**已经发生过一次**）。
  * 判据用 `import.meta.dev`（Nitro 构建时替换成常量），不用任何运行时探测。
+ *
+ * **必须传入当前是哪个音源**、而且线上那句**绝不能点名推荐某个具体音源**——
+ * 之前写死过「换用 24bit（24bit 线上正常）」，那是把 fangpi 单独在线上不可用
+ * （`localOnly`，结构性的，见 `types.ts`）的结论套用到了所有调用方身上。
+ * 24bit 自己也会撞同一堵墙（WAF 是按风控打分，不是按「是不是机房」这种一刀切规则，
+ * 命中率比 fangpi 低但不是零）——那种情况下这条消息也会从 `server/api/music/*.ts` 里抛出来，
+ * 念着「换用 24bit」而用户盯着的正是 24bit 报的错，整句话变得前后矛盾。
  */
-export const CF_WALL_MESSAGE = import.meta.dev
-  ? '音乐站返回了人机校验页。本地开发时最常见的原因是 dev server 带了 HTTPS_PROXY —— '
-    + '这个站必须直连，代理的出口 IP 会被 Cloudflare 拦。'
-  : '这个音源在线上用不了：源站的人机校验拦的是 Cloudflare 的出口 IP，而 Workers 改不了出口。'
-    + '请换用另一个音源（24bit 线上正常）。'
+export function cfWallMessage(siteName: string): string {
+  if (import.meta.dev) {
+    return '音乐站返回了人机校验页。本地开发时最常见的原因是 dev server 带了 HTTPS_PROXY —— '
+      + '这个站必须直连，代理的出口 IP 会被 Cloudflare 拦。'
+  }
+  return `${siteName}现在被 Cloudflare 的人机校验拦住了（源站的校验拦的是 Cloudflare 的出口 IP，`
+    + 'Workers 改不了出口）。多数情况过一会再试就好，也可以换搜索页上的另一个音源。'
+}
 
 /**
  * 认出「今日访问已达限额」。

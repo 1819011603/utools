@@ -97,6 +97,16 @@ export interface MusicSite {
   /** 搜一页。`page` 从 1 开始；不分页的站点一律只会被以 `page=1` 调用 */
   search: (source: string, kw: string, page: number, signal?: AbortSignal) => Promise<MusicSearchRow[]>
 
+  /**
+   * 「去源站搜」的落点。**我们的服务端撞 CF 人机校验时**，用户自己的浏览器去源站过一次
+   * 校验往往就通了（同 video-search 的 `blocked` 状态那套出路，见 `ResultList.vue`）。
+   *
+   * 能拼出带关键词的搜索页就给一个函数（`buildSearchUrl`），拼不出来的站点就没有这个字段，
+   * 界面上退回到站点首页——好过给一个瞎猜的 URL 格式，猜错了比没有更误导人。
+   */
+  homepage: string
+  buildSearchUrl?: (kw: string) => string
+
   /** 取址。一次只试一个档位，重试和退避由闸门统一管（见 useMusicResolveGate） */
   resolve: (id: string, tier: string, signal?: AbortSignal) => Promise<MusicResolved>
 
