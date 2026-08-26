@@ -14,7 +14,6 @@
  */
 import type { MusicResolved, MusicSearchRow, MusicSite } from './types'
 import {
-  HEADERS_24BIT,
   build24bitDetailUrl,
   build24bitSearchBody,
   build24bitSearchUrl,
@@ -89,10 +88,17 @@ export const SITE_24BIT: MusicSite = {
      * 文件顶部的说明），走它会让用户的登录态悄悄失效而不自知，宁可稳一点走服务端老路。
      */
     if (!auth.hasAuth.value && (source === 'one' || source === 'two')) {
+      /*
+       * **不能自己塞 `Origin`/`Referer`**——这两个是浏览器 `fetch()` 的禁改头，JS 设了也会被
+       * 浏览器悄悄吞掉（服务端那条路 `HEADERS_24BIT` 能用是因为 Node/Workers 的 fetch 没有这层
+       * 限制，浏览器这边不行，之前直接抄过去踩了坑：拿 `Origin: 24bit.net` 去调本机中继，
+       * 结果把中继自己校验"这是不是我们网站发来的请求"那道 `Origin` 检查也覆盖掉了，
+       * 中继直接判 403 `origin_not_allowed`）。24bit.net 要的 `Referer` 由中继自己的
+       * `relay_config.json` 按目标 URL 匹配后**在它转发出去那一步**注入，不需要我们操心。
+       */
       const relay = await viaLocalRelay(build24bitSearchUrl(source), {
         method: 'POST',
-        // `HEADERS_24BIT`（Origin/Referer）必带，同服务端那条路——漏了这两个头逢发必 403
-        headers: { 'Content-Type': 'application/json', ...HEADERS_24BIT },
+        headers: { 'Content-Type': 'application/json' },
         body: build24bitSearchBody(kw, page),
       })
       if (relay?.status === 200) {
@@ -119,7 +125,8 @@ export const SITE_24BIT: MusicSite = {
     const auth = useMusic24bitAuth()
 
     if (!auth.hasAuth.value && (tier === 'b' || tier === 'c')) {
-      const relay = await viaLocalRelay(build24bitDetailUrl(tier, id), { headers: HEADERS_24BIT })
+      // 同上：不传 Origin/Referer，交给中继自己的 relay_config.json 按目标 URL 注入
+      const relay = await viaLocalRelay(build24bitDetailUrl(tier, id))
       if (relay?.status === 200 && !isQuotaExhausted24bit(relay.body)) {
         const item = extractItemMusic24bit(relay.body)
         if (item?.url) return { ...toResolvedPayload(item), src: tier }
