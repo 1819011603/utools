@@ -23,7 +23,7 @@
  */
 import type { Track } from '~/composables/musicPlayer/types'
 
-const { setQueue, showFavorites, current } = useMusicPlayerCtx()
+const { setQueue, showFavorites, showImmersive, current } = useMusicPlayerCtx()
 // 收藏数据不走 ctx：`useMusicFavorites` 是模块级单例，搜索结果里的收藏心和这里是同一份状态
 const { favorites, removeFavorite, clearFavorites } = useMusicFavorites()
 
@@ -69,7 +69,8 @@ const sub = (t: { artist?: string; album?: string }) => [t.artist, t.album].filt
   >
     <div
       v-if="showFavorites"
-      class="lg:hidden fixed inset-0 z-30 bg-black/30"
+      class="lg:hidden fixed inset-0 bg-black/30"
+      :class="showImmersive ? 'z-[64]' : 'z-30'"
       @click="showFavorites = false"
     />
   </Transition>
@@ -77,15 +78,20 @@ const sub = (t: { artist?: string; album?: string }) => [t.artist, t.album].filt
   <!--
     上边贴着 header（sticky h-16），下边给播放条留出 6rem——播放条是 fixed 的，
     压到它下面的那截列表点不着，比看不见更让人以为是坏的。
+
+    z-index 平时是 40；沉浸模式的黑底遮罩是 `z-[60]`（见 Immersive.vue），
+    沉浸模式里点「我的收藏」要能把这栏盖上去，不然它开了跟没开一样（压在黑底下面看不见）。
   -->
   <aside
-    class="fixed left-0 top-16 bottom-24 z-40 flex flex-col overflow-hidden
+    class="fixed left-0 top-16 bottom-24 flex flex-col overflow-hidden
            border-r border-gray-200 dark:border-gray-800 rounded-r-2xl
            bg-white/95 dark:bg-gray-900/95 backdrop-blur shadow-lg shadow-rose-100/40 dark:shadow-none
            transition-[width,transform] duration-300 ease-out"
-    :class="showFavorites
-      ? 'w-72 translate-x-0'
-      : 'w-72 lg:w-14 -translate-x-full lg:translate-x-0'"
+    :class="[
+      showFavorites ? 'w-72 translate-x-0' : 'w-72 lg:w-14 -translate-x-full lg:translate-x-0',
+      // 只在真展开时才顶上去——收起态是条常驻的窄轨，不该在沉浸模式里凭空浮出来
+      showImmersive && showFavorites ? 'z-[65]' : 'z-40',
+    ]"
   >
     <!-- ── 收起态：只留一枚心和条数（窄屏这一支看不到，整块已经滑出屏幕了） ── -->
     <template v-if="!showFavorites">

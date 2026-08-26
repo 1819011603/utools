@@ -19,7 +19,7 @@
  */
 import { formatTrackTime } from '~/composables/musicPlayer/display'
 
-const { queue, queueIndex, isPlaying, showQueue, playAt, removeAt, clearQueue } = useMusicPlayerCtx()
+const { queue, queueIndex, isPlaying, showQueue, showImmersive, playAt, removeAt, clearQueue } = useMusicPlayerCtx()
 
 const listEl = ref<HTMLElement>()
 
@@ -45,18 +45,23 @@ watch([queueIndex, showQueue], async () => {
   >
     <div
       v-if="showQueue"
-      class="lg:hidden fixed inset-0 z-30 bg-black/30"
+      class="lg:hidden fixed inset-0 bg-black/30"
+      :class="showImmersive ? 'z-[64]' : 'z-30'"
       @click="showQueue = false"
     />
   </Transition>
 
   <!-- 上下留白同左侧那条：上边贴着 header，下边给 fixed 播放条让位，否则最后几行点不着 -->
+  <!--
+    沉浸模式的黑底遮罩是 `z-[60]`（见 Immersive.vue），比这里平时用的 `z-40` 高——
+    沉浸模式里点「播放列表」要能把这层抽屉盖上去，不然它开了跟没开一样（被压在黑底下面看不见）。
+  -->
   <aside
-    class="fixed right-0 top-16 bottom-24 z-40 w-80 max-w-[85vw] flex flex-col overflow-hidden
+    class="fixed right-0 top-16 bottom-24 w-80 max-w-[85vw] flex flex-col overflow-hidden
            border-l border-gray-200 dark:border-gray-800 rounded-l-2xl
            bg-white/95 dark:bg-gray-900/95 backdrop-blur shadow-lg shadow-rose-100/40 dark:shadow-none
            transition-transform duration-300 ease-out"
-    :class="showQueue ? 'translate-x-0' : 'translate-x-full'"
+    :class="[showQueue ? 'translate-x-0' : 'translate-x-full', showImmersive ? 'z-[65]' : 'z-40']"
     :aria-hidden="!showQueue"
   >
     <div class="flex items-center gap-2 px-4 h-12 shrink-0 border-b border-gray-200 dark:border-gray-800">

@@ -15,7 +15,7 @@ import { formatTrackTime } from '~/composables/musicPlayer/display'
 
 const {
   current, isPlaying, currentTime, duration, seekPreview, isSeeking, showImmersive,
-  queue, repeat, togglePlay, seekTo, playNext, playPrev, cycleRepeat,
+  queue, repeat, showQueue, showFavorites, togglePlay, seekTo, playNext, playPrev, cycleRepeat,
 } = useMusicPlayerCtx()
 
 const { isFavorite, toggleFavorite } = useMusicFavorites()
@@ -255,6 +255,32 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
             @click="cycleRepeat"
           >
             <UIcon :name="repeatIcon" class="w-5 h-5" />
+          </button>
+
+          <!--
+            播放列表 / 我的收藏：开的还是页面里那两个抽屉组件（`QueuePanel`/`SideLibrary`），
+            不是沉浸模式自己另起一份列表 UI——那两个组件已经处理好了增删、当前项高亮、滚动跟随，
+            照抄一遍只会让两处状态分叉。它们平时的 `z-40` 会被这层黑底盖住，所以两个组件里
+            加了「沉浸模式开着且这个抽屉也开着」时临时顶到 `z-[65]` 的判断，见各自文件里的注释。
+          -->
+          <button
+            class="w-10 h-10 rounded-full grid place-items-center transition-colors hover:bg-white/10"
+            :class="showQueue ? 'text-primary-400' : 'text-zinc-300 hover:text-white'"
+            :title="`播放列表（${queue.length}）`"
+            aria-label="播放列表"
+            @click="showQueue = !showQueue"
+          >
+            <UIcon name="i-heroicons-queue-list" class="w-5 h-5" />
+          </button>
+
+          <button
+            class="w-10 h-10 rounded-full grid place-items-center transition-colors hover:bg-white/10"
+            :class="showFavorites ? 'text-primary-400' : 'text-zinc-300 hover:text-white'"
+            :title="showFavorites ? '收起我的收藏' : '我的收藏'"
+            aria-label="我的收藏"
+            @click="showFavorites = !showFavorites"
+          >
+            <UIcon name="i-heroicons-bars-3-bottom-left" class="w-5 h-5" />
           </button>
         </div>
       </div>
