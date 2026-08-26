@@ -1042,5 +1042,5 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     }
   }
 
-  return { getAheadBuffered, getCachedAhead, getAdaptivePrefetchCount, createHlsFragLoader, triggerAdaptivePrefetch, startOnePrefetch, strategy, resetStrategy, tick, primePrefetch, getStuckSegment, laneDead, reviveLanes, purgePlayedSegments, getLoaderActivity, isSegCached: (url: string) => getPrefetchedBuf(url) !== null }
+  return { getAheadBuffered, getCachedAhead, getAdaptivePrefetchCount, createHlsFragLoader, triggerAdaptivePrefetch, startOnePrefetch, strategy, resetStrategy, tick, primePrefetch, getStuckSegment, laneDead, reviveLanes, purgePlayedSegments, getLoaderActivity, isSegCached: (url: string) => getPrefetchedBuf(url) !== null, getSegBuf: (url: string) => getPrefetchedBuf(url) }
 }

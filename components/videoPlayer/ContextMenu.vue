@@ -18,14 +18,15 @@
         播放速度排在最前：右键菜单里它是唯一「看片当下高频要改」的东西（其余都是查看类）。
         档位表复用 controls.rateOptions，跟控制栏那份倍速菜单和 </> 快捷键同一个来源——
         写死一份的话开了「超快倍速」这里就少几档（踩过同类问题，见 useVideoUiControls）。
-        绑 desiredRate 不是 playbackRate：后者是自动最佳倍速算出来的实际值，
+        **只摆 5 格、当前档居中**（见 speedChips）：全表 10~14 档会在这个宽度里折成三行，
+        右键菜单最该一眼看完。绑 desiredRate 不是 playbackRate：后者是自动最佳倍速算出来的实际值，
         高亮跟着它跳会让人以为自己没点中。
       -->
       <div class="px-3 pt-2.5 pb-2 border-b border-white/10">
         <div class="text-[11px] text-white/45 mb-1.5">播放速度</div>
-        <div class="flex flex-wrap gap-1">
+        <div class="flex gap-1">
           <button
-            v-for="rate in rateOptions"
+            v-for="rate in speedChips"
             :key="rate"
             class="px-1.5 py-0.5 rounded text-xs tabular-nums transition-colors"
             :class="desiredRate === rate
@@ -100,6 +101,23 @@ const {
   rateOptions, desiredRate, setPlaybackRate,
   supportsPiP, togglePiP, isFullscreen, toggleFullscreen,
 } = useVideoPlayerCtx()
+
+/**
+ * 倍速只摆 5 格，当前档居中。
+ *
+ * 贴边时**夹住而不是让格子变少**：总是 5 格，菜单宽度和行高就不会随倍速跳
+ * （0.25x 时窗口是头 5 档，当前档落在最左——这是夹住的代价，比菜单忽宽忽窄好）。
+ * `desiredRate` 找不到时以 1x 为中心：自动最佳倍速算出来的实际值不一定在档位表里。
+ */
+const SPEED_SLOTS = 5
+const speedChips = computed(() => {
+  const all = rateOptions.value
+  if (all.length <= SPEED_SLOTS) return all
+  const i = all.indexOf(desiredRate.value)
+  const center = i >= 0 ? i : Math.max(0, all.indexOf(1))
+  const start = Math.min(Math.max(center - (SPEED_SLOTS >> 1), 0), all.length - SPEED_SLOTS)
+  return all.slice(start, start + SPEED_SLOTS)
+})
 
 // 开面板就收菜单（菜单正压在面板左上角），关面板则留着菜单——那一下多半是想再点别的
 const toggleMediaInfo = () => {

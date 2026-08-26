@@ -24,6 +24,7 @@
 import type { SyncSpec } from './cloudSyncMerge'
 import { emptyItems, isEmptyItems, mergeItems, mergeTomb, parsePayload, sameJson } from './cloudSyncMerge'
 import { SYNC_COLLECTIONS } from './cloudSyncSpec'
+import type { SyncMeta } from './cloudSyncLocal'
 import { notifyApplied, onDirty, patchMeta, readMeta, writeMeta } from './cloudSyncLocal'
 
 const THROTTLE_MS = 5 * 60_000
@@ -62,6 +63,31 @@ const readLocal = (spec: SyncSpec): any => {
 
 const writeLocal = (spec: SyncSpec, items: any) => {
   try { localStorage.setItem(spec.lsKey, JSON.stringify(items)) } catch { /* 配额满了，这一份下次再落 */ }
+}
+
+/**
+ * 扔掉账本里**已经不在清单表里**的那些 id。
+ *
+ * 同步一轮只遍历 `SYNC_COLLECTIONS`，所以某份清单从表里去掉之后，
+ * 老用户 localStorage 里它那条 `dirty` 标记**再也没有人来清** —— 后果是
+ * 「有变更才同步」那道闸恒为真：界面上那颗「有改动待上传」的黄点永久亮着，
+ * 而且每过 5 分钟就白跑一整轮拉取+合并，一直到用户自己清浏览器数据为止。
+ *
+ * 真发生过：音乐那两份（`music-fav` / `music-search`）上线过一版，随后整个音乐功能被移除。
+ * 所以这里不是防御性编程，而是**清单表本来就会增减**，账本得跟着收敛。
+ */
+const pruneUnknown = (m: SyncMeta): SyncMeta => {
+  const known = new Set(SYNC_COLLECTIONS.map(s => s.id))
+  let dropped = false
+  for (const bag of [m.dirty, m.rev, m.clearedAt, m.tomb] as Record<string, unknown>[]) {
+    for (const id of Object.keys(bag)) {
+      if (known.has(id)) continue
+      delete bag[id]
+      dropped = true
+    }
+  }
+  if (dropped) writeMeta(m)
+  return m
 }
 
 export function useCloudSync() {
@@ -151,7 +177,7 @@ export function useCloudSync() {
   const syncNow = async (opts: { force?: boolean } = {}): Promise<boolean> => {
     if (typeof window === 'undefined' || !auth.token.value || syncing.value) return false
 
-    const meta = readMeta()
+    const meta = pruneUnknown(readMeta())
     const hasDirty = Object.keys(meta.dirty).length > 0
     const neverSynced = Object.keys(meta.rev).length === 0
 
@@ -193,7 +219,8 @@ export function useCloudSync() {
     if (started || typeof window === 'undefined') return
     started = true
 
-    const m = readMeta()
+    // 先剪掉已经不在清单表里的 id，否则那颗「有改动待上传」的黄点会凭空亮着
+    const m = pruneUnknown(readMeta())
     lastOkAt.value = m.lastOkAt || 0
     pendingChanges.value = Object.keys(m.dirty).length > 0
 

@@ -115,30 +115,61 @@
                    ring-2 ring-violet-400/50 transition-transform group-hover/progress:scale-125"
             :style="{ left: `calc(${progressPercent}% - 7px)` }"
           />
+          <!--
+            悬浮预览：缩略图 + 时间。**贴边要夹住**（`clamp`）——不夹的话在进度条两端
+            这块 240px 宽的卡片有一半在画面外，而那两端恰恰是最常悬浮的地方。
+            整块 `pointer-events-none`：它盖在进度条上方，吃了事件就等于把 hover 自己掐断。
+            `thumbEnabled` 为假（整片 MP4 / 浏览器不支持 MSE）时退回原来那个纯时间小气泡。
+          -->
           <div
             v-if="hoverTime !== null"
-            class="absolute -top-8 px-2 py-1 bg-black/80 text-white text-xs rounded transform -translate-x-1/2 pointer-events-none"
-            :style="{ left: hoverPercent + '%' }"
+            class="absolute bottom-full mb-2.5 -translate-x-1/2 pointer-events-none"
+            :style="{ left: `clamp(${thumbHalfW}, ${hoverPercent}%, calc(100% - ${thumbHalfW}))` }"
           >
-            {{ formatTime(hoverTime) }}
+            <div
+              v-if="thumbEnabled"
+              class="rounded-lg overflow-hidden bg-black/85 ring-1 ring-white/20 shadow-2xl"
+              :style="{ width: THUMB_BOX_W + 'px' }"
+            >
+              <!-- 图位恒占高：有图无图之间不能改变卡片高度，否则沿进度条扫过去整块在上下跳 -->
+              <div class="relative bg-black/60 flex items-center justify-center" :style="{ height: thumbBoxH + 'px' }">
+                <img v-if="thumbImage" :src="thumbImage" class="w-full h-full object-cover" alt="">
+                <UIcon
+                  v-else
+                  :name="thumbPending ? 'i-heroicons-arrow-path' : 'i-heroicons-photo'"
+                  class="w-5 h-5 text-white/30"
+                  :class="{ 'animate-spin': thumbPending }"
+                />
+              </div>
+              <div class="py-1 text-center text-white text-xs font-mono tabular-nums">{{ formatTime(hoverTime) }}</div>
+            </div>
+            <div v-else class="px-2 py-1 bg-black/80 text-white text-xs rounded font-mono tabular-nums">
+              {{ formatTime(hoverTime) }}
+            </div>
           </div>
           <div
             v-else-if="seekPreviewTime !== null"
-            class="absolute -top-8 px-2 py-1 bg-black/80 text-white text-xs rounded transform -translate-x-1/2"
+            class="absolute bottom-full mb-2.5 px-2 py-1 bg-black/80 text-white text-xs rounded
+                   font-mono tabular-nums transform -translate-x-1/2"
             :style="{ left: seekPreviewPercent + '%' }"
           >
             {{ formatTime(seekPreviewTime) }}
           </div>
         </div>
 
-        <!-- 右侧一组：宽屏时靠 ml-auto 推到最右（进度条独占上一行后这行需要自己撑开） -->
-        <div class="order-4 flex items-center gap-0.5 shrink-0 sm:ml-auto">
+        <!--
+          右侧一组：宽屏时靠 ml-auto 推到最右（进度条独占上一行后这行需要自己撑开）。
+          **间距和触靶都比左侧一组松**：这几个是最常点的（倍速/设置/全屏），
+          原来 `gap-0.5` + `p-1.5` 在宽屏上挤成一坨、几个图标边缘几乎贴着（用户反馈）。
+          窄屏仍收紧——那一行本来就快放不下（`flex-nowrap`，一换行就摞成两排糊在画面中间）。
+        -->
+        <div class="order-4 flex items-center gap-1 sm:gap-2 shrink-0 sm:ml-auto">
           <!-- 清晰度：优先显示解码实测的真实像素，清单声明的值不总是准（见 useVideoEvents.videoRes）。
                窄屏藏起来——这一行本来就挤，清晰度不如倍速/设置/全屏要紧 -->
-          <span v-if="videoRes" class="hidden sm:inline px-1.5 text-xs font-medium text-white/70 whitespace-nowrap">{{ videoRes }}</span>
+          <span v-if="videoRes" class="hidden sm:inline px-1 text-xs font-medium text-white/70 whitespace-nowrap">{{ videoRes }}</span>
           <div ref="speedMenuRef" class="relative">
             <button
-              class="px-1.5 sm:px-2 py-1.5 rounded-lg text-white hover:bg-white/15 transition-all text-xs sm:text-sm font-semibold whitespace-nowrap"
+              class="px-1.5 sm:px-2.5 py-1.5 sm:py-2 rounded-lg text-white hover:bg-white/15 transition-all text-xs sm:text-sm font-semibold whitespace-nowrap"
               :title="autoBestRate
                 ? `自动最佳倍速：上限 ${autoRateCap}x，当前带宽下实际 ${playbackRate}x` : `倍速 ${playbackRate}x`"
               @click="showSpeedMenu = !showSpeedMenu"
@@ -180,11 +211,11 @@
           <!-- 自动全屏 / 自动倍速 / 跳过片头片尾：全是看片当下才改的，放这儿手不用离开画面 -->
           <VideoPlayerSettingsMenu />
 
-          <button v-if="supportsPiP && !isNarrow" class="p-1.5 rounded-lg text-white hover:bg-white/15 transition-all" title="画中画" @click="togglePiP">
-            <UIcon name="i-heroicons-rectangle-stack" class="w-6 h-6" />
+          <button v-if="supportsPiP && !isNarrow" class="p-1.5 sm:p-2 rounded-lg text-white hover:bg-white/15 transition-all" title="画中画（I）" @click="togglePiP">
+            <UIcon name="i-heroicons-rectangle-stack" class="w-6 h-6 sm:w-7 sm:h-7" />
           </button>
 
-          <button class="p-1.5 rounded-lg text-white hover:bg-white/15 active:scale-90 transition-all" title="全屏" @click="toggleFullscreen">
+          <button class="p-1.5 sm:p-2 rounded-lg text-white hover:bg-white/15 active:scale-90 transition-all" title="全屏（F）" @click="toggleFullscreen">
             <UIcon
               :name="isFullscreen ? 'i-heroicons-arrows-pointing-in' : 'i-heroicons-arrows-pointing-out'"
               class="w-6 h-6 sm:w-7 sm:h-7"
@@ -218,7 +249,22 @@ const {
   toggleFullscreen, togglePiP, keepControlsAlive, playPrev, playNext,
   // 清晰度：与页面信息条、全屏顶栏共用同一份计算（useVideoEvents.videoRes）
   videoRes,
+  // 进度条悬浮缩略图（见 useVideoThumbnails）。videoEl 只用来读真实比例
+  videoEl, thumbImage, thumbPending, thumbEnabled,
 } = useVideoPlayerCtx()
+
+/**
+ * 预览卡片的展示宽度。**比抓帧宽度（240）小一圈**，多出来那些像素正好当高密度屏的 2x 用，
+ * 不然 Retina 上看着发虚。高度按视频**真实比例**算——这个项目里 2.40:1 的片子很常见，
+ * 写死 16:9 会让卡片上下各留一条黑边（拿不到尺寸时才退回 16:9）。
+ */
+const THUMB_BOX_W = 200
+const thumbHalfW = `${THUMB_BOX_W / 2}px`
+const thumbBoxH = computed(() => {
+  const v = videoEl.value
+  const ratio = v?.videoWidth && v?.videoHeight ? v.videoHeight / v.videoWidth : 9 / 16
+  return Math.round(THUMB_BOX_W * ratio)
+})
 
 // 倍速菜单点击外部关闭
 onClickOutside(speedMenuRef, () => { showSpeedMenu.value = false })

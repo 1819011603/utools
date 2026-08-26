@@ -115,7 +115,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   const {
     getAheadBuffered, getCachedAhead, createHlsFragLoader, triggerAdaptivePrefetch,
     startOnePrefetch, strategy, resetStrategy, tick: prefetchTick, primePrefetch, getStuckSegment, laneDead,
-    reviveLanes, purgePlayedSegments, getLoaderActivity, isSegCached,
+    reviveLanes, purgePlayedSegments, getLoaderActivity, isSegCached, getSegBuf,
   } = prefetch
 
   // 双通道实际有没有跑起来：真实请求连续失败会把某条 lane 熔断（见 useHlsPrefetch 的 markLaneFail）。
@@ -757,6 +757,8 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     getAheadBuffered, getCachedAhead, primePrefetch, startOnePrefetch, prefetchTick,
     abortAllPrefetches, triggerAdaptivePrefetch, purgePlayedSegments, stageSegments,
     aggregateKBps, aggregateMbps, deadLaneLabel,
+    // getSegBuf 给缩略图用：主播放已经下过的分片一律零网络复用（见 useVideoThumbnails）
+    getSegBuf,
     // 起播锚点 / 起播窄口
     clearStartAnchor, isArrivingAtStart, getAppliedStartPos,
     isRelocatingStart, clearRelocating,

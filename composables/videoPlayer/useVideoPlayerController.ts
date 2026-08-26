@@ -80,6 +80,16 @@ export function useVideoPlayerController() {
   // 右键菜单/媒体信息面板：只读裸状态 + 问引擎要一眼当前档位，不参与任何加载决策
   const contextMenu = useVideoContextMenu({ media, getHls: engine.getHls })
 
+  // 进度条悬浮缩略图。挂心跳「顺手截一帧」那一路是零成本的；要花网络的那一路
+  // 由 healthZone 一票否决——缩略图永远不该是画面卡住的原因
+  const thumbs = useVideoThumbnails({
+    media,
+    getSegBuf: engine.getSegBuf,
+    getProxyUrl: conn.getProxyUrl,
+    healthZone: () => engine.strategy.value.healthZone,
+  })
+  engine.registerTickHook(thumbs.captureTick)
+
   // ── 持久化 ──
 
   const loadSavedState = (): SavedState | null => {
@@ -235,6 +245,7 @@ export function useVideoPlayerController() {
     controls.unbindGlobalKeys()
     gestures.disposeGestures()
     contextMenu.disposeContextMenu()
+    thumbs.disposeThumbnails()
     events.disposeEvents()
     window.removeEventListener('beforeunload', playlist.saveCurrentProgress)
   }
@@ -255,6 +266,7 @@ export function useVideoPlayerController() {
     ...controls,
     ...gestures,
     ...contextMenu,
+    ...thumbs,
     ...events,
     ...query,
     saveState, mount, unmount,
