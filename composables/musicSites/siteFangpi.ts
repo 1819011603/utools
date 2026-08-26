@@ -11,29 +11,38 @@
  * 代价是只有一档 128K MP3，比 24bit 的无损低一档 —— 所以两个站的结果**分区展示**，
  * 让用户自己按音质挑，而不是我们替他混排。
  *
- * ## 两段都必须经服务端
+ * ## 两段默认走服务端，本机中继开着时优先绕开它
  *
  *   搜索  浏览器 ──GET──> /api/music/fangpi/search    （整站在 CF 后面，无 ACAO）
  *   取址  浏览器 ──GET──> /api/music/fangpi/resolve   （两跳：详情页 + POST，见接口注释）
  *   播放  浏览器 ──GET──> 酷我 CDN                     （`<audio>` 直连；下载走 /api/proxy）
  *
- * CF 还会**按客户端指纹拦人**（Node 的 fetch 过、Python urllib 恒 403、
- * 经 HTTPS_PROXY 的出口恒 403），细节都在 `server/api/music/fangpi/search.ts` 里。
+ * **这个站在 Workers 机房出口是结构性拦死的**（CF 的 WAF 拦的是「是不是数据中心出口」这个
+ * 特征，不是行为打分——跟 24bit 那种「加个 Referer 能改善概率」不是一回事，实测本机直连 200、
+ * CF Pages 上恒 502）。所以过去这个站标了 `localOnly: true`，线上搜索界面直接不出现它，
+ * 免得摆一个「点了必报错」的坑。**现在有了本机中继（见 `localRelay.ts`）就把这个限制解了**——
+ * 中继用的是真实住宅 IP，跟本地开发那条能通的路是同一类出口，线上界面也能正常显示这个站了；
+ * 没开中继的访客点到它还是会撞服务端那条结构性拦死的路，界面上会用「去源站搜」兜底
+ * （见 `ResultList.vue`），不是无声失败。
  */
 import type { MusicResolved, MusicSearchRow, MusicSite } from './types'
+import {
+  BASE_FANGPI,
+  PLAY_URL_ENDPOINT_FANGPI,
+  buildFangpiDetailUrl,
+  buildFangpiSearchUrl,
+  buildPlayUrlBody,
+  parseAppData,
+  parsePlayUrlBody,
+  parseSearchRows,
+  parseTotal,
+  toFangpiResolvedPayload,
+} from '~/utils/musicFangpiProtocol'
 
 export const SITE_FANGPI: MusicSite = {
   id: 'fangpi',
   name: '放屁音乐网',
   tagline: 'MP3 128K · 体积小、多数歌带歌词',
-
-  /**
-   * **线上用不了，只在本地开发时出现。** 源站也在 Cloudflare 后面，它的 WAF 拦的正是
-   * 数据中心出口 —— 实测本机直连 200（80KB 正常 HTML），CF Pages 上恒 502 `Just a moment`。
-   * 从 Workers 里能改的只有请求头（UA 早就照浏览器发了），出口 IP 改不了；
-   * 让浏览器自己抓也不行，响应连一个 `Access-Control-Allow-*` 都没有。详见 CLAUDE.md 那一节。
-   */
-  localOnly: true,
 
   /** 只有一条搜索路径（`/s/<kw>`），所以就一条泳道 */
   sources: [{ id: 'main', name: '默认' }],
@@ -54,12 +63,23 @@ export const SITE_FANGPI: MusicSite = {
    */
   pageSize: 0,
 
-  /** 「去源站搜」的落点。搜索页地址就是 `/s/<kw>`（服务端也是照这个格式抓的，见 search.ts） */
-  homepage: 'https://www.fangpi.net/',
-  buildSearchUrl: kw => `https://www.fangpi.net/s/${encodeURIComponent(kw)}`,
+  /** 「去源站搜」的落点。搜索页地址就是 `/s/<kw>`（服务端也是照这个格式抓的） */
+  homepage: `${BASE_FANGPI}/`,
+  buildSearchUrl: kw => buildFangpiSearchUrl(kw),
 
   async search(_source, kw, _page, signal): Promise<MusicSearchRow[]> {
-    // 站点不分页，`page` 收下但用不上（形状要和别的站点一致）
+    // 站点不分页，`page` 收下但用不上（形状要和别的站点一致）；这个站没有登录态这回事，
+    // 不用像 24bit 那样先判断有没有配置 Cookie，中继永远可以先试
+    const relay = await viaLocalRelay(buildFangpiSearchUrl(kw))
+    if (relay?.status === 200) {
+      const rows = parseSearchRows(relay.body)
+      // 抓到页面却一条都没解出来，多半是页面结构变了或者压根没搜到——两种都别硬当结果用，
+      // 落回服务端那条路让它按真实状态报错（服务端会走 404/502 的判断）
+      if (rows.length || parseTotal(relay.body) === 0) {
+        return rows.map(r => ({ id: r.id, name: r.name, player: r.artist, site: 'fangpi' as const }))
+      }
+    }
+
     const res = await $fetch<{ items: Omit<MusicSearchRow, 'site'>[] }>('/api/music/fangpi/search', {
       query: { kw },
       signal,
@@ -70,7 +90,32 @@ export const SITE_FANGPI: MusicSite = {
     return (res?.items ?? []).map(r => ({ ...r, site: 'fangpi' as const }))
   },
 
-  resolve(id, _tier, signal): Promise<MusicResolved> {
+  async resolve(id, _tier, signal): Promise<MusicResolved> {
+    /*
+     * 两跳都走中继：① 详情页拿 `play_id` ② 拿它换真实地址。
+     * 中继的 `relay_config.json` 按目标 URL 的正则给两步都注入同一个静态 Referer——
+     * 服务端那条路第二跳会带上"当前这首歌的详情页地址"当 Referer（更精确），
+     * 但源码注释里记过「实测不带也能成」，静态值够用，不值得为了这点精确度
+     * 再多一层"中继怎么按需变 Referer"的复杂度。
+     */
+    const page = await viaLocalRelay(buildFangpiDetailUrl(id))
+    if (page?.status === 200) {
+      const app = parseAppData(page.body)
+      if (app?.play_id) {
+        const play = await viaLocalRelay(PLAY_URL_ENDPOINT_FANGPI, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+          body: buildPlayUrlBody(app.play_id),
+        })
+        if (play?.status === 200) {
+          const { url, code } = parsePlayUrlBody(play.body)
+          if (code === 1 && url) return toFangpiResolvedPayload(url, app, page.body)
+        }
+      }
+    }
+    // 中继没开 / 超时 / 任何一跳失败 → 落回服务端那条路，不抛错、让它按真实状态报错
+    // （包括人机验证的 429、没资源的 404 那些更精确的错误分类）
+
     // 只有一档，`tier` 用不上 —— 但签名要和别的站点一致，闸门才能不认识具体站点
     return $fetch<MusicResolved>('/api/music/fangpi/resolve', {
       query: { id },

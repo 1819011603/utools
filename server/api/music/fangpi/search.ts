@@ -20,6 +20,11 @@
  * **不收 `page` 参数**，前端那边也把 `pageSize` 标成 0、不画「加载更多」。
  * 收一个永远不起作用的参数，比不收更容易让人以为翻页坏了。
  *
+ * **有本机中继时前端会绕开这条路**（见 `composables/musicSites/localRelay.ts`）——
+ * 这个站在 Workers 机房出口是**结构性拦死**的（`SITE_FANGPI.localOnly` 曾经因此为 `true`，
+ * 现在有了中继这条路才把它摘掉，见 `siteFangpi.ts` 的说明），只有走真实住宅 IP 才有机会成。
+ * 这条服务端路径是没开中继时的兜底。抓页面/抠数据的逻辑挪进了 `utils/musicFangpiProtocol.ts`。
+ *
  * 实现约束同 proxy.ts：不静态 import 任何 `node:*`（Nitro preset 是 cloudflare-pages）。
  */
 import { buildFangpiSearchUrl, parseSearchRows, parseTotal } from '~/utils/musicFangpiProtocol'

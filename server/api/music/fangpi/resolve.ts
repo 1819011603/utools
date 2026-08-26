@@ -18,42 +18,26 @@
  * 而且那条地址在它路径里那个 hex 时间戳过去 23 分钟之后仍然正常回 206 ——
  * 也就是说它不像 24bit 那样 20 分钟就死。命中缓存能同时省掉上面两跳。
  *
+ * **有本机中继时前端会绕开这条路**（见 `composables/musicSites/localRelay.ts` 和
+ * `siteFangpi.ts`）——这个站在 Workers 机房出口结构性拦死，中继是唯一有机会成的路。
+ * 两跳怎么拼、页面怎么抠挪进了 `utils/musicFangpiProtocol.ts`，两条路共用同一份。
+ *
  * 实现约束同 proxy.ts：不静态 import 任何 `node:*`（Nitro preset 是 cloudflare-pages）。
  */
-import { parseAppData, parseDuration, parseInlineLrc } from '../../../utils/fangpi'
+import {
+  BASE_FANGPI,
+  PLAY_URL_ENDPOINT_FANGPI,
+  buildFangpiDetailUrl,
+  buildPlayUrlBody,
+  parseAppData,
+  parsePlayUrlBody,
+  toFangpiResolvedPayload,
+} from '~/utils/musicFangpiProtocol'
 import { cfWallMessage, isCloudflareWall, musicFetch } from '../../../utils/musicFetch'
 import { readUrlCache, writeUrlCache } from '../../../utils/musicUrlCache'
 
-const BASE = 'https://www.fangpi.net'
-
 /** 缓存命名空间。与 24bit 的 `b`/`c` 同处一张表，键是 `<prefix>:<id>`，不能撞 */
 const CACHE_PREFIX = 'fangpi'
-
-/**
- * 从地址里读码率当音质标注。
- *
- * **不编规格参数**：站点自己压根不报音质，凭空写一个「无损」出来而文件其实是 128K MP3，
- * 比什么都不写更糟。这里读的是地址上真实带着的 `bitrate$128`（是 `$` 不是 `=`，站点就这么写的）。
- */
-function qualityOf(url: string): string {
-  const m = url.match(/bitrate\$(\d+)/)
-  return m ? `MP3 ${m[1]}K` : 'MP3'
-}
-
-/**
- * 封面升到 https。
- *
- * 站点给的是 `http://img3.kuwo.cn/…`，而我们的页面是 https ——
- * 浏览器对这种**混合内容**的图片会先尝试自动升级、升不动就直接拦掉。
- * 拦掉倒不至于坏事（`CoverArt.vue` 会 onerror 退到 `/api/thumb`），
- * 但那等于让**每一张**封面都白绕我们的服务器一趟。
- *
- * 实测这个图床 https 完全正常（同一张图 200 / image/jpeg / 字节数一致），所以直接换掉。
- * 只动 `http:` 前缀，别的形状（协议相对、已经是 https）原样放过。
- */
-function toHttps(url?: string): string | undefined {
-  return url?.startsWith('http://') ? `https://${url.slice(7)}` : url
-}
 
 export default defineEventHandler(async (event) => {
   const id = (getQuery(event).id as string)?.trim()
@@ -69,11 +53,11 @@ export default defineEventHandler(async (event) => {
   }
 
   // ── ① 详情页 ──
-  const pageUrl = `${BASE}/music/${id}`
+  const pageUrl = buildFangpiDetailUrl(id)
   const page = await musicFetch(pageUrl, {
     headers: {
       Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      Referer: `${BASE}/`,
+      Referer: `${BASE_FANGPI}/`,
     },
   })
 
@@ -98,28 +82,25 @@ export default defineEventHandler(async (event) => {
   }
 
   // ── ② 换地址 ──
-  const play = await musicFetch(`${BASE}/member/common-play-url`, {
+  const play = await musicFetch(PLAY_URL_ENDPOINT_FANGPI, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
       'Accept': 'application/json, text/javascript, */*; q=0.01',
       // 这三个头是照站点自己那一发抄的。实测不带也能成，但带上更稳（WAF 常拿它们做一致性检查）
-      'Origin': BASE,
+      'Origin': BASE_FANGPI,
       'Referer': pageUrl,
       'X-Requested-With': 'XMLHttpRequest',
     },
-    body: new URLSearchParams({ id: app.play_id }).toString(),
+    body: buildPlayUrlBody(app.play_id),
   })
 
   if (play.status !== 200) {
     throw createError({ statusCode: 502, statusMessage: `取址接口返回 ${play.status}` })
   }
 
-  let json: { code?: number; data?: { url?: string }; msg?: string } | null = null
-  try { json = JSON.parse(play.body) } catch { /* 下面统一按「没给地址」处理 */ }
-
-  const url = json?.data?.url
-  if (json?.code !== 1 || !url) {
+  const { url, code, msg: rawMsg } = parsePlayUrlBody(play.body)
+  if (code !== 1 || !url) {
     /*
      * ⚠️ **「要人机验证」和「这首没资源」必须分开报，它们在这一层长得一模一样**
      * （都是 `code !== 1`，只有 `msg` 不同）。
@@ -131,8 +112,8 @@ export default defineEventHandler(async (event) => {
      *
      * 回 429 就是让闸门当场对这个站点收手（见 useMusicResolveGate 的 429 分支）。
      */
-    const msg = json?.msg?.trim() || ''
-    if (json?.code === 2 || /人机验证|验证码|安全验证/.test(msg)) {
+    const msg = rawMsg?.trim() || ''
+    if (code === 2 || /人机验证|验证码|安全验证/.test(msg)) {
       throw createError({
         statusCode: 429,
         statusMessage: '放屁音乐网要求人机验证：在浏览器里打开 fangpi.net 随便播一首、过一次校验，'
@@ -146,33 +127,9 @@ export default defineEventHandler(async (event) => {
     })
   }
 
-  const payload = {
-    url,
-    /*
-     * **必须显式给 `mp3`**：CDN 的 `content-type` 会谎报（见 display.ts 的 buildFileName），
-     * 下载时的扩展名只信这个字段。不给的话存下来是个没有扩展名的文件。
-     */
-    format: 'mp3',
-    quality: qualityOf(url),
-    cover: toHttps(app.mp3_cover),
-    duration: parseDuration(app.mp3_duration),
-    /*
-     * ⚠️ **只有站点说有词的时候才给词。**
-     *
-     * 没词时 `#content-lrc` 里并不是空的，而是一份占位：
-     *   `[ti:…]` `[ar:…]` `[al:…]` `[00:00.00]该歌曲暂无歌词`
-     * 它足够长，会被前端 `useMusicLyrics` 的第 ② 步（曲目自带歌词）当真收下，
-     * 于是**第 ③ 步的网易云在线查询被整个跳过** —— 用户盯着一行「该歌曲暂无歌词」，
-     * 而那首歌在网易云那边其实有完整的词。宁可这里交白卷，让在线查询去试。
-     */
-    lrc: app.lrc_is_empty === false ? parseInlineLrc(page.body) : undefined,
-    /*
-     * `name`/`artist` 只是参考值，**前端不会拿它覆盖搜索结果里那一条**
-     * （理由见 musicPlayer/types.ts 的 ResolvedTrack 注释）。带回来是为了排查时能对账。
-     */
-    name: app.mp3_title,
-    artist: app.mp3_author,
-  }
+  // 字段怎么拼（音质标注、封面转 https、歌词有没有该给）挪进了 `utils/musicFangpiProtocol.ts`，
+  // 中继那条路解析同一个 detail 页时用的是同一份，行为不会漂移
+  const payload = toFangpiResolvedPayload(url, app, page.body)
 
   writeUrlCache(id, CACHE_PREFIX, payload)
 
