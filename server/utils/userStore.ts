@@ -75,7 +75,7 @@ const DDL = [
 ]
 
 /**
- * 懒建表。**模块级标志在 CF 上只对当前 isolate 有效**（同 `musicUrlCache.ts:19` 那条），
+ * 懒建表。**模块级标志在 CF 上只对当前 isolate 有效**（CLAUDE.md 里那条），
  * 所以换个 isolate 会再跑一次 —— 两条 `IF NOT EXISTS` 的空 DDL，代价可以忽略，
  * 换来的是「忘了手工执行 schema.sql」不会变成一个只在线上出现的 500。
  */

@@ -6,7 +6,7 @@
  *   · `dirty` —— 哪几份清单本地改过。**「有变更才同步」的唯一依据**，空的时候一个请求都不发
  *   · `tomb` / `clearedAt` —— 删除墓碑（理由见 cloudSyncMerge.ts 顶部）
  *
- * 这个模块**故意不 import 同步引擎**：记事的一方是 `useWatchHistory` / `useMusicFavorites` 这类
+ * 这个模块**故意不 import 同步引擎**：记事的一方是 `useWatchHistory` / `useHistory` 这类
  * 最底层的存储模块，让它们去依赖一个会发网络请求的引擎就成了环，而且那几个模块在没登录时也要照常工作。
  * 引擎反过来订阅（`onDirty`），方向是单向的。
  *

@@ -31,7 +31,7 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
 ```
 
 工具：`/pdf-tools` · `/image-compress` · `/image-convert` · `/video-to-gif` · `/audio-convert` · `/video-player` ·
-`/video-parse` · `/video-search` · `/music` · `/json-format` · `/json-diff` · `/json-extract` · `/content-diff` · `/timestamp`
+`/video-parse` · `/video-search` · `/json-format` · `/json-diff` · `/json-extract` · `/content-diff` · `/timestamp`
 
 ## 视频播放器
 
@@ -361,121 +361,12 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
   唯一出路是整个摘掉属性 →「限制广告」开关（**默认关**，iframe 的 `:key` **必须带上它**，sandbox 是文档创建时定死的）。
   追这类问题别猜 flag：**拉下 bundle 搜 `Sandbox`**
 
-## 音乐（/music）
-
-单页 + 底部常驻播放条；**收藏在左侧常驻栏、队列在右侧抽屉**（网易云那套分工），
-歌词和下载留在页面流里（一个是要整段读的长文、一个是要盯进度的任务，都不是「看一眼就关」）。
-
-**分层**：`composables/musicPlayer/` 播放器**一个站点都不认识**（只认 `Track`）·
-`composables/musicSites/` 一站一份描述符 · `pages/music.vue` 只做装配。
-**接新站 = 加一份描述符（`sources`/`tiers`/`pageSize`/`search`/`resolve`）+ 两个服务端接口**，
-共享层里**一句 `if (site === 'xxx')` 都不该有**。搜索结果做成**横向页签**（页签上直接写条数，
-不点也知道另一个源有没有货），不混排——两个源音质差一档，那正是用户要拿来做选择的东西。
-
-- **取址路由只看 `Track.resolver`**（值就是站点 id），`locator` 里**故意不放 site**：
-  `resolver` 本来就是干这个的，而存量收藏里躺着的正是 `'24bit'` → 老数据天然是对的、零迁移
-- **配额/退避/连续失败数一律按站点分开记**（`useMusicResolveGate` 里的 `Map`）：
-  24bit 配额用完不该把没有配额概念的源也一起判死
-- **播放和下载的限制完全不对称，别用一个判断糊住两件事**（`useMusicMediaUrl`）：
-  `<audio>` 不受 CORS 约束 → **播放直连**；`fetch` 带 `Range` 会触发预检、CDN 不放行 →
-  **下载默认走 `/api/proxy`**，按 host 探一次并**持久化**结论（探测那一发必然在控制台留一条红色 CORS 报错，
-  不存就每次刷新都留一条，看着像坏了）
-- **搜索泳道收尾的判据是「我还是当前那一轮吗」，不是「我被中止了吗」**（`useMusicSearch` 的 `isCurrent()`）：
-  中止有两种来路——被更新的一轮取代（那轮会自己收尾，这轮该闷声退场）、或自己超时/卸载（**没有后继**，
-  必须自己把 status 收掉）。混成一个判断，后者就永久停在 `'searching'` →
-  「加载更多」那颗按钮 `:loading` 恒真、还因 loading 自带 disabled 而点不动，**转圈转到天荒地老**。
-  配套：**搜索必须有超时**（`$fetch` 默认永不超时，而 24bit 那两条泳道实测会有一条挂住不返回），
-  超时要落成「报错 + 可重试」而不是继续转圈。
-  另外**一条泳道挂了不等于整段 failed**（另一条还有结果），那种情况要单独把话说出来，否则是静默失败
-- **歌词三来源**：手动贴 > 曲目自带 > 在线查网易云。**取址回填 `lrc` 之后必须再取一次**
-  （`PlayerBar` 里听 `isResolving` 的**下降沿**）：`load()` 是先 `current.value = track` 再取址的，
-  只听 `key` 的话第一发在 `lrc` 还空时就跑完了 → 落到在线查询 → 拿回**另一首同名歌**的词存进缓存
-  （实测搜「枫」播周杰伦那首，显示的是夏蔓蔓那首、还标着「没有时间轴」）。
-  **判据不能用 `current.value?.lrc`**：引擎回填走 `Object.assign(track, …)`，依赖收集不到
-  （播放条本来就因 `currentTime` 每秒重渲染几次，所以画面上是新值、watch 却没触发）
-
-### 接新源前先做这个预检（省得白建一套集成）
-
-**本地 curl 能通不代表线上能通**——本地出口是家庭 IP，线上出口是 Cloudflare Workers 自己的机房 IP，
-两者在对方站的风控眼里是两种完全不同的访客（24bit/fangpi 那次踩坑就是这么来的：本地测得好好的，
-接完上线才发现 502）。**本地能不能通只能排除「这个站压根连不上」，排除不了「这个站拦机房 IP」这件事**。
-
-真正要测的是「Cloudflare Workers 的出口打这个站会怎样」，而不用真的建一套集成才能知道——线上已经有
-`/api/proxy` 这个通用转发口子，接新站之前先拿它探一次候选站点：
-
-```
-https://<线上域名>/api/proxy?url=<encode(候选接口地址)>&referer=<encode(候选站源)>
-```
-
-**`/api/proxy` 只转发 GET**（它是给视频分片/图片这类场景写的，没做 POST 透传）。候选接口本身是 GET
-（搜索结果页、详情页 HTML 那种）就直接探那条路径；候选接口是 POST 的 JSON API（24bit 那种）就退一步，
-探它的**首页**——不能确认那一个具体接口的风控强度，但至少能看出「这整个域名是不是挂在 CF 后面」，
-挂了就按下面「碰巧通了」那一档的做法（加固请求头、留去源站兜底）先接上，等真上线跑一段时间见真章，
-比裸接一个连域名背后有没有 CF 都没看过的站强。
-
-三档结论：
-
-- **响应干净、能拿到数据** → 放心按正常流程接（写描述符、接服务端接口）
-- **响应头带 `server: cloudflare`，且正文/状态码像 `Just a moment`、`challenges.cloudflare.com`
-  这类人机校验特征**，但探测这次碰巧通了 → 这个站自己也在 CF 后面，能接，但**从一开始就要把
-  「加固请求头」（`Referer`/`Origin`/UA 照抄站点自己发请求时的样子）当成必做项**，且界面上要留
-  「去源站搜」这类兜底出路（同 `ResultList.vue` 那个「去源站搜」按钮），别假设服务端转发永远稳定
-- **反复测都被人机校验挡住** → **不值得接**。这类站的风控挡的是「是不是数据中心出口」这个特征，
-  服务端转发天生就长着这张脸，加请求头、换重试次数都糊弄不过去（`musicFetch.ts` 那次
-  「Referer 修好了，接着测又 403」就是这个道理——能改善概率，改不了本质）。真要接，
-  只能标 `localOnly`（像 fangpi 那样，线上搜索界面直接摘掉这个站点，别摆一个「点了大概率报错」的坑）
-
-### 24bit.net
-
-- **两个搜索源不是两个音质档的映射**（一开始就是这么猜错的）：`one`/`two` 是两个不同的**库**，
-  `b`/`c` 是详情页的两个**音源**（`b` 酷我无损 20–52MB、`c` 网易云环绕声 45–115MB）。默认先 `b`
-- **不预先探测「这首有哪些档可用」**：一页 30 首 × 2 档 = 60 发，必被限流，而**限流是静默的**
-  （照常回 200、只是不再吐 `itemMusic`）→ 「这首没资源」和「你被限流了」在响应上完全无法区分
-- **按天按 IP 限配额**，耗尽时也是 200，只有正文里那句「今日访问已达限额」能认（`isQuotaExhausted`）→ 回 429 让前端当场停手
-- 搜索也得走服务端：站点给了 `ACAO: *` 且预检过，但从我们页面跨域发就是 `net::ERR_FAILED`
-  （连 `no-cors` 的 GET 都 `ERR_BLOCKED_BY_RESPONSE.NotSameOrigin`），拦截在站点侧
-
-### fangpi.net（放屁音乐网）
-
-只有一档 128K MP3，但**不要 cookie、没发现配额、而且自带歌词**——24bit 撞配额时它照常能用。
-
-- 🚫 **这个源在 CF Pages 上根本用不了，只有本地能用**（实测：本机直连 + 浏览器 UA → 200 / 80KB；
-  线上 `/api/music/fangpi/search` → 502 `Just a moment`）。原因是源站也在 Cloudflare 后面，
-  它的 WAF 拦的正是数据中心出口，而**我们从 Workers 里唯一能改的只有请求头，UA 早就照浏览器发了**
-  ——出口 IP 和 TLS 指纹都不在我们手里。
-  **也不能让浏览器自己抓**：响应连一个 `Access-Control-Allow-*` 都没有（`Origin` 试过了）。
-  所以这不是「还没修」，是**没有能修的东西**；线上要音乐只能走 24bit（实测正常）。
-  配套：`CF_WALL_MESSAGE` 按 `import.meta.dev` 分成两句 —— 线上念「你的 dev server 带了代理」
-  是纯误导，而它听起来太像个具体线索，足够让人往「配置写错了」查半天（**已经发生过一次**）
-- **CF 按客户端指纹拦人**：curl 和 **Node 的 `fetch`（undici）都过**，Python urllib 恒 403；
-  **经 `HTTPS_PROXY` 的出口恒 403**（`Just a moment`）→ 靠 `musicFetch`「代理在前、撞墙退直连」自愈。
-  注意这条只在本地成立：线上没有 `HTTPS_PROXY`，那套双通道退化成单条直连，而直连就是被拦的那条
-- **搜索页没有分页**：`?page=2` 回的还是第一页原文，结果一次给全 → 描述符里 `pageSize: 0`，
-  界面上一个「加载更多」都不画（按了没反应比没有更让人以为坏了）
-- **取址是两跳，绕不开**：`/music/<id>` 抠 `window.appData.play_id`（Laravel `encrypt()` 的产物，
-  **我们生成不了**）→ `POST /member/common-play-url`。顺路白捡封面、时长、歌词
-- **地址同一首恒定**（同 `play_id` 两次调用回同一条），实测超过路径里那个 hex 时间戳 23 分钟仍回 206
-  → 值得缓存，且 `parseExpiry` 认不出 8 位 hex、自动退回保守的 15 分钟正合适
-- ⚠️ **歌词只在 `lrc_is_empty === false` 时才能往外给**：没词时 `#content-lrc` 里不是空的，
-  而是 `[ti:…][ar:…][al:…][00:00.00]该歌曲暂无歌词` 这份占位。它够长，会被
-  `useMusicLyrics` 第 ② 步当真收下、**把第 ③ 步的在线查询整个跳过**
-- **封面站点给的是 `http://`**，页面是 https → 混合内容会被拦。图床 https 完全正常，服务端直接换掉；
-  否则每张封面都要白绕一趟 `/api/thumb`
-- CDN（`kw-*.kuwo.cn`，**和 24bit `b` 档同一个 host**）**没有 `ACAO`**：能播不能 fetch，下载必走代理
-- **合集 `/topic/` 不做**（那条路上挂着 CF 人机校验）
-
 ## 状态持久化（localStorage）
 
 `video-player-state` · `video-probe-dead-direct`（按 host 记「直连是黑洞」）· `video-player-learned-profiles` ·
 `video-player-origin-history` / `-referer-history` · `video-parse-rules` /
 `-embed-sandbox` / `video-parse-last-result`（1 小时）· `video-watch-history`（**看到第几集**，按剧名存）·
 `video-show-prefs`（**倍速与片头片尾**，按剧名存）· 各页 `*-settings` · `utools-history-<page>`。
-
-音乐那侧：`music-player-state`（队列存**剥掉 url 的占位**）· `music-favorites` ·
-`music-lyrics-manual` / `music-lyrics-cache`（含「查不到」的空结果，7 天）·
-`music-cdn-direct-ok`（按 host 记「跨域 fetch 能不能用」，**只对下载有意义**）·
-`music-24bit-cookie`（用户自填的登录态，**只存本机、只透传**）。
-整首音频不在这儿——那是 IndexedDB（`useMusicAudioCache`，滑动 TTL 30 天 + 1GB + LRU）。
 
 同步账号那侧：`cloud-sync-token` / `cloud-sync-user`（令牌与用户名）· `cloud-sync-meta`（见下）。
 
@@ -485,10 +376,10 @@ https://<线上域名>/api/proxy?url=<encode(候选接口地址)>&referer=<encod
 
 ## 账号与云同步（Cloudflare D1）
 
-登录后把 **5 份清单**同步到 D1，换设备接着看：`video-watch-history`（追剧进度）·
-`utools-history-video-search` / `-music-search`（两处搜索历史）· `music-favorites` · `video-show-prefs`。
-**一律只同步「清单信息」**：播放地址带时效签名（存下来必是死链且失败静默）、`music-24bit-cookie`
-是第三方站凭证（`useMusic24bitAuth.ts` 承诺过只存本机），两样都不上传；视频解析历史（2000 条）也不收。
+登录后把 **3 份清单**同步到 D1，换设备接着看：`video-watch-history`（追剧进度）·
+`utools-history-video-search`（片名搜索历史）· `video-show-prefs`（每部剧的倍速与片头片尾）。
+**一律只同步「清单信息」**：播放地址带时效签名（存下来必是死链且失败静默），不上传；
+视频解析历史（2000 条）也不收 —— 它比其余几份加起来还大，而它的价值本来就依赖那个站还活着。
 
 `server/api/user/{register,login,salt,quota,sync}` · 存储层 `server/utils/userStore.ts` ·
 令牌 `server/utils/authToken.ts` · 前端 `useUserAuth` / `useCloudSync` / `cloudSyncSpec`（清单表）/
@@ -543,7 +434,7 @@ https://<线上域名>/api/proxy?url=<encode(候选接口地址)>&referer=<encod
 **`database_id` 绝不能留占位串**：Cloudflare 在 publish 阶段就校验它，
 `Error 8000022: Invalid database UUID` 会让**整个 Function 发布失败**（资源已经上传完了才报，
 日志上半段全是 `Success`，很容易误读成别的问题）—— 也就是说一个假 UUID 会连带把
-放映厅、解析、音乐那些跟账号毫无关系的接口一起弄挂。宁可先不写这一段。
+放映厅、解析那些跟账号毫无关系的接口一起弄挂。宁可先不写这一段。
 另外 **JSON 里不要塞 `"//"` 当注释键**：wrangler 每次都会警告
 `Unexpected fields found in top-level field: "//"`，构建日志里多一条噪音。
 
@@ -553,7 +444,7 @@ https://<线上域名>/api/proxy?url=<encode(候选接口地址)>&referer=<encod
   specifier 必须用变量 + `@vite-ignore`。
   ⚠️ **但别拿 `process` 来判「是不是在 Node 里」**：workerd 上 `globalThis.process.env` **是存在的**
   （一个空对象），`globalThis.process?.env` 这个判据在线上恒为真。
-  `siteFetch`/`musicFetch` 用它读 `HTTPS_PROXY` 没事（读出来是 undefined，正好等于「不走代理」），
+  `siteFetch` 用它读 `HTTPS_PROXY` 没事（读出来是 undefined，正好等于「不走代理」），
   但**凡是「Node 才有的能力要不要走」这类分支，一律用 `import.meta.dev`**（Nitro/Nuxt 构建时替换成常量，
   客户端和服务端都有，还能顺带把另一条分支摇掉）。
   **踩过**：`userStore` 曾用 `process?.env` 判断该不该退回本地文件存储，

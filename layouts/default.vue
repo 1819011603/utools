@@ -148,8 +148,8 @@ const mobileMenuOpen = ref(false)
 const showHeader = computed(() => route.path !== '/video-search')
 
 /*
- * 云同步挂在**布局**上而不是某个页面上：清单会在 /music、/video-player、/video-parse、
- * /video-search 好几处被改到，挂在页面上就得挂四遍，还得想清楚「同时开两个页面」怎么办。
+ * 云同步挂在**布局**上而不是某个页面上：清单会在 /video-player、/video-parse、
+ * /video-search 好几处被改到，挂在页面上就得挂三遍，还得想清楚「同时开两个页面」怎么办。
  *
  * `restore()` 必须排在 `start()` 之前 —— start 里第一件事就是看有没有令牌。
  * 引擎自己有「有变更才同步 + 5 分钟节流」两道闸，所以这里无条件调用是安全的：
@@ -172,8 +172,7 @@ const toolCategories: Category[] = [
       { label: '放映厅', path: '/video-player', icon: 'i-heroicons-play-circle' },
       { label: '按片名搜索', path: '/video-search', icon: 'i-heroicons-magnifying-glass' },
       { label: '视频解析', path: '/video-parse', icon: 'i-heroicons-link' },
-      { label: '音频格式转换', path: '/audio-convert', icon: 'i-heroicons-musical-note' },
-      { label: '音乐', path: '/music', icon: 'i-heroicons-radio' }
+      { label: '音频格式转换', path: '/audio-convert', icon: 'i-heroicons-musical-note' }
     ]
   },
   {

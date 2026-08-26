@@ -15,7 +15,5 @@
 export const SYNC_COLL_IDS = [
   'video-watch',   // video-watch-history：每部剧看到第几集
   'video-search',  // utools-history-video-search：按片名搜索历史
-  'music-fav',     // music-favorites：音乐收藏夹
-  'music-search',  // utools-history-music-search：音乐搜索历史
   'show-prefs',    // video-show-prefs：按剧的倍速与片头片尾
 ] as const

@@ -171,14 +171,6 @@ const categories: Category[] = [
         description: '粘贴播放页地址，解析整季选集并直接送进播放器',
         bgColor: 'bg-rose-100 dark:bg-rose-900/50',
         iconColor: 'text-rose-600 dark:text-rose-400'
-      },
-      {
-        name: '音乐',
-        path: '/music',
-        icon: 'i-heroicons-radio',
-        description: '搜歌、在线播放与下载 mp3 / flac，支持收藏和批量下载',
-        bgColor: 'bg-rose-100 dark:bg-rose-900/50',
-        iconColor: 'text-rose-600 dark:text-rose-400'
       }
     ]
   },

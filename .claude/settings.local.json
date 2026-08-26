@@ -69,7 +69,9 @@
       "Bash(git stash *)",
       "Bash(kill %1)",
       "Bash(HTTPS_PROXY=http://127.0.0.1:7897 MEDIA_NO_PROXY=1 nohup npm run dev)",
-      "Bash(ffprobe -v error -select_streams v:0 -show_entries format=bit_rate:stream=bit_rate,avg_frame_rate,codec_name -of default=noprint_wrappers=1 /tmp/seg_dec.ts)"
+      "Bash(ffprobe -v error -select_streams v:0 -show_entries format=bit_rate:stream=bit_rate,avg_frame_rate,codec_name -of default=noprint_wrappers=1 /tmp/seg_dec.ts)",
+      "Bash(/usr/bin/git rm *)",
+      "Bash(/usr/bin/git tag *)"
     ],
     "ask": [
       "Bash(rm *)",

@@ -15,7 +15,7 @@
  * ## 状态是模块级单例
  *
  * header 里的按钮和登录弹窗是两个组件、各调一次 `useUserAuth()`。各持一份状态的话
- * 「登录成功了但按钮还显示未登录」，要刷新页面才对（同 `useMusicFavorites.ts:47` 那条）。
+ * 「登录成功了但按钮还显示未登录」，要刷新页面才对。
  *
  * 令牌存 localStorage（不是 httpOnly cookie）：这是个 `ssr: false` 的纯前端站，
  * 所有请求都由脚本发出，cookie 的 XSS 防护在这种形态下拿不到多少好处，而 localStorage
