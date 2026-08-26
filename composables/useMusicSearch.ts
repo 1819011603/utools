@@ -62,6 +62,17 @@ const laneKey = (site: MusicSiteId, source: string) => `${site}/${source}`
 const cacheKeyOf = (site: MusicSiteId, source: string, kw: string, page: number) =>
   `${site}|${source}|${kw}|${page}`
 
+/**
+ * 上次搜索结果的持久化缓存（同 `useVideoSearch` 的 `CACHE_KEY`/`restoreCache`）：
+ * 带着 `?kw=` 刷新页面、或点浏览器前进/后退回到这个词时，直接把上次的结果摆回去，
+ * 一个请求都不发。**几分钟就够**——不像视频那边给到 1 小时：音乐搜索结果几乎不随时间变
+ * （不会像影视那样今天缺资源明天补上），给太长反而是「明明想搜新结果却看到旧的」。
+ */
+const CACHE_KEY = 'music-search-last-result'
+const CACHE_TTL = 5 * 60 * 1000
+
+interface CachedSearch { kw: string; at: number; lanes: LaneState[] }
+
 function initialLanes(): LaneState[] {
   return MUSIC_SITES.flatMap(site =>
     site.sources.map(src => ({
@@ -237,9 +248,56 @@ export function useMusicSearch() {
     lanes.value = initialLanes()
   }
 
+  // ── 上次结果的缓存（几分钟内免请求，见上面 CACHE_TTL 的注释） ──
+  const saveCache = () => {
+    if (!keyword.value) return
+    try {
+      localStorage.setItem(CACHE_KEY, JSON.stringify({
+        kw: keyword.value, at: Date.now(), lanes: lanes.value,
+      } satisfies CachedSearch))
+    } catch { /* 超配额就算了，缓存本来就是可选的 */ }
+  }
+
+  /** 命中缓存返回 true。只认同一个关键词、且要在 TTL 内 —— 换了词或缓存过期当然要重搜 */
+  const restoreCache = (kw?: string): boolean => {
+    try {
+      const raw = localStorage.getItem(CACHE_KEY)
+      if (!raw) return false
+      const c = JSON.parse(raw) as CachedSearch
+      if (!c?.kw || !c.at || Date.now() - c.at > CACHE_TTL) return false
+      if (kw && kw !== c.kw) return false
+      keyword.value = c.kw
+      // 泳道表按当前注册表重建：站点/泳道可能增删过，直接把旧数组摆上来会漏泳道/多泳道
+      lanes.value = initialLanes().map((l) => {
+        const old = c.lanes.find(x => x.site === l.site && x.source === l.source)
+        // 上次没搜完的（searching/idle/error）不复原，让它显示成没搜过，交给下面的 search 兜底
+        return old && old.status === 'done' ? { ...l, ...old } : l
+      })
+      // 内存缓存也灌一份，这样「加载更多」翻回当前这页同样不发请求
+      for (const l of lanes.value) {
+        if (l.status === 'done') memCache.set(cacheKeyOf(l.site, l.source, c.kw, l.page || 1), l.rows)
+      }
+      return true
+    } catch { return false }
+  }
+
+  /** 命中缓存就直接摆结果，否则照常发请求 */
+  const searchOrRestore = (kw: string) => {
+    const q = kw.trim()
+    if (!q) return
+    if (restoreCache(q)) return
+    search(q)
+  }
+
+  // 结果有变化（含加载更多、重试）就存一份，回来才不用重搜
+  watch(lanes, saveCache, { deep: true })
+
   onScopeDispose(() => {
     for (const c of aborters.values()) c.abort()
   })
 
-  return { keyword, sections, searching, totalFound, emptyResult, search, loadMore, retry, reset }
+  return {
+    keyword, sections, searching, totalFound, emptyResult,
+    search, loadMore, retry, reset, searchOrRestore,
+  }
 }

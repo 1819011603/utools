@@ -54,7 +54,9 @@ watch(() => current.value?.cover, (cover) => {
 })
 
 // ── 搜索 ──
-const { keyword, sections, searching, emptyResult, search, loadMore, retry } = useMusicSearch()
+const { keyword, sections, searching, emptyResult, search, loadMore, retry, searchOrRestore, reset } = useMusicSearch()
+// 输入框的文字，双向绑定给 MusicSearchBar——地址栏带着 kw 打开时要能把词摆进框里
+const searchInput = ref('')
 
 /** 正在取址的那首，用来在结果行上画转圈 */
 const resolvingKey = computed(() => (isResolving.value ? current.value?.key : undefined))
@@ -111,7 +113,56 @@ watch(errorKind, (k) => {
   }
 })
 
-onMounted(mount)
+/*
+ * ── 地址栏同步（同 /video-search 那一套，见那边 `syncUrlToQuery` 的长注释） ──
+ *
+ * 用 router 而不是手写 `history.replaceState`：`kw` 就是个词，router 自己会编码，
+ * 没有视频地址那种「未编码 & 被路由拆散」的坑；换来的好处是 vue-router 知道地址栏变过，
+ * 点侧边栏「音乐」重新进这页时（同路由跳转，组件不会重新挂载）`route.query` 会变、
+ * 能借着 watch 清空重来——手写 replaceState 的话地址栏是变了，但 router 不知道，
+ * 页面会继续挂着上一次的关键词和整屏结果。
+ */
+const route = useRoute()
+const router = useRouter()
+
+const syncUrlToQuery = (kw: string) => {
+  void router.replace({ query: kw ? { kw } : {} })
+}
+
+const runSearch = (kw: string) => {
+  const q = kw.trim()
+  if (!q) return
+  searchInput.value = q
+  search(q)
+  syncUrlToQuery(q)
+}
+
+const queryKw = () => {
+  const v = route.query.kw
+  return (Array.isArray(v) ? v[0] : v ?? '').toString().trim()
+}
+
+/** 按地址栏里的 kw 把页面摆成对应的样子。命中缓存（几分钟内）就不发请求 */
+const applyKeyword = (kw: string) => {
+  searchInput.value = kw
+  searchOrRestore(kw)
+}
+
+// 地址栏的 kw 变了就跟着走：点导航进来（kw 没了）→ 清空；点浏览器前进/后退 → 摆回那一次。
+// **自己刚写进去的值要跳过**，否则 runSearch 里的 syncUrlToQuery 会绕回来再搜一遍
+watch(() => route.query.kw, () => {
+  const kw = queryKw()
+  if (kw === keyword.value) return
+  if (!kw) { reset(); searchInput.value = ''; return }
+  applyKeyword(kw)
+})
+
+onMounted(() => {
+  mount()
+  // 地址栏没带 kw = 从导航进来的，就该是一张空白页；带了才去恢复（同 video-search）
+  const kw = queryKw()
+  if (kw) applyKeyword(kw)
+})
 onBeforeUnmount(unmount)
 </script>
 
@@ -134,7 +185,7 @@ onBeforeUnmount(unmount)
         </p>
       </div>
 
-      <MusicSearchBar :searching="searching" @search="search" />
+      <MusicSearchBar v-model="searchInput" :searching="searching" @search="runSearch" />
 
       <!--
         这些提示常驻（toast 会消失，而这两个状态要持续很久），且必须**按音乐源分开**：

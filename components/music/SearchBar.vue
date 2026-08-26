@@ -9,7 +9,11 @@
 const props = defineProps<{ searching: boolean }>()
 const emit = defineEmits<{ (e: 'search', kw: string): void }>()
 
-const input = ref('')
+/**
+ * 输入框的文字用 `defineModel` 双向绑定：地址栏带着 `?kw=` 打开、或点浏览器前进/后退时，
+ * 页面要能把词直接摆进输入框（不然框里是空的，用户会以为「搜过的词丢了」，即使下面结果还在）。
+ */
+const input = defineModel<string>({ default: '' })
 
 /**
  * 搜索历史。`bump: true` —— 反复搜同一个歌手是常态（今天搜、明天接着听），
