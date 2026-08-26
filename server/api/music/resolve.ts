@@ -99,7 +99,11 @@ export default defineEventHandler(async (event) => {
    */
   const cookie = getRequestHeader(event, 'x-music-cookie')
 
-  const page = await musicFetch(`${BASE}/music/${prefix}/${id}`, { cookie })
+  /*
+   * **必须带 Referer**，同 `search.ts` 那处发现——不带这个头，详情页请求逢发必 403
+   * `Just a moment`，带上就稳定 200。不是出口 IP 的运气问题，是这个头本身缺了。
+   */
+  const page = await musicFetch(`${BASE}/music/${prefix}/${id}`, { cookie, headers: { Referer: `${BASE}/` } })
 
   // 撞 CF 墙时说人话：本地开发下这几乎总是「dev server 带了 HTTPS_PROXY」造成的
   // （代理出口 IP 会被 Cloudflare 拦，实测直连 200、经代理 403）

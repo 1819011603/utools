@@ -66,11 +66,36 @@ export async function musicFetch(
     return { status: res.status, body: await res.text() }
   }
 
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+  /**
+   * 撞上 CF 挑战页时**原地重试几次**，而不是第一下没成就认命。
+   *
+   * 依据是 `resolve.ts` 那条注释里已经记过的观察：「同一请求前一次 200、后一次
+   * ConnectTimeout」——Cloudflare 的边缘节点分布广，同一个 Worker 调用打到的
+   * 边缘 PoP 不是固定的，这次判你可疑的那个 PoP，下一次很可能换了一个。
+   * 用在**没有下一条路可退**的场景（线上没代理可退、或代理已经撞完退到直连这最后一步）。
+   *
+   * 只在 CF 墙上重试——配额耗尽（`isQuotaExhausted`）不归这个函数管，
+   * 那是「今天这个 IP 用完了」，重试只会白烧额度，交给调用方按配额的说法去处理。
+   */
+  const withRetry = async (dispatcher: any, attempts: number): Promise<MusicFetchResult> => {
+    let last: MusicFetchResult | undefined
+    for (let i = 0; i < attempts; i++) {
+      const res = await once(dispatcher)
+      if (!isCloudflareWall(res.status, res.body)) return res
+      last = res
+      if (i < attempts - 1) await sleep(400 + i * 300)
+    }
+    return last!
+  }
+
   const dispatcher = await getSiteDispatcher()
 
   try {
-    // 没有代理（线上 CF Pages / 本地没设 HTTPS_PROXY）就只有直连这一条路
-    if (!dispatcher) return await once(null)
+    // 没有代理（线上 CF Pages / 本地没设 HTTPS_PROXY）就只有直连这一条路——没有别的路可退，
+    // 撞墙就地重试几次，比第一下没成就直接认输更对得起这类边缘节点级别的偶发拦截
+    if (!dispatcher) return await withRetry(null, 3)
 
     const viaProxy = await once(dispatcher)
 
@@ -83,7 +108,8 @@ export async function musicFetch(
     if (!isCloudflareWall(viaProxy.status, viaProxy.body)) return viaProxy
 
     try {
-      return await once(null)
+      // 直连是这条链路的最后一步，同样值得重试几次再认输
+      return await withRetry(null, 2)
     } catch {
       // 直连本身连不上（DNS 污染之类）就还是把代理那份还回去，让调用方按 CF 墙来报
       return viaProxy
