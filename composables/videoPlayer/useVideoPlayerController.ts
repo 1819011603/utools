@@ -90,7 +90,8 @@ export function useVideoPlayerController() {
     getSegBuf: engine.getSegBuf,
     // 分片表从主播放的 hls 实例上现读：缩略图自己一次清单都不取（见 useVideoThumbnails）
     getHls: engine.getHls,
-    // 缓存里没有那一片、要自己下时，连接方式必须跟主播放完全一致（否则 403）
+    // 缓存里没有那一片、要自己下时，连接方式必须跟主播放**完全一致**：
+    // 直连的源就直连（走代理只会慢一大截），该注入防盗链头的才走 /api/proxy
     getProxyUrl: conn.getProxyUrl,
     healthZone: () => engine.strategy.value.healthZone,
   })
