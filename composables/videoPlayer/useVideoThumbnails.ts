@@ -8,9 +8,10 @@
  *
  *   ① 正播着的画面每跨一个桶就顺手截一帧（`captureTick`）——帧已经在屏幕上了，
  *      零网络零解码器。往回拖（最常见的操作）时缩略图全是现成的。
- *   ② 悬浮到没截过的位置，才起一个隐藏解码器去解那一片，而且**只吃主播放已经下过的分片**
- *      （`getSegBuf`，预取缓存里那几十秒都算）——**缓存里没有就没有图，一个字节都不下**。
- *      慢源上下一片要好几秒，图永远慢一大截才出来，而它抢的正是决定能不能播下去的那几条连接。
+ *   ② 悬浮到没截过的位置，才起一个隐藏解码器去解那一片。**先吃主播放已经下过的分片**
+ *      （`getSegBuf`，预取缓存里那几十秒都算，零网络零延迟）；缓存里没有的（拖到片子后半段）
+ *      **等指针停住 320ms 才下**——扫过进度条一趟点名几十个桶，逐个下等于把连接全占死，
+ *      而停住不动 = 他真的想看那儿。缓冲吃紧/濒卡/离线时一片都不下。
  *
  * 整片 MP4 不做：它的 `<video>` 是直连 CDN 的（`crossorigin` 一加就整个播不了，见 CLAUDE.md），
  * 画到 canvas 上必然污染，`toDataURL` 直接抛 SecurityError。HLS 走 MSE（src 是 `blob:`，同源）没这问题。
@@ -25,6 +26,11 @@ const BUCKET_SECS = 10
 const MAX_THUMBS = 40
 /** 扫过进度条时别每一像素都去解一帧；命中缓存的那些不走防抖，见 watch(hoverTime) */
 const HOVER_DEBOUNCE_MS = 220
+/**
+ * 「指针停住了」的判据。**只对要下载的那一路生效**：缓存里有的照旧立刻出图。
+ * 短了等于扫一趟下十几片，长了则「停下来等半天才出图」。
+ */
+const SETTLE_MS = 320
 /** 解一帧的耐心。超了就放弃这一桶——缩略图没有比播放更重要 */
 const SEEK_TIMEOUT_MS = 6000
 /** 离开进度条这么久就把解码器拆掉：一个 MediaSource + 解码器不算小，留着白占 */
@@ -41,12 +47,17 @@ export interface VideoThumbnailsDeps {
    * 拿到的 `frag.url` 还天然与主播放的分片缓存同键，命中率最高。
    */
   getHls: () => any
+  /**
+   * 必须跟主播放**完全一致**的连接配置。缓存里没有那一片、要自己下时用它：
+   * 不过这一道的话，该走代理注入防盗链头的源一律 403（踩过，见 fetchSeg）。
+   */
+  getProxyUrl: (url: string) => string
   /** 缓冲健康区。吃紧/濒卡时一片都不许为缩略图下 */
   healthZone: () => string
 }
 
 export function useVideoThumbnails(deps: VideoThumbnailsDeps) {
-  const { media, getSegBuf, getHls, healthZone } = deps
+  const { media, getSegBuf, getHls, getProxyUrl, healthZone } = deps
   const { videoEl, videoUrl, isHls, hoverTime } = media
 
   /** 当前该显示的缩略图（dataURL）。'' = 这个位置还没有 */
@@ -122,7 +133,9 @@ export function useVideoThumbnails(deps: VideoThumbnailsDeps) {
 
   let thumbHls: any = null
   let thumbVideo: HTMLVideoElement | null = null
-  let decoderFor = ''          // 解码器当前装的是哪个地址
+  let HlsMod: any = null       // hls.js 模块本身（要用它的事件名常量）
+  let decoderFor = ''          // 解码器当前属于哪一集
+  let loadedFragUrl = ''       // 解码器里现在装着哪一片
   let idleTimer: ReturnType<typeof setTimeout> | null = null
 
   const disposeDecoder = () => {
@@ -135,6 +148,13 @@ export function useVideoThumbnails(deps: VideoThumbnailsDeps) {
       thumbVideo = null
     }
     decoderFor = ''
+    loadedFragUrl = ''
+    segCtrl?.abort()
+    segCtrl = null
+    ownSegs.clear()
+    // 迷你清单的 blob 要显式回收，否则每悬浮一次就永久漏一个（页面不刷新就一直攒着）
+    for (const u of blobUrls.splice(0)) { try { URL.revokeObjectURL(u) } catch { /* 已回收 */ } }
+    playlistText.clear()
   }
 
   const armIdleDispose = () => {
@@ -196,8 +216,9 @@ export function useVideoThumbnails(deps: VideoThumbnailsDeps) {
         return
       }
 
-      const hit = getSegBuf(context.url)
-      hit ? deliver(hit) : fail('缩略图不下分片：这一片不在缓存里')
+      // 分片：主播放缓存优先，其次是我们自己刚下回来的那一片（见 fetchSeg）
+      const hit = getSegBuf(context.url) ?? ownSegs.get(context.url)
+      hit ? deliver(hit) : fail('缩略图：这一片没有数据')
     }
   }
 
@@ -231,8 +252,53 @@ export function useVideoThumbnails(deps: VideoThumbnailsDeps) {
   const playlistText = new Map<string, string>()
   const blobUrls: string[] = []
 
+  /**
+   * 缩略图自己下回来的分片。**单独存，不塞进主播放的预取缓存**：那份缓存的容量是按
+   * 「够播几秒」算的，塞进去会把播放头前面真正要用的分片挤出去（越缺越挤，正是抗卡最怕的）。
+   * 这里只留最近几片——扫进度条时同一片会被反复用到，而更早的那些再也不会回头看。
+   */
+  const ownSegs = new Map<string, ArrayBuffer>()
+  const OWN_SEGS_MAX = 3
+
+  const keepSeg = (url: string, buf: ArrayBuffer) => {
+    ownSegs.delete(url)
+    ownSegs.set(url, buf)
+    while (ownSegs.size > OWN_SEGS_MAX) ownSegs.delete(ownSegs.keys().next().value as string)
+  }
+
+  /** 在途的那一发。用户把鼠标挪到别的桶就当场掐掉——他已经不看那一张了 */
+  let segCtrl: AbortController | null = null
+
+  /**
+   * 下一片回来（缓存里没有时）。
+   *
+   * **必须与主播放同形**：`getProxyUrl`（该走代理的源不走就是 403）+ `referrerPolicy: 'no-referrer'`
+   *（这些 CDN 认防盗链，而 XHR/默认 fetch 会把本站 Referer 发出去 —— 踩过，Network 里那条
+   * 写着 `strict-origin-when-cross-origin` 的 403 就是它）。同形还有个附带好处：
+   * URL 与主播放一模一样，能吃到浏览器对它的 HTTP 缓存。
+   */
+  const fetchSeg = async (url: string): Promise<ArrayBuffer | null> => {
+    segCtrl?.abort()
+    const ctrl = new AbortController()
+    segCtrl = ctrl
+    try {
+      const res = await fetch(getProxyUrl(url), { signal: ctrl.signal, referrerPolicy: 'no-referrer' })
+      if (!res.ok) return null
+      const buf = await res.arrayBuffer()
+      keepSeg(url, buf)
+      return buf
+    } catch {
+      return null      // 中止 / 网络失败：这一桶没有图，仅此而已
+    } finally {
+      if (segCtrl === ctrl) segCtrl = null
+    }
+  }
+
   const miniPlaylist = (frag: any): string | null => {
-    if (!frag?.url || frag.encrypted || frag.levelkeys) return null
+    if (!frag?.url) return null
+    // 加密片：`decryptdata` 上挂着 METHOD/URI/IV。宁可保守判成加密（那一桶没图），
+    // 也不要拼出一份缺 KEY 的清单——那会让解码器解出一堆噪声帧
+    if (frag.decryptdata?.uri || frag.decryptdata?.key || frag.levelkeys) return null
     const lines = [
       '#EXTM3U',
       '#EXT-X-VERSION:3',
@@ -268,44 +334,60 @@ export function useVideoThumbnails(deps: VideoThumbnailsDeps) {
     document.body.appendChild(v)
 
     const hls = new Hls({
-      // 只为抽一帧，窗口开到最小，别跟主播放抢内存
+      // 清单里只有一片，窗口给到能装下它就行，别跟主播放抢内存
       maxBufferLength: 2,
       maxMaxBufferLength: 4,
-      // 自动起播会白下一串分片；我们只在 seek 那一刻要一片
       autoStartLoad: true,
-      // **给 `loader` 而不是只给 `fLoader`**：清单和 AES 密钥走的也是它。
-      // 只换分片那一个的话，另外两种请求仍是默认 XHR（带 Referer、不过连接策略），
-      // 防盗链的源上表现是「分片明明能下，却卡在清单或密钥的 403 上，一张图都出不来」
+      // **给 `loader` 而不是只给 `fLoader`**：那份迷你清单也是从它这里交出去的
       loader: makeLoader(Hls),
-    })
-    // 多档流一律锁最低码率那档：缩略图 240px 宽，拿高码率那档纯属白花带宽
-    hls.on(Hls.Events.MANIFEST_PARSED, (_: unknown, data: any) => {
-      const levels: any[] = data?.levels ?? []
-      if (levels.length > 1) {
-        let lo = 0
-        for (let i = 1; i < levels.length; i++) if ((levels[i].bitrate ?? 0) < (levels[lo].bitrate ?? 0)) lo = i
-        hls.currentLevel = lo
-      }
     })
     // 缩略图解不出来不该在控制台刷屏，也绝不能影响主播放的任何判断
     hls.on(Hls.Events.ERROR, () => { /* 静默：失败就是这一桶没有图 */ })
 
     hls.attachMedia(v)
-    hls.loadSource(getProxyUrl(videoUrl.value))
+    HlsMod = Hls
     thumbHls = hls
     thumbVideo = v
     decoderFor = videoUrl.value
-
-    // 等到能 seek 为止（拿不到元数据就没有 duration，seek 无从下手）
-    const ready = await new Promise<boolean>(resolve => {
-      const ok = () => { cleanup(); resolve(true) }
-      const timer = setTimeout(() => { cleanup(); resolve(false) }, SEEK_TIMEOUT_MS)
-      const cleanup = () => { clearTimeout(timer); v.removeEventListener('loadedmetadata', ok) }
-      if (v.readyState >= 1) { clearTimeout(timer); resolve(true); return }
-      v.addEventListener('loadedmetadata', ok)
-    })
-    if (!ready) { disposeDecoder(); return false }
+    loadedFragUrl = ''
+    // 注意这里**不 loadSource**：装什么由 loadFrag 按悬浮位置现拼（见 miniPlaylist）
     return true
+  }
+
+  /**
+   * 把「这一片」装进解码器。每换一片重新 `loadSource` 一份新的迷你清单——
+   * 解码器实例是复用的（建一次要几十毫秒 + 一个 MediaSource），只换内容。
+   */
+  const loadFrag = async (frag: any): Promise<boolean> => {
+    if (!await ensureDecoder()) return false
+    if (loadedFragUrl === frag.url) return true
+    const src = miniPlaylist(frag)
+    if (!src) return false
+    const hls = thumbHls
+    const Hls = HlsMod
+    if (!hls || !Hls) return false
+
+    // 等这一片真的解完并进了 buffer 才敢 seek：光有 `loadedmetadata` 时数据还没到，
+    // 那时 seek 会停在一个空位上，抓回来的是黑帧
+    const ready = new Promise<boolean>((resolve) => {
+      const done = (ok: boolean) => { cleanup(); resolve(ok) }
+      const onBuffered = () => done(true)
+      const onErr = (_: unknown, data: any) => { if (data?.fatal) done(false) }
+      const timer = setTimeout(() => done(false), SEEK_TIMEOUT_MS)
+      const cleanup = () => {
+        clearTimeout(timer)
+        hls.off(Hls.Events.FRAG_BUFFERED, onBuffered)
+        hls.off(Hls.Events.ERROR, onErr)
+      }
+      hls.on(Hls.Events.FRAG_BUFFERED, onBuffered)
+      hls.on(Hls.Events.ERROR, onErr)
+    })
+
+    hls.loadSource(src)
+    loadedFragUrl = frag.url
+    const ok = await ready
+    if (!ok) loadedFragUrl = ''
+    return ok
   }
 
   const seekAndGrab = (t: number): Promise<string> => new Promise(resolve => {
@@ -353,9 +435,30 @@ export function useVideoThumbnails(deps: VideoThumbnailsDeps) {
         wanted = -1
         const cached = shots.get(b)
         if (cached) { if (bucketOf(hoverTime.value ?? -1) === b) thumbImage.value = cached; continue }
-        if (!await ensureDecoder()) break
         // 取桶中点：桶边界正好压在分片边界上时，边界那一帧常常是黑的
-        const img = await seekAndGrab(b * BUCKET_SECS + BUCKET_SECS / 2)
+        const at = b * BUCKET_SECS + BUCKET_SECS / 2
+        const frag = fragAt(at)
+        if (!frag) continue
+
+        /**
+         * 缓存里没有这一片时才去下，而且**要等指针真的停住**（`SETTLE_MS`）。
+         *
+         * 这道停留判据是「扫过进度条不该下载」和「拖到后面也要有图」之间唯一的分界：
+         * 扫过去时每 10 秒一个桶，一趟点名几十个桶，逐个下等于把连接全占死（用户原话是「太慢了」）；
+         * 而停在某个位置不动 = 他真的想看那里，这时候花一片的钱是值的。
+         * 前方几十秒通常本来就在预取缓存里（那条路零延迟），要下的是更远的位置。
+         */
+        if (!getSegBuf(frag.url) && !ownSegs.has(frag.url)) {
+          if (!mayFetch()) continue                       // 缓冲吃紧/离线：一片都不下
+          await new Promise(r => setTimeout(r, SETTLE_MS))
+          // 这段时间里指针挪到别的桶了 → 那一桶才是他要的，这一片不下了
+          if (wanted >= 0 || bucketOf(hoverTime.value ?? -1) !== b) continue
+          if (!await fetchSeg(frag.url)) continue
+        }
+
+        if (!await loadFrag(frag)) continue
+        // 迷你清单里只有这一片，时间轴从 0 开始 → seek 的是**片内偏移**
+        const img = await seekAndGrab(Math.max(0, at - frag.start))
         if (!img) continue
         remember(b, img)
         // 期间鼠标可能已经移开或移到别的桶了，只有还停在这一桶才换图

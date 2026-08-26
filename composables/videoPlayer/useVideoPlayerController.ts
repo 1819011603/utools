@@ -88,6 +88,9 @@ export function useVideoPlayerController() {
   const thumbs = useVideoThumbnails({
     media,
     getSegBuf: engine.getSegBuf,
+    // 分片表从主播放的 hls 实例上现读：缩略图自己一次清单都不取（见 useVideoThumbnails）
+    getHls: engine.getHls,
+    // 缓存里没有那一片、要自己下时，连接方式必须跟主播放完全一致（否则 403）
     getProxyUrl: conn.getProxyUrl,
     healthZone: () => engine.strategy.value.healthZone,
   })
