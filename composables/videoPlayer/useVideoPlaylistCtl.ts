@@ -558,6 +558,11 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
       handoff.setLazyTask(result.clientTask?.lazy ? result.clientTask : null, urls)
       clearLazyUrlCache()   // 预热的地址是用旧令牌取的，跟着一起作废
       if (result.title) handoff.playlistTitle.value = result.title
+      if (result.cover) handoff.playlistCover.value = result.cover
+      // 线路表也跟着刷新：源站增删线路之后，换源面板里那份不更新就会指到别的线路去
+      handoff.playlistLines.value = result.lines.map(l => ({
+        name: l.name, sublabel: l.sublabel, count: l.episodes.length,
+      }))
       // 线路名跟着刷新一起更新：源站改了线路名的话，地址栏里那份得跟上，
       // 否则下次按名字认线路会落空、白白多解析一轮
       handoff.playlistSource.value = {
