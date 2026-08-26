@@ -63,6 +63,9 @@ export const SITE_FANGPI: MusicSite = {
     const res = await $fetch<{ items: Omit<MusicSearchRow, 'site'>[] }>('/api/music/fangpi/search', {
       query: { kw },
       signal,
+      // 同 site24bit.ts：服务端 `musicFetch` 撞 CF 墙已经自己重试过，ofetch 默认的
+      // GET 失败重试会再叠一层，两层叠加只会把请求量推得更高、更容易被判 bot
+      retry: 0,
     })
     return (res?.items ?? []).map(r => ({ ...r, site: 'fangpi' as const }))
   },
@@ -72,6 +75,7 @@ export const SITE_FANGPI: MusicSite = {
     return $fetch<MusicResolved>('/api/music/fangpi/resolve', {
       query: { id },
       signal,
+      retry: 0,
     })
   },
 

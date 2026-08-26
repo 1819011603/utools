@@ -76,6 +76,10 @@ export const SITE_24BIT: MusicSite = {
       // 用户填了自己的登录态就带上（配额另算）。没填就是空对象，照常匿名请求
       headers: useMusic24bitAuth().authHeaders(),
       signal,
+      // ofetch 对 GET 默认失败重试一次——服务端那边 `musicFetch` 撞 CF 墙时自己已经
+      // 原地重试了好几次，两层重试叠在一起等于短时间内把请求量翻好几倍地砸给 24bit.net，
+      // 越砸越像 bot、越砸越容易被判可疑。这层交给服务端一处管就够了，浏览器这层关掉
+      retry: 0,
     })
     return (res?.items ?? []).map(r => ({ ...r, site: '24bit' as const }))
   },
@@ -87,6 +91,7 @@ export const SITE_24BIT: MusicSite = {
       // 凭证走请求头不走 query —— query 会进日志、浏览器历史和 Referer
       headers: useMusic24bitAuth().authHeaders(),
       signal,
+      retry: 0,
     })
   },
 

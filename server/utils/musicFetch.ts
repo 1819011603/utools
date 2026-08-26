@@ -78,6 +78,11 @@ export async function musicFetch(
    *
    * 只在 CF 墙上重试——配额耗尽（`isQuotaExhausted`）不归这个函数管，
    * 那是「今天这个 IP 用完了」，重试只会白烧额度，交给调用方按配额的说法去处理。
+   *
+   * **重试次数必须压低**：24bit 一次搜索是两条泳道并发（`useMusicSearch` 的 one/two），
+   * 每条泳道自己在这儿重试几次，两条一乘就是好几发请求在几百毫秒内一起砸向 24bit.net——
+   * 越砸越像 bot，等于在帮 Cloudflare 找理由继续拦。**只重试一次**，把「这次 PoP 不巧撞上」
+   * 这类偶发情况捞回来就够了，别指望靠堆次数把真正的风控刷过去。
    */
   const withRetry = async (dispatcher: any, attempts: number): Promise<MusicFetchResult> => {
     let last: MusicFetchResult | undefined
@@ -85,7 +90,7 @@ export async function musicFetch(
       const res = await once(dispatcher)
       if (!isCloudflareWall(res.status, res.body)) return res
       last = res
-      if (i < attempts - 1) await sleep(400 + i * 300)
+      if (i < attempts - 1) await sleep(500)
     }
     return last!
   }
@@ -94,8 +99,8 @@ export async function musicFetch(
 
   try {
     // 没有代理（线上 CF Pages / 本地没设 HTTPS_PROXY）就只有直连这一条路——没有别的路可退，
-    // 撞墙就地重试几次，比第一下没成就直接认输更对得起这类边缘节点级别的偶发拦截
-    if (!dispatcher) return await withRetry(null, 3)
+    // 撞墙就地重试一次，比第一下没成就直接认输更对得起这类边缘节点级别的偶发拦截
+    if (!dispatcher) return await withRetry(null, 2)
 
     const viaProxy = await once(dispatcher)
 
