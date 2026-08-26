@@ -198,15 +198,21 @@ onBeforeUnmount(unmount)
           fangpi 是站点要人机验证（过一次校验或等几分钟就能继续，它压根没有配额这回事）。
           理由原文由服务端给（`gate.stopReason`），这里只负责摆出来。
         -->
+        <!--
+          `quotaHint` 有值（24bit）= 真配额，是账号/IP 维度的每日限量，
+          点开源站、过一次验证码**解决不了**——只有 `loginUrl` 那条路管用。
+          没有 `quotaHint`（fangpi）的 429 = 人机验证，这种才是「去源站点开、手动过一次校验」
+          能立刻见效的场景（fangpi 的 429 消息原文就是这么建议的），配一个新标签打开源站的按钮。
+        -->
         <UAlert
           v-if="t.quota"
           :icon="t.site.quotaHint ? 'i-heroicons-clock' : 'i-heroicons-shield-exclamation'"
           color="orange"
           variant="soft"
           :title="t.site.quotaHint ? `${t.site.name} 今日配额已用完` : `${t.site.name} 暂时停手了`"
-          :actions="t.site.loginUrl
-            ? [{ label: `去 ${t.site.name} 登录`, color: 'orange', variant: 'ghost', to: t.site.loginUrl, target: '_blank' }]
-            : []"
+          :actions="t.site.quotaHint
+            ? (t.site.loginUrl ? [{ label: `去 ${t.site.name} 登录`, color: 'orange', variant: 'ghost', to: t.site.loginUrl, target: '_blank' }] : [])
+            : [{ label: `打开 ${t.site.name} 过一次校验`, color: 'orange', variant: 'ghost', to: t.site.homepage, target: '_blank' }]"
         >
           <template #description>
             <template v-if="t.site.quotaHint">
@@ -225,7 +231,8 @@ onBeforeUnmount(unmount)
           color="amber"
           variant="soft"
           :title="`${t.site.name} 连续几首都取不到地址`"
-          description="可能是这个源在限速，等几分钟再试。搜索仍然可用，也可以换另一个音乐源。"
+          description="可能是这个源在限速，打开源站过一次校验、或等几分钟再试。搜索仍然可用，也可以换另一个音乐源。"
+          :actions="[{ label: `打开 ${t.site.name}`, color: 'amber', variant: 'ghost', to: t.site.homepage, target: '_blank' }]"
         />
       </template>
 
