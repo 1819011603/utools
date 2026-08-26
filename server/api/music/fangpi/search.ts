@@ -22,20 +22,18 @@
  *
  * 实现约束同 proxy.ts：不静态 import 任何 `node:*`（Nitro preset 是 cloudflare-pages）。
  */
-import { parseSearchRows, parseTotal } from '../../../utils/fangpi'
+import { buildFangpiSearchUrl, parseSearchRows, parseTotal } from '~/utils/musicFangpiProtocol'
 import { cfWallMessage, isCloudflareWall, musicFetch } from '../../../utils/musicFetch'
-
-const BASE = 'https://www.fangpi.net'
 
 export default defineEventHandler(async (event) => {
   const kw = (getQuery(event).kw as string)?.trim()
   if (!kw) throw createError({ statusCode: 400, statusMessage: '缺少 kw 参数' })
 
-  const res = await musicFetch(`${BASE}/s/${encodeURIComponent(kw)}`, {
+  const res = await musicFetch(buildFangpiSearchUrl(kw), {
     headers: {
       // 照浏览器发，别给 CF 多一个判我们是脚本的理由
       Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      Referer: `${BASE}/`,
+      Referer: 'https://www.fangpi.net/',
     },
   })
 

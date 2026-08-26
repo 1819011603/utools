@@ -1,14 +1,26 @@
 /**
- * fangpi.net（放屁音乐网）的页面解析：**纯函数，不发请求**。
+ * fangpi.net（放屁音乐网）协议层的纯函数：请求怎么拼、页面怎么抠。
  *
- * 接口层（`server/api/music/fangpi/*`）只做编排，抠数据一律放这儿 ——
- * 同 `server/parsers/` 对视频站的分法：站点改版时只要盯这一个文件。
+ * 放在 `utils/` 是因为**前后端都要 import**：服务端 `server/api/music/fangpi/*.ts`
+ * 用它构造转发给 fangpi.net 的请求、解析抓回来的 HTML；浏览器这边在本机中继可用时
+ * （见 `composables/musicSites/localRelay.ts`）绕开 Workers 直连 fangpi.net，用的是
+ * **同一份**拼请求/抠页面逻辑（同 `music24bitProtocol.ts` 的分工）。
  *
- * 这个站没有任何 JSON 搜索接口可用（用户给的 `/api/guess-musics` 是**自动补全**，
- * 只回 6 条、还把歌名和歌手拼成一个字符串），所以搜索只能抠 HTML。
- *
- * 实现约束同 proxy.ts：不静态 import 任何 `node:*`（Nitro preset 是 cloudflare-pages）。
+ * 这个站没有任何 JSON 搜索接口可用（`/api/guess-musics` 是只回 6 条的自动补全），
+ * 所以搜索/取址都是抓 HTML 页面自己抠，不是调接口。
  */
+
+export const BASE_FANGPI = 'https://www.fangpi.net'
+
+export function buildFangpiSearchUrl(kw: string): string {
+  return `${BASE_FANGPI}/s/${encodeURIComponent(kw)}`
+}
+
+export function buildFangpiDetailUrl(id: string): string {
+  return `${BASE_FANGPI}/music/${id}`
+}
+
+export const PLAY_URL_ENDPOINT_FANGPI = `${BASE_FANGPI}/member/common-play-url`
 
 /** 详情页 `window.appData` 里我们会用到的字段。其余的（广告位、网盘分享链）一律不碰 */
 export interface FangpiAppData {
@@ -170,4 +182,60 @@ export function parseDuration(text?: string): number | undefined {
   // 从右往左按 秒/分/时 加权，这样 `03:35` 和 `1:02:03` 用同一段代码
   const secs = parts.reduce((acc, n) => acc * 60 + n, 0)
   return secs > 0 ? secs : undefined
+}
+
+/**
+ * 从地址里读码率当音质标注。
+ *
+ * **不编规格参数**：站点自己压根不报音质，凭空写一个「无损」出来而文件其实是 128K MP3，
+ * 比什么都不写更糟。这里读的是地址上真实带着的 `bitrate$128`（是 `$` 不是 `=`，站点就这么写的）。
+ */
+export function qualityOfFangpi(url: string): string {
+  const m = url.match(/bitrate\$(\d+)/)
+  return m ? `MP3 ${m[1]}K` : 'MP3'
+}
+
+/**
+ * 封面升到 https。
+ *
+ * 站点给的是 `http://img3.kuwo.cn/…`，而我们的页面是 https ——
+ * 浏览器对这种**混合内容**的图片会先尝试自动升级、升不动就直接拦掉。
+ * 实测这个图床 https 完全正常，所以直接换掉。只动 `http:` 前缀，别的形状原样放过。
+ */
+export function toHttpsFangpi(url?: string): string | undefined {
+  return url?.startsWith('http://') ? `https://${url.slice(7)}` : url
+}
+
+/** `POST /member/common-play-url` 的请求体：唯一入参就是详情页里的取址令牌 */
+export function buildPlayUrlBody(playId: string): string {
+  return new URLSearchParams({ id: playId }).toString()
+}
+
+export interface PlayUrlResult {
+  url?: string
+  code?: number
+  msg?: string
+}
+
+/** 解析取址接口的响应体。解析失败一律当「没给地址」处理，不抛错 */
+export function parsePlayUrlBody(body: string): PlayUrlResult {
+  let json: { code?: number; data?: { url?: string }; msg?: string } | null = null
+  try { json = JSON.parse(body) } catch { /* 按「没给地址」处理 */ }
+  return { url: json?.data?.url, code: json?.code, msg: json?.msg }
+}
+
+/** 取址结果的最终形状（跟 `ResolvedTrack` 对应，这里不直接 import 避免循环依赖） */
+export function toFangpiResolvedPayload(url: string, app: FangpiAppData, pageHtml: string) {
+  return {
+    url,
+    // **必须显式给 `mp3`**：CDN 的 content-type 会谎报，下载扩展名只信这个字段
+    format: 'mp3',
+    quality: qualityOfFangpi(url),
+    cover: toHttpsFangpi(app.mp3_cover),
+    duration: parseDuration(app.mp3_duration),
+    // 只有站点说有词的时候才给词，理由见 parseInlineLrc 的长注释
+    lrc: app.lrc_is_empty === false ? parseInlineLrc(pageHtml) : undefined,
+    name: app.mp3_title,
+    artist: app.mp3_author,
+  }
 }
