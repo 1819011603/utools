@@ -144,18 +144,35 @@ export function useVideoThumbnails(deps: VideoThumbnailsDeps) {
   }
 
   /**
-   * 缩略图专用 `fLoader`：命中主播放的分片缓存就直接交货，miss 才自己下。
+   * 缩略图专用 loader（清单 / 密钥 / 分片**全都走它**）：命中主播放的分片缓存就直接交货，
+   * miss 才自己下，而且下的方式必须跟主播放**完全同形**。
+   *
+   * 踩过：miss 时直接 `super.load()` 交给 hls.js 默认的 XHR loader，结果分片一律 **403**
+   *（缩略图空白，Network 里那一条写着 `strict-origin-when-cross-origin`）。两个原因缺一不可：
+   *   · **XHR 发得出 Referer**，而这些 CDN 认防盗链 —— 主播放那条路是
+   *     `fetch(..., { referrerPolicy: 'no-referrer' })`，从来不带；
+   *   · **没过连接策略**：该走 `/api/proxy` 注入 Origin/Referer 的源，直连必然被拒。
+   * 所以这里自己 `fetch`：先 `getProxyUrl`（幂等，已经是代理地址就原样返回）、再 `no-referrer`。
+   * 这也顺带让缩略图能吃到浏览器对主播放那些分片的 HTTP 缓存 —— 两边 URL 一模一样。
+   *
+   * 回调里的 `url` 用 **`res.url`（重定向后的最终地址）**：hls.js 拿它当基准还原相对分片 URI，
+   * 传原始地址的话，一旦清单 302 到别的 host/端口，解出来的分片地址全是错的（CLAUDE.md 里那条）。
    *
    * **交货必须延到下一个宏任务**——跟主播放那份 fLoader 是同一个坑（见 prefetch/fragLoader.ts
    * 里那段长注释）：hls.js 在 `load()` **返回之后**才把这一片记成「在加载中」，
    * 同步回调等于在它记账之前把结果交出去，那一片被当成无主的丢掉，而它永远停在「还在等」。
    */
-  const makeLoader = (Hls: any) => class ThumbFragLoader extends (Hls.DefaultConfig.loader as any) {
+  const makeLoader = (Hls: any) => class ThumbLoader extends (Hls.DefaultConfig.loader as any) {
+    thumbAbort: AbortController | null = null
+
     load(context: any, config: any, callbacks: any) {
-      const hit = getSegBuf(context.url)
+      // 分片要的是二进制，清单要的是文本。这个 loader 三种请求都接，按它分流
+      const isSeg = context.responseType === 'arraybuffer'
+      this.context = context
+      this.stats.loading.start = performance.now()
+
+      const hit = isSeg ? getSegBuf(context.url) : null
       if (hit) {
-        const t = performance.now()
-        this.stats.loading.start = t
         setTimeout(() => {
           if (this.stats.aborted) return
           this.stats.loaded = this.stats.total = hit.byteLength
@@ -165,11 +182,45 @@ export function useVideoThumbnails(deps: VideoThumbnailsDeps) {
         }, 0)
         return
       }
-      if (!mayFetch()) {
+
+      // 让路只拦分片：清单和密钥各只有一发、几 KB，拦掉它们等于整个解码器建不起来
+      if (isSeg && !mayFetch()) {
         setTimeout(() => callbacks.onError({ code: 0, text: '缩略图让路：缓冲吃紧' }, context, null, this.stats), 0)
         return
       }
-      super.load(context, config, callbacks)
+
+      const ctrl = new AbortController()
+      this.thumbAbort = ctrl
+      let finalUrl = context.url
+      fetch(getProxyUrl(context.url), { signal: ctrl.signal, referrerPolicy: 'no-referrer' })
+        .then((res) => {
+          if (!res.ok) throw new Error('HTTP ' + res.status)
+          finalUrl = res.url || context.url
+          return isSeg ? res.arrayBuffer() : res.text()
+        })
+        .then((data: ArrayBuffer | string) => {
+          if (this.stats.aborted) return
+          const len = typeof data === 'string' ? data.length : data.byteLength
+          this.stats.loaded = this.stats.total = len
+          this.stats.chunkCount = 1
+          this.stats.loading.first = this.stats.loading.end = performance.now()
+          callbacks.onSuccess({ data, url: finalUrl }, this.stats, context)
+        })
+        .catch((e: any) => {
+          // 中止是我们自己干的（换桶/拆解码器），不是失败，报上去只会让 hls.js 走一轮重试
+          if (this.stats.aborted || ctrl.signal.aborted) return
+          callbacks.onError({ code: 0, text: '缩略图取片失败：' + (e?.message || e) }, context, null, this.stats)
+        })
+    }
+
+    abort() {
+      try { this.thumbAbort?.abort() } catch { /* 已经中止过 */ }
+      super.abort()
+    }
+
+    destroy() {
+      try { this.thumbAbort?.abort() } catch { /* 同上 */ }
+      super.destroy()
     }
   }
 
@@ -194,7 +245,10 @@ export function useVideoThumbnails(deps: VideoThumbnailsDeps) {
       maxMaxBufferLength: 4,
       // 自动起播会白下一串分片；我们只在 seek 那一刻要一片
       autoStartLoad: true,
-      fLoader: makeLoader(Hls),
+      // **给 `loader` 而不是只给 `fLoader`**：清单和 AES 密钥走的也是它。
+      // 只换分片那一个的话，另外两种请求仍是默认 XHR（带 Referer、不过连接策略），
+      // 防盗链的源上表现是「分片明明能下，却卡在清单或密钥的 403 上，一张图都出不来」
+      loader: makeLoader(Hls),
     })
     // 多档流一律锁最低码率那档：缩略图 240px 宽，拿高码率那档纯属白花带宽
     hls.on(Hls.Events.MANIFEST_PARSED, (_: unknown, data: any) => {
