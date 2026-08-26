@@ -6,15 +6,36 @@
   <div v-if="!hidden">
     <!--
       贴着左边缘的一竖条按钮。放左边而不是右边：右下角归控制栏和手势（长按 2x 就在那一带），
-      而这两颗是「看片之外」的入口，离得越远越不容易误触。
+      而这几颗是「看片之外」的入口，离得越远越不容易误触。
+
+      **窄屏默认收成一根细把手**：手机上页面是通栏的，这一竖条必然压在正文上
+      （实测安卓上红心正好盖住剧名、下面两颗盖住信息行和「换线路」）。
+      收起来只占 10px 边缘，点一下才滑出那几颗。
     -->
-    <div class="fixed left-0 top-1/2 -translate-y-1/2 z-30 flex flex-col gap-1.5">
+    <div
+      class="fixed left-0 z-30 flex flex-col gap-1.5"
+      :class="isNarrow ? 'top-[62%] -translate-y-1/2' : 'top-1/2 -translate-y-1/2'"
+    >
+      <!-- 窄屏收起态：一根半透明把手。**位置也往下挪**（62% 而不是居中），
+           那里正对着页面下半段的折叠卡区，就算展开也压不到标题和信息行 -->
+      <button
+        v-if="isNarrow && !expanded"
+        type="button"
+        class="flex items-center justify-center w-3 h-16 rounded-r-lg
+               bg-white/70 dark:bg-gray-900/70 backdrop-blur shadow
+               ring-1 ring-black/5 dark:ring-white/10 active:scale-95 transition-all"
+        title="打开媒体库"
+        @click="expandDock"
+      >
+        <UIcon name="i-heroicons-chevron-right" class="w-3 h-3 text-gray-400" />
+      </button>
+
       <!--
         收藏单独一颗**常驻**按钮，不藏进抽屉：收藏是一下就完的动作，
         为它先点开一层面板不值当（而画面里那颗心要等控制栏出来才看得见）
       -->
       <button
-        v-if="canFavorite"
+        v-if="canFavorite && showButtons"
         type="button"
         class="group flex items-center gap-1.5 py-3 pl-1.5 pr-2 rounded-r-xl shadow-lg
                bg-white/85 dark:bg-gray-900/85 backdrop-blur
@@ -22,7 +43,7 @@
                hover:pl-2.5 transition-all active:scale-95"
         :class="isFavorited ? 'text-rose-500' : 'text-gray-500 dark:text-gray-400 hover:text-rose-500'"
         :title="isFavorited ? '取消收藏' : '收藏这部剧'"
-        @click="toggleFavorite"
+        @click="onFavorite"
       >
         <UIcon :name="isFavorited ? 'i-heroicons-heart-solid' : 'i-heroicons-heart'" class="w-5 h-5 shrink-0" />
         <span class="hidden sm:block text-[10px] leading-tight tracking-wider" style="writing-mode: vertical-rl">
@@ -31,7 +52,7 @@
       </button>
 
       <button
-        v-for="t in tabs"
+        v-for="t in showButtons ? tabs : []"
         :key="t.id"
         type="button"
         class="group flex items-center gap-1.5 py-3 pl-1.5 pr-2 rounded-r-xl shadow-lg
@@ -47,6 +68,20 @@
         <span class="hidden sm:block text-[10px] leading-tight tracking-wider" style="writing-mode: vertical-rl">
           {{ t.label }}
         </span>
+      </button>
+
+      <!-- 窄屏展开态的收回键。**必须有**：展开后那几颗照样压着正文，
+           而自动收回（几秒后）在用户正要点的时候缩掉更烦 -->
+      <button
+        v-if="isNarrow && expanded"
+        type="button"
+        class="flex items-center justify-center w-3 h-10 rounded-r-lg
+               bg-white/70 dark:bg-gray-900/70 backdrop-blur shadow
+               ring-1 ring-black/5 dark:ring-white/10 active:scale-95 transition-all"
+        title="收起"
+        @click="expanded = false"
+      >
+        <UIcon name="i-heroicons-chevron-left" class="w-3 h-3 text-gray-400" />
       </button>
     </div>
 
@@ -145,9 +180,29 @@ const tabs = computed(() => {
   return list
 })
 
+/**
+ * 窄屏（手机竖屏）上这一竖条**默认收成一根把手**：页面在手机上是通栏的，
+ * 按钮条必然压在正文上（实测安卓上红心正好盖住剧名）。宽屏两侧本来就有留白，不收。
+ */
+const isNarrow = useNarrowScreen()
+const expanded = ref(false)
+const showButtons = computed(() => !isNarrow.value || expanded.value)
+const expandDock = () => { expanded.value = true }
+
 const active = ref<TabId | null>(null)
 const close = () => { active.value = null }
-const toggle = (id: TabId) => { active.value = active.value === id ? null : id }
+const toggle = (id: TabId) => {
+  active.value = active.value === id ? null : id
+  // 窄屏上点完就把按钮条收回去：抽屉已经盖在上面了，留着那几颗只是继续压正文，
+  // 关掉抽屉后又要用户自己去收
+  if (isNarrow.value) expanded.value = false
+}
+
+// 收藏点完同样收回（窄屏）：那是一下就完的动作，点完没有下一步
+const onFavorite = () => {
+  toggleFavorite()
+  if (isNarrow.value) expanded.value = false
+}
 
 /** 「查看更多」打开的是哪一份清单（null = 没开） */
 const browsing = ref<LibraryKind | null>(null)
