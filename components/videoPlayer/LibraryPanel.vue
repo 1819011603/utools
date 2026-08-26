@@ -5,16 +5,16 @@
       手工贴地址播的那种列表收藏了也找不回来，给个按钮只会让人收藏一堆死条目
     -->
     <button
-      v-if="canFavCurrent"
+      v-if="canFavorite"
       type="button"
       class="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium transition-colors"
-      :class="curFaved
+      :class="isFavorited
         ? 'bg-rose-500/10 text-rose-600 dark:text-rose-300 ring-1 ring-rose-400/30'
         : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'"
       @click="toggleCurrent"
     >
-      <UIcon :name="curFaved ? 'i-heroicons-heart-solid' : 'i-heroicons-heart'" class="w-4 h-4 shrink-0" />
-      <span class="truncate">{{ curFaved ? '已收藏' : '收藏' }}{{ playlistTitle ? '《' + playlistTitle + '》' : '这部剧' }}</span>
+      <UIcon :name="isFavorited ? 'i-heroicons-heart-solid' : 'i-heroicons-heart'" class="w-4 h-4 shrink-0" />
+      <span class="truncate">{{ isFavorited ? '已收藏' : '收藏' }}{{ playlistTitle ? '《' + playlistTitle + '》' : '这部剧' }}</span>
     </button>
 
     <section>
@@ -87,12 +87,14 @@ import { onSyncApplied } from '~/composables/cloudSyncLocal'
 const emit = defineEmits<{ (e: 'close'): void }>()
 
 const {
-  playlistTitle, playlistCover, playlistSource, playlist, currentIndex,
+  playlistTitle, playlistSource, playlist, currentIndex,
   savedProgress, currentTime, duration, getVideoName, playByIndex, saveCurrentProgress,
+  // 收藏状态由控制器持有：画面顶栏和左侧那颗常驻按钮也在改它，各自读一份就会对不上
+  canFavorite, isFavorited, toggleFavorite, refreshFavorite,
 } = useVideoPlayerCtx()
 
 const { allWatched, forgetWatch, findWatch } = useWatchHistory()
-const { allFavorites, isFav, toggleFav, removeFav } = useFavorites()
+const { allFavorites, removeFav } = useFavorites()
 
 const history = ref<WatchRecord[]>([])
 const favorites = ref<FavoriteRecord[]>([])
@@ -119,26 +121,15 @@ const currentRef = computed(() => ({
   title: playlistTitle.value || '',
   pageUrl: playlistSource.value?.pageUrl,
 }))
-const canFavCurrent = computed(() => !!(currentRef.value.title || currentRef.value.pageUrl))
-const curFaved = ref(false)
-const syncCurFaved = () => { curFaved.value = canFavCurrent.value && isFav(currentRef.value) }
-watch(currentRef, syncCurFaved, { immediate: true, deep: true })
 
+/** 收藏动作本身在控制器里，这里只补一件它管不着的事：把下面那份收藏列表重读一遍 */
 const toggleCurrent = () => {
-  if (!canFavCurrent.value) return
-  const src = playlistSource.value
-  curFaved.value = toggleFav({
-    title: currentRef.value.title,
-    pageUrl: src?.pageUrl,
-    line: src?.line,
-    lineName: src?.lineName,
-    cover: playlistCover.value || undefined,
-  })
+  toggleFavorite()
   reload()
 }
 
 const isCurrent = (r: { title?: string; pageUrl?: string }) =>
-  canFavCurrent.value && keyOf(r) === keyOf(currentRef.value)
+  canFavorite.value && keyOf(r) === keyOf(currentRef.value)
 
 // ── 副行文案与进度 ──
 
@@ -238,7 +229,8 @@ const dropWatch = (r: WatchRecord) => {
 
 const dropFav = (r: FavoriteRecord) => {
   removeFav({ title: r.title, pageUrl: r.pageUrl })
-  syncCurFaved()
+  // 删掉的可能正是当前这部剧 → 三处按钮共用的那份状态要跟着变回空心
+  refreshFavorite()
   reload()
 }
 </script>

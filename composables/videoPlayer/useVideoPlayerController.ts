@@ -21,6 +21,9 @@ export function useVideoPlayerController() {
   const media = useVideoMediaState()
   const handoff = useVideoHandoff()
 
+  // 「这部剧收了没」。同样只吃 handoff，装在这里三处按钮才共用同一份状态
+  const favorite = useVideoFavorite({ handoff })
+
   // 按剧记住倍速与片头片尾。只吃裸状态 + handoff（剧名从那儿来），不碰 playlist，
   // 所以放在最前面装：它靠 watch 剧名工作，装配顺序对它没有要求
   const showPrefs = useShowPrefs({ media, handoff })
@@ -256,6 +259,7 @@ export function useVideoPlayerController() {
   return {
     ...media,
     ...handoff,
+    ...favorite,
     ...showPrefs,
     ...tier,
     ...conn,

@@ -77,7 +77,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
    * 压根不会再切集，那一集就记不下来。进度保存是周期性的，覆盖「看到哪就记到哪」。
    * 单集列表不记：那不是「剧」，记了只会把续看列表塞满一堆一次性视频。
    */
-  const recordWatchProgress = () => {
+  const recordWatchProgress = (finished = false) => {
     if (playlist.value.length <= 1) return
     const src = handoff.playlistSource.value
     const title = handoff.playlistTitle.value || ''
@@ -92,8 +92,12 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
       total: playlist.value.length,
       cover: handoff.playlistCover.value || undefined,
       // 秒数一并记进这份**按剧**的记录里：按 URL 存的 savedProgress 不上云（键是带签名的地址），
-      // 换台设备打开时只有这两个数字能把人送回「第 10 集 12:34」
-      time: media.currentTime.value,
+      // 换台设备打开时只有这两个数字能把人送回「第 10 集 12:34」。
+      //
+      // **这一集已经看到片尾区时记 0**，理由与 savedProgress 那边删记录完全相同：
+      // 记下来的话，从侧边栏点这条会恢复到片尾，一恢复就落进「跳过片尾」的判据里当场被弹走，
+      // 这集永远看不成（CLAUDE.md 里那条踩过的坑，只是这次的入口换成了播放历史）
+      time: finished ? 0 : media.currentTime.value,
       duration: media.duration.value || undefined,
     })
   }
@@ -160,8 +164,9 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
   const saveCurrentProgress = () => {
     const key = progressKey()
     if (!key || media.currentTime.value <= 0) return   // 还没播就别动已有记录（切集时会经过这里）
-    recordWatchProgress()
-    if (media.currentTime.value >= finishedThreshold()) {
+    const finished = media.currentTime.value >= finishedThreshold()
+    recordWatchProgress(finished)
+    if (finished) {
       // 看完了：清掉记录，下次从头开始
       if (savedProgress.value[key] !== undefined) {
         delete savedProgress.value[key]

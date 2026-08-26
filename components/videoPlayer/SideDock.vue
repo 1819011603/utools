@@ -9,6 +9,27 @@
       而这两颗是「看片之外」的入口，离得越远越不容易误触。
     -->
     <div class="fixed left-0 top-1/2 -translate-y-1/2 z-30 flex flex-col gap-1.5">
+      <!--
+        收藏单独一颗**常驻**按钮，不藏进抽屉：收藏是一下就完的动作，
+        为它先点开一层面板不值当（而画面里那颗心要等控制栏出来才看得见）
+      -->
+      <button
+        v-if="canFavorite"
+        type="button"
+        class="group flex items-center gap-1.5 py-3 pl-1.5 pr-2 rounded-r-xl shadow-lg
+               bg-white/85 dark:bg-gray-900/85 backdrop-blur
+               ring-1 ring-black/5 dark:ring-white/10
+               hover:pl-2.5 transition-all active:scale-95"
+        :class="isFavorited ? 'text-rose-500' : 'text-gray-500 dark:text-gray-400 hover:text-rose-500'"
+        :title="isFavorited ? '取消收藏' : '收藏这部剧'"
+        @click="toggleFavorite"
+      >
+        <UIcon :name="isFavorited ? 'i-heroicons-heart-solid' : 'i-heroicons-heart'" class="w-5 h-5 shrink-0" />
+        <span class="hidden sm:block text-[10px] leading-tight tracking-wider" style="writing-mode: vertical-rl">
+          {{ isFavorited ? '已收藏' : '收藏' }}
+        </span>
+      </button>
+
       <button
         v-for="t in tabs"
         :key="t.id"
@@ -89,7 +110,7 @@
  * 本组件只管开合与版式，两块内容各自成组件（数据也各自去取），
  * 免得这里变成一个什么都知道的大文件。
  */
-const { isFullscreen, playlistLines } = useVideoPlayerCtx()
+const { isFullscreen, playlistLines, canFavorite, isFavorited, toggleFavorite } = useVideoPlayerCtx()
 
 type TabId = 'library' | 'lines'
 

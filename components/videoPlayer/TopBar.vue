@@ -80,6 +80,20 @@
         </span>
       </div>
 
+      <!--
+        收藏。摆在画面里而不是只放页面上：全屏时页面整个看不见，而「这部好看，留一下」
+        恰恰是看着看着才冒出来的念头。**认不出是哪部剧就不出**（手工贴地址播的列表收了也找不回来）
+      -->
+      <button
+        v-if="canFavorite"
+        class="p-2 rounded-lg shrink-0 transition-all active:scale-90"
+        :class="isFavorited ? 'text-rose-400 hover:bg-white/15' : 'text-white hover:bg-white/15'"
+        :title="isFavorited ? '取消收藏' : '收藏这部剧'"
+        @click="toggleFavorite"
+      >
+        <UIcon :name="isFavorited ? 'i-heroicons-heart-solid' : 'i-heroicons-heart'" class="w-5 h-5" />
+      </button>
+
       <button
         v-if="playlist.length > 1"
         class="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium shrink-0 transition-all active:scale-95"
@@ -105,6 +119,8 @@ const {
   playlistTitle, currentVideoName, playlist, currentIndex,
   showEpisodes, isFullscreen, controlsVisible,
   toggleFullscreen, keepControlsAlive,
+  // 收藏：三处按钮共用同一份状态（见 useVideoFavorite）
+  canFavorite, isFavorited, toggleFavorite,
   // 全屏顶栏那枚速度（时间/电量左边）：HLS 用聚合速度，整片 MP4 用「实测 / 需要」
   isHls, aggregateKBps, strategy, dualChannel,
   mp4AvgMbps, mp4Kbps, playbackRate,

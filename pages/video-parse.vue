@@ -108,6 +108,18 @@
             </UBadge>
           </div>
           <div class="flex gap-2">
+            <!-- 收藏：与播放器侧边抽屉里那份是同一份清单（按剧名存、跟着账号同步），
+                 所以在这里点一下，换台设备打开播放器就能在「收藏影片」里看到它 -->
+            <UButton
+              size="xs"
+              variant="ghost"
+              :color="faved ? 'rose' : 'gray'"
+              :icon="faved ? 'i-heroicons-heart-solid' : 'i-heroicons-heart'"
+              :title="faved ? '取消收藏' : '收藏这部剧，播放器侧边栏里能直接点开'"
+              @click="toggleFavCurrent"
+            >
+              {{ faved ? '已收藏' : '收藏' }}
+            </UButton>
             <UButton size="xs" variant="ghost" icon="i-heroicons-share" title="复制带地址和线路的本页链接" @click="copyPageLink">
               分享本页
             </UButton>
@@ -527,6 +539,27 @@ const resumeTarget = computed(() => {
   if (index <= 0) return null
   return { index, epName: eps[index]?.title || w.epName }
 })
+
+// ── 收藏 ──
+// 与播放器侧边抽屉共用同一份清单（`video-favorites`，按剧名存、跟着账号同步）。
+// 存的是「怎么再找到这部剧」：来源页 + 线路 + 封面，**一个播放地址都不存**（带签名，存下来就是死链）
+const { isFav, toggleFav } = useFavorites()
+const faved = ref(false)
+const favRef = () => ({ title: result.value?.title, pageUrl: result.value?.pageUrl })
+// 解析出新结果（或换了线路）就重算一次：这颗按钮的状态是「这部剧收了没」
+watch(result, () => { faved.value = isFav(favRef()) })
+
+const toggleFavCurrent = () => {
+  const r = result.value
+  if (!r) return
+  faved.value = toggleFav({
+    title: r.title || '',
+    pageUrl: r.pageUrl,
+    line: r.activeLineIndex,
+    lineName: currentLine.value?.name,
+    cover: r.cover,
+  })
+}
 
 /** 记录是在别的线路上记的：集数可能不一样，落点只能按集名/序号猜，要如实说出来 */
 const resumeOtherLine = computed(() =>
