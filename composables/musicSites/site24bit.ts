@@ -14,6 +14,7 @@
  */
 import type { MusicResolved, MusicSearchRow, MusicSite } from './types'
 import {
+  HEADERS_24BIT,
   build24bitDetailUrl,
   build24bitSearchBody,
   build24bitSearchUrl,
@@ -90,7 +91,8 @@ export const SITE_24BIT: MusicSite = {
     if (!auth.hasAuth.value && (source === 'one' || source === 'two')) {
       const relay = await viaLocalRelay(build24bitSearchUrl(source), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        // `HEADERS_24BIT`（Origin/Referer）必带，同服务端那条路——漏了这两个头逢发必 403
+        headers: { 'Content-Type': 'application/json', ...HEADERS_24BIT },
         body: build24bitSearchBody(kw, page),
       })
       if (relay?.status === 200) {
@@ -117,7 +119,7 @@ export const SITE_24BIT: MusicSite = {
     const auth = useMusic24bitAuth()
 
     if (!auth.hasAuth.value && (tier === 'b' || tier === 'c')) {
-      const relay = await viaLocalRelay(build24bitDetailUrl(tier, id))
+      const relay = await viaLocalRelay(build24bitDetailUrl(tier, id), { headers: HEADERS_24BIT })
       if (relay?.status === 200 && !isQuotaExhausted24bit(relay.body)) {
         const item = extractItemMusic24bit(relay.body)
         if (item?.url) return { ...toResolvedPayload(item), src: tier }

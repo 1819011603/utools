@@ -18,6 +18,16 @@ export const SEARCH_APIS_24BIT: Record<'one' | 'two', string> = {
   two: 'searchOnlineMusicTwo',
 }
 
+/**
+ * **两个接口都必带**，转发方（服务端 `musicFetch` 或浏览器中继）不管哪条路都要带上，
+ * 漏了 `Referer` 逢发必 403（实测确认过，见 `server/api/music/search.ts` 那条长注释）——
+ * 挪成常量导出，不然中继那条路很容易只顾着拼 URL/body、把这几个头漏掉（已经漏过一次）。
+ */
+export const HEADERS_24BIT: Record<string, string> = {
+  Origin: BASE_24BIT,
+  Referer: `${BASE_24BIT}/`,
+}
+
 export function build24bitSearchUrl(source: 'one' | 'two'): string {
   return `${BASE_24BIT}/api/player/${SEARCH_APIS_24BIT[source]}`
 }

@@ -23,7 +23,7 @@
  *
  * 实现约束同 proxy.ts：不静态 import 任何 `node:*`（Nitro preset 是 cloudflare-pages）。
  */
-import { build24bitSearchBody, build24bitSearchUrl, parse24bitSearchBody, toSearch24bitItems } from '~/utils/music24bitProtocol'
+import { HEADERS_24BIT, build24bitSearchBody, build24bitSearchUrl, parse24bitSearchBody, toSearch24bitItems } from '~/utils/music24bitProtocol'
 import { cfWallMessage, isCloudflareWall, musicFetch } from '../../utils/musicFetch'
 
 export default defineEventHandler(async (event) => {
@@ -44,17 +44,14 @@ export default defineEventHandler(async (event) => {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      // 站点自己发这个请求时 Origin 就是它自己；带上比不带稳（有的 WAF 拿它做一致性检查）
-      'Origin': 'https://www.24bit.net',
       'Accept': '*/*',
       /*
-       * **漏了这个头，这个接口每一发都过不了 CF**——实测确认过：完全相同的请求，
-       * 不带 Referer 恒 403 `Just a moment`，带上恒 200。之前一直以为是运气不好、
-       * 是「这一刻被判可疑」，其实是**必然**的：站点自己的前端发这个请求时，
-       * Referer 天然就是自己的页面，我们服务端替用户转发时没照抄这一条，
-       * 变成了「看起来像脚本」的请求，每次都被拦，跟出口 IP、跟运气都无关。
+       * `Origin`/`Referer`（`HEADERS_24BIT`）**必带**——漏了 `Referer` 这个接口每一发都过不了
+       * CF（实测确认过：完全相同的请求，不带恒 403 `Just a moment`，带上恒 200）。
+       * 挪成常量导出到 `utils/music24bitProtocol.ts`，本机中继那条路也要用同一份，
+       * 不然容易出现「服务端这条路带了、中继那条路漏了」的漂移（已经漏过一次）。
        */
-      'Referer': 'https://www.24bit.net/',
+      ...HEADERS_24BIT,
     },
     body: build24bitSearchBody(kw, page),
   })

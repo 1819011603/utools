@@ -11,11 +11,9 @@
  *
  * 实现约束同 proxy.ts：不静态 import 任何 `node:*`（Nitro preset 是 cloudflare-pages）。
  */
-import { build24bitDetailUrl, extractItemMusic24bit, isQuotaExhausted24bit, toResolvedPayload } from '~/utils/music24bitProtocol'
+import { HEADERS_24BIT, build24bitDetailUrl, extractItemMusic24bit, isQuotaExhausted24bit, toResolvedPayload } from '~/utils/music24bitProtocol'
 import { cfWallMessage, isCloudflareWall, musicFetch } from '../../utils/musicFetch'
 import { readUrlCache, writeUrlCache } from '../../utils/musicUrlCache'
-
-const BASE = 'https://www.24bit.net'
 
 export default defineEventHandler(async (event) => {
   const query = getQuery(event)
@@ -48,11 +46,8 @@ export default defineEventHandler(async (event) => {
    */
   const cookie = getRequestHeader(event, 'x-music-cookie')
 
-  /*
-   * **必须带 Referer**，同 `search.ts` 那处发现——不带这个头，详情页请求逢发必 403
-   * `Just a moment`，带上就稳定 200。不是出口 IP 的运气问题，是这个头本身缺了。
-   */
-  const page = await musicFetch(build24bitDetailUrl(prefix, id), { cookie, headers: { Referer: `${BASE}/` } })
+  // `HEADERS_24BIT` 必带，同 search.ts 那处发现——不带 Referer 这个接口逢发必 403
+  const page = await musicFetch(build24bitDetailUrl(prefix, id), { cookie, headers: HEADERS_24BIT })
 
   // 撞 CF 墙时说人话：本地开发下这几乎总是「dev server 带了 HTTPS_PROXY」造成的
   // （代理出口 IP 会被 Cloudflare 拦，实测直连 200、经代理 403）
