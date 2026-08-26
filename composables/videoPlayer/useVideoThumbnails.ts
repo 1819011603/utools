@@ -8,8 +8,9 @@
  *
  *   ① 正播着的画面每跨一个桶就顺手截一帧（`captureTick`）——帧已经在屏幕上了，
  *      零网络零解码器。往回拖（最常见的操作）时缩略图全是现成的。
- *   ② 悬浮到没截过的位置，才起一个隐藏解码器去解那一片，而且**先吃主播放已经下过的分片**
- *      （`getSegBuf`，预取缓存里那几十秒都算），真 miss 才下，且缓冲吃紧/濒卡/离线时整块让路。
+ *   ② 悬浮到没截过的位置，才起一个隐藏解码器去解那一片，而且**只吃主播放已经下过的分片**
+ *      （`getSegBuf`，预取缓存里那几十秒都算）——**缓存里没有就没有图，一个字节都不下**。
+ *      慢源上下一片要好几秒，图永远慢一大截才出来，而它抢的正是决定能不能播下去的那几条连接。
  *
  * 整片 MP4 不做：它的 `<video>` 是直连 CDN 的（`crossorigin` 一加就整个播不了，见 CLAUDE.md），
  * 画到 canvas 上必然污染，`toDataURL` 直接抛 SecurityError。HLS 走 MSE（src 是 `blob:`，同源）没这问题。
@@ -34,14 +35,18 @@ export interface VideoThumbnailsDeps {
   media: VideoMediaState
   /** 主播放已经下过的分片（预取缓存 + 播过的都在里面）→ 命中即零网络 */
   getSegBuf: (url: string) => ArrayBuffer | null
-  /** 必须跟主播放**完全一致**的连接配置：清单地址不一致，分片 URL 就对不上缓存，还多半 403 */
-  getProxyUrl: (url: string) => string
+  /**
+   * 主播放的 hls 实例。**分片表和分片 URL 全从它拿**，缩略图自己一次清单都不取——
+   * 那份清单主播放早就解析好了，再取一遍既慢（慢源上一两秒）又可能撞防盗链。
+   * 拿到的 `frag.url` 还天然与主播放的分片缓存同键，命中率最高。
+   */
+  getHls: () => any
   /** 缓冲健康区。吃紧/濒卡时一片都不许为缩略图下 */
   healthZone: () => string
 }
 
 export function useVideoThumbnails(deps: VideoThumbnailsDeps) {
-  const { media, getSegBuf, getProxyUrl, healthZone } = deps
+  const { media, getSegBuf, getHls, healthZone } = deps
   const { videoEl, videoUrl, isHls, hoverTime } = media
 
   /** 当前该显示的缩略图（dataURL）。'' = 这个位置还没有 */
@@ -137,95 +142,118 @@ export function useVideoThumbnails(deps: VideoThumbnailsDeps) {
     idleTimer = setTimeout(disposeDecoder, IDLE_DISPOSE_MS)
   }
 
-  /** 两道闸：缓冲吃紧一律让路（缩略图永远不该是画面卡住的原因），没网就别白试 */
+  /**
+   * 两道闸：缓冲吃紧一律让路（缩略图永远不该是画面卡住的原因），没网就别白试。
+   * 分片已经完全不走网络了，这道闸现在管的是**要不要建解码器**——建一次要取清单、
+   * 可能还要取密钥，吃紧时连这几 KB 也别去抢。
+   */
   const mayFetch = () => {
     const z = healthZone()
     return z !== 'panic' && z !== 'low' && !isOffline()
   }
 
   /**
-   * 缩略图专用 loader（清单 / 密钥 / 分片**全都走它**）：命中主播放的分片缓存就直接交货，
-   * miss 才自己下，而且下的方式必须跟主播放**完全同形**。
+   * 缩略图专用 loader：**一切数据都从主播放手上要，一个网络请求都不发**。
    *
-   * 踩过：miss 时直接 `super.load()` 交给 hls.js 默认的 XHR loader，结果分片一律 **403**
-   *（缩略图空白，Network 里那一条写着 `strict-origin-when-cross-origin`）。两个原因缺一不可：
-   *   · **XHR 发得出 Referer**，而这些 CDN 认防盗链 —— 主播放那条路是
-   *     `fetch(..., { referrerPolicy: 'no-referrer' })`，从来不带；
-   *   · **没过连接策略**：该走 `/api/proxy` 注入 Origin/Referer 的源，直连必然被拒。
-   * 所以这里自己 `fetch`：先 `getProxyUrl`（幂等，已经是代理地址就原样返回）、再 `no-referrer`。
-   * 这也顺带让缩略图能吃到浏览器对主播放那些分片的 HTTP 缓存 —— 两边 URL 一模一样。
+   * 清单是我们自己拼的 `blob:`（见 miniPlaylist），hls.js 拿它当普通 URL 请求，
+   * 这里直接把文本交回去；分片则去主播放的缓存里取，取不到就报错——那一桶没有图而已。
    *
-   * 回调里的 `url` 用 **`res.url`（重定向后的最终地址）**：hls.js 拿它当基准还原相对分片 URI，
-   * 传原始地址的话，一旦清单 302 到别的 host/端口，解出来的分片地址全是错的（CLAUDE.md 里那条）。
+   * 踩过：原来 miss 时交给 hls.js 默认的 XHR loader 自己下，结果分片一律 **403**
+   *（Network 里那条写着 `strict-origin-when-cross-origin`）：XHR 发得出 Referer，
+   * 而这些 CDN 认防盗链；主播放那条路是 `fetch(..., { referrerPolicy: 'no-referrer' })`。
+   * 现在这条路整个不存在了 —— 慢源上下一片要好几秒，图永远慢一大截才出来，
+   * 而它抢的正是「决定能不能播下去」的那几条连接。
    *
    * **交货必须延到下一个宏任务**——跟主播放那份 fLoader 是同一个坑（见 prefetch/fragLoader.ts
    * 里那段长注释）：hls.js 在 `load()` **返回之后**才把这一片记成「在加载中」，
    * 同步回调等于在它记账之前把结果交出去，那一片被当成无主的丢掉，而它永远停在「还在等」。
    */
   const makeLoader = (Hls: any) => class ThumbLoader extends (Hls.DefaultConfig.loader as any) {
-    thumbAbort: AbortController | null = null
-
     load(context: any, config: any, callbacks: any) {
-      // 分片要的是二进制，清单要的是文本。这个 loader 三种请求都接，按它分流
-      const isSeg = context.responseType === 'arraybuffer'
       this.context = context
       this.stats.loading.start = performance.now()
 
-      const hit = isSeg ? getSegBuf(context.url) : null
-      if (hit) {
+      const deliver = (data: ArrayBuffer | string) => {
         setTimeout(() => {
           if (this.stats.aborted) return
-          this.stats.loaded = this.stats.total = hit.byteLength
+          this.stats.loaded = this.stats.total = typeof data === 'string' ? data.length : data.byteLength
           this.stats.chunkCount = 1
           this.stats.loading.first = this.stats.loading.end = performance.now()
-          callbacks.onSuccess({ data: hit, url: context.url }, this.stats, context)
+          callbacks.onSuccess({ data, url: context.url }, this.stats, context)
         }, 0)
-        return
       }
-
-      // 让路只拦分片：清单和密钥各只有一发、几 KB，拦掉它们等于整个解码器建不起来
-      if (isSeg && !mayFetch()) {
-        setTimeout(() => callbacks.onError({ code: 0, text: '缩略图让路：缓冲吃紧' }, context, null, this.stats), 0)
-        return
-      }
-
-      const ctrl = new AbortController()
-      this.thumbAbort = ctrl
-      let finalUrl = context.url
-      fetch(getProxyUrl(context.url), { signal: ctrl.signal, referrerPolicy: 'no-referrer' })
-        .then((res) => {
-          if (!res.ok) throw new Error('HTTP ' + res.status)
-          finalUrl = res.url || context.url
-          return isSeg ? res.arrayBuffer() : res.text()
-        })
-        .then((data: ArrayBuffer | string) => {
+      const fail = (text: string) => {
+        setTimeout(() => {
           if (this.stats.aborted) return
-          const len = typeof data === 'string' ? data.length : data.byteLength
-          this.stats.loaded = this.stats.total = len
-          this.stats.chunkCount = 1
-          this.stats.loading.first = this.stats.loading.end = performance.now()
-          callbacks.onSuccess({ data, url: finalUrl }, this.stats, context)
-        })
-        .catch((e: any) => {
-          // 中止是我们自己干的（换桶/拆解码器），不是失败，报上去只会让 hls.js 走一轮重试
-          if (this.stats.aborted || ctrl.signal.aborted) return
-          callbacks.onError({ code: 0, text: '缩略图取片失败：' + (e?.message || e) }, context, null, this.stats)
-        })
-    }
+          callbacks.onError({ code: 0, text }, context, null, this.stats)
+        }, 0)
+      }
 
-    abort() {
-      try { this.thumbAbort?.abort() } catch { /* 已经中止过 */ }
-      super.abort()
-    }
+      // 清单：就是我们自己拼的那份，直接交（连 blob: 的那一次 fetch 都省了）
+      if (context.responseType !== 'arraybuffer') {
+        const text = playlistText.get(context.url)
+        text ? deliver(text) : fail('缩略图：没有这份清单')
+        return
+      }
 
-    destroy() {
-      try { this.thumbAbort?.abort() } catch { /* 同上 */ }
-      super.destroy()
+      const hit = getSegBuf(context.url)
+      hit ? deliver(hit) : fail('缩略图不下分片：这一片不在缓存里')
     }
+  }
+
+  /**
+   * 主播放当前这条流的分片表。**只读它、不请求它**：这份表是主播放解析清单时就有的，
+   * 缩略图再取一遍清单既慢（慢源上一两秒）又可能撞防盗链，而且拿到的还是同一份东西。
+   */
+  const mainFrags = (): any[] => {
+    try {
+      const hls = getHls()
+      const level = hls?.levels?.[hls.currentLevel >= 0 ? hls.currentLevel : (hls.firstLevel ?? 0)]
+      return level?.details?.fragments ?? []
+    } catch {
+      return []
+    }
+  }
+
+  /** 时间点落在哪一片上 */
+  const fragAt = (t: number): any | null =>
+    mainFrags().find(f => t >= f.start && t < f.start + f.duration) ?? null
+
+  /**
+   * 只含**一片**的迷你清单，拿 `blob:` 喂给解码器。
+   *
+   * 这样做的好处一次全占了：不请求真清单（省一发网络、绕开防盗链）、解码器只认识这一片
+   *（不会自作主张往后预读）、分片 URL 直接用主播放那份（与分片缓存**同键**，命中率最高）。
+   *
+   * 加密流（`EXT-X-KEY`）这里**不处理**：密钥要另取一发网络，而且各站的 IV/METHOD 都要还原，
+   * 为一张缩略图不值得。那种源上就是没有图——已经播过的位置仍有「白捡」那一路兜着。
+   */
+  const playlistText = new Map<string, string>()
+  const blobUrls: string[] = []
+
+  const miniPlaylist = (frag: any): string | null => {
+    if (!frag?.url || frag.encrypted || frag.levelkeys) return null
+    const lines = [
+      '#EXTM3U',
+      '#EXT-X-VERSION:3',
+      `#EXT-X-TARGETDURATION:${Math.ceil(frag.duration) || 10}`,
+      '#EXT-X-MEDIA-SEQUENCE:0',
+    ]
+    // fMP4（CMAF）的分片单独喂没用，必须带上 init 段
+    const init = frag.initSegment?.url
+    if (init) lines.push(`#EXT-X-MAP:URI="${init}"`)
+    lines.push(`#EXTINF:${(frag.duration || 10).toFixed(3)},`, frag.url, '#EXT-X-ENDLIST')
+    const text = lines.join('\n')
+    const url = URL.createObjectURL(new Blob([text], { type: 'application/vnd.apple.mpegurl' }))
+    playlistText.set(url, text)
+    blobUrls.push(url)
+    return url
   }
 
   const ensureDecoder = async (): Promise<boolean> => {
     if (thumbHls && thumbVideo && decoderFor === videoUrl.value) return true
+    // 建解码器本身不花网络了，但它要占一个解码器 + 一份 MediaSource。吃紧/离线时别添乱
+    if (!mayFetch()) return false
     if (decoderFor && decoderFor !== videoUrl.value) disposeDecoder()   // 换集了，旧解码器作废
     if (thumbHls && thumbVideo) return true
 

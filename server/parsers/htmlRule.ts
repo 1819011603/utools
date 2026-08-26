@@ -6,7 +6,7 @@
  */
 import type { HtmlSourceTask, ParseRule, ParsedEpisode, ParsedLine, ParseResult } from '../../composables/videoParseRules'
 import type { ParserContext, SiteParser } from './types'
-import { absolutize, decodeEntities, decodeMaccmsUrl, decodeScannedBase64, hostOf, parseCategory, parseCover, parseTitle, pool } from './utils'
+import { absolutize, decodeEntities, decodeMaccmsUrl, decodeScannedBase64, findDetailUrl, hostOf, parseCategory, parseCover, parseTitle, pool } from './utils'
 import { cdndefendChallenge } from './challenges/cdndefend'
 import { isM3u8Url } from '../../utils/mediaUrl'
 
@@ -73,6 +73,48 @@ async function resolvePlayer(rule: ParseRule, ctx: ParserContext, html: string):
   } catch {
     return NO_PLAYER
   }
+}
+
+/**
+ * 按规则抠封面（`ParseRule.coverRe` + 可选的 `coverBase`）。**只该拿详情页的 HTML 喂进来**
+ * ——播放页上那些 `/vod1/vod/cover/…` 全是「猜你喜欢」里别人家的封面（见 coverRe 的注释）。
+ *
+ * `coverBase` 那一跳（去站点自己的 js 里现抠可用图床域名）按 host 缓存：那个值全站通用、
+ * 极少变，而每部剧都要用一次，不缓存等于每次解析都多抓一个 js。
+ * 与搜索侧 `SearchRule.picBase` 是同一套做法，只是那边的缓存在 `server/api/search.ts` 里。
+ */
+const coverBaseCache = new Map<string, { base: string; at: number }>()
+const COVER_BASE_TTL = 30 * 60 * 1000
+
+export async function coverFromRule(
+  html: string,
+  pageUrl: string,
+  rule: ParseRule,
+  fetchPage: (url: string) => Promise<{ status: number; body: string }>,
+): Promise<string | undefined> {
+  if (!rule.coverRe) return undefined
+  const raw = html.match(new RegExp(rule.coverRe, 'i'))?.[1]
+  if (!raw) return undefined
+  const path = decodeEntities(raw)
+  if (/^https?:\/\//i.test(path)) return path
+
+  const cfg = rule.coverBase
+  if (!cfg) return absolutize(path, pageUrl)
+
+  const host = hostOf(pageUrl)
+  const hit = coverBaseCache.get(host)
+  let base = hit && Date.now() - hit.at < COVER_BASE_TTL ? hit.base : ''
+  if (!base) {
+    try {
+      const jsUrl = html.match(new RegExp(cfg.fromRe, 'i'))?.[1]
+      if (jsUrl) {
+        const js = await fetchPage(absolutize(decodeEntities(jsUrl), pageUrl))
+        if (js.status === 200) base = js.body.match(new RegExp(cfg.re, 'i'))?.[1] ?? ''
+      }
+    } catch { /* 抠不到图床就退回站点域名，大不了那张图 403，退成占位块 */ }
+    if (base) coverBaseCache.set(host, { base, at: Date.now() })
+  }
+  return absolutize(path, base || pageUrl)
 }
 
 /** 解析线路 × 选集表。适用于「所有线路的选集都渲染在同一页」的站点。 */
@@ -209,13 +251,37 @@ export function createHtmlParser(rule: ParseRule): SiteParser {
         throw createError({ statusCode: 502, statusMessage: '页面结构不匹配，规则需要更新' })
       }
 
+      /**
+       * 封面与分类：只给「播放历史 / 收藏」那两份清单用（缩略图 + 筛选）。
+       *
+       * **播放页抠不到就跟一跳去详情页**（实测 ncat22 的封面只挂在 `/detail/5789.html` 上，
+       * 播放页一个 `og:image` 都没有）。只在整表解析时跟：`only=1` 是按需取址的单集请求，
+       * 一集一发，为一张图给每集都多打一次源站站不住脚，何况那时封面早就有了。
+       * 全程静默——封面是锦上添花，为它让整次解析失败或变慢都不划算。
+       */
+      let cover = parseCover(html, ctx.pageUrl)
+      let cat = parseCategory(html)
+      if (!cover && !ctx.only) {
+        const detailUrl = findDetailUrl(html, ctx.pageUrl)
+        if (detailUrl) {
+          try {
+            const d = await ctx.fetchPage(detailUrl, ctx.cookie)
+            if (d.status === 200) {
+              // 详情页上：先试通用的 og:image，再试规则里那条（连 og:image 都不写的站点）
+              cover = parseCover(d.body, detailUrl)
+                || await coverFromRule(d.body, detailUrl, rule, u => ctx.fetchPage(u, ctx.cookie))
+              cat = cat || parseCategory(d.body)
+            }
+          } catch { /* 详情页抓不到就没有封面，不影响解析本身 */ }
+        }
+      }
+
       const base = {
         ruleId: rule.id,
         ruleName: rule.name,
         title: (rule.titleRe && decodeEntities(html.match(new RegExp(rule.titleRe, 'i'))?.[1] ?? '')) || parseTitle(html),
-        // 封面与分类：只给「播放历史 / 收藏」那两份清单用（缩略图 + 筛选），抠不到就没有
-        cover: parseCover(html, ctx.pageUrl),
-        cat: parseCategory(html),
+        cover,
+        cat,
         pageUrl: ctx.pageUrl,
         currentVideoUrl,
         embedUrl: source.embedUrl,

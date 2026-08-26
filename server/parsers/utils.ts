@@ -70,6 +70,33 @@ export function parseCover(html: string, pageUrl: string): string | undefined {
 }
 
 /**
+ * 从**播放页**找到它的**详情页**地址。
+ *
+ * 由来：不少站点的播放页压根没有海报（实测 ncat22 的 `/play/5789-41-288141.html` 抠不到，
+ * 封面只挂在 `/detail/5789.html` 上）。解析这类站时跟一跳过去取一次即可。
+ * 注意方向与 `detailPlayUrl` **正好相反**：那个是「详情页 → 第 1 集播放页」（为了拿地址），
+ * 这个是「播放页 → 详情页」（为了拿封面）。
+ *
+ * **必须靠影片 id 认，不能见到详情链接就跟**：播放页底下普遍挂着「猜你喜欢」「同类推荐」，
+ * 那一片全是**别的片子**的详情页链接，随手取第一个的结果是封面张冠李戴——
+ * 而这种错误在界面上完全看不出来（图是好的，只是不是这部剧）。
+ * 播放页地址里那串数字就是影片 id（`/play/5789-41-…`、`/play/44693-1-1/`），
+ * 认不出 id 就**宁可不跟**。
+ */
+export function findDetailUrl(html: string, pageUrl: string): string | undefined {
+  const id = pageUrl.match(/\/(?:play|vodplay|vod)\/(\d{2,})/i)?.[1]
+  if (!id) return undefined
+  const re = /href="([^"]*\/(?:detail|voddetail|vod|movie|video)\/[^"#]*)"/gi
+  for (const m of html.matchAll(re)) {
+    const href = decodeEntities(m[1])
+    if (!href.includes(id)) continue
+    const abs = absolutize(href, pageUrl)
+    if (abs !== pageUrl) return abs
+  }
+  return undefined
+}
+
+/**
  * 分类（「电视剧」「电影」「动漫」…）。给播放历史/收藏那两份清单当筛选项用。
  *
  * 各站页面结构千差万别，**唯一稳定的共同点是分类链接**：MacCMS 系是 `/vodtype/4/`、
