@@ -5,7 +5,7 @@ import type { VideoMediaState } from './useVideoMediaState'
 import type { VideoHandoff } from './useVideoHandoff'
 import { useLazyUrlResolver } from './playlist/lazyUrlResolver'
 // 只依赖最底层的本机账本，不认识同步引擎本身（方向见 cloudSyncLocal 文件头）
-import { requestSyncFlush } from '../cloudSyncLocal'
+import { onSyncApplied, requestSyncFlush } from '../cloudSyncLocal'
 
 export interface VideoPlaylistDeps {
   media: VideoMediaState
@@ -149,6 +149,15 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
 
   // 列表换了（解析出新的一份 / 从 savedState 恢复 / 手工贴一批）就重算一次
   watch([playlist, () => handoff.playlistTitle.value], () => findResumeHint(), { flush: 'post' })
+
+  /**
+   * **云端的追剧进度到货了也要重算**：页面打开那一发同步是异步的，多半比起播晚。
+   * 不重算的话，另一台设备上追到的集数拉回来了、界面上却还是本机那份旧值
+   * ——用户看到的就是「两台机器对不上」。`findResumeHint` 自己带着那几条闭嘴规则
+   *（用户动过集数就永久不提），所以这里无条件调是安全的。
+   */
+  const offWatchSync = onSyncApplied('video-watch', () => findResumeHint())
+  onScopeDispose(() => offWatchSync())
 
   /**
    * **用户一旦自己动过集数，这条提示就永久闭嘴**（本次会话内）。

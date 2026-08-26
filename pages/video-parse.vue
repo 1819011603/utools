@@ -483,6 +483,8 @@
 
 <script setup lang="ts">
 import type { WatchRecord } from '~/composables/useWatchHistory'
+// 普通导出显式 import（不是 use* 组合式，靠自动导入会被数组常量那个坑吃掉，见 CLAUDE.md）
+import { onSyncApplied } from '~/composables/cloudSyncLocal'
 import type { ParsedEpisode, ParseResult, ParseRule } from '~/composables/videoParseRules'
 import type { ProbeVerdict } from '~/composables/videoPlayer/useReachabilityProbe'
 
@@ -527,6 +529,14 @@ const historySite = (url: string): { label: string; known: boolean } => {
 // 记录按剧名存（换站、换线路也能续上），见 composables/useWatchHistory.ts
 const { findWatch, forgetWatch } = useWatchHistory()
 const resumeWatch = ref<WatchRecord | null>(null)
+
+// 云端的追剧进度到货了就重查一次：同步是异步的，多半比解析晚回来，
+// 不重查的话另一台设备追到的集数拉回来了、这条提示上还写着本机那份旧值
+const offWatchSync = onSyncApplied('video-watch', () => {
+  const r = result.value
+  if (r) resumeWatch.value = findWatch({ title: r.title, pageUrl: r.pageUrl })
+})
+onBeforeUnmount(() => offWatchSync())
 /** 用户在本次解析里点了「不用了」——只压这一次，不删记录（他可能只是想先看别的集） */
 const resumeDismissed = ref(false)
 

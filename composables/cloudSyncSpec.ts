@@ -24,6 +24,14 @@ export const SYNC_COLLECTIONS: SyncSpec[] = [
     // 与 useWatchHistory 的 MAX_SHOWS 一致
     cap: 200,
     timeOf: r => Number(r?.at) || 0,
+    /**
+     * **同一部剧以本机那条为准**（不同的剧是不同的键，照旧取并集，两边的都留着）。
+     *
+     * 这台设备上正看着的那部剧，本地那条记的就是眼前正在发生的观看；
+     * 让远端按时间戳把它顶掉的话，续看提示会当场跳到另一台的集数上。
+     * 代价是同一部剧变成「谁最后同步谁赢」而不是「谁看得晚谁赢」。
+     */
+    preferLocal: true,
   },
   {
     id: 'video-fav',

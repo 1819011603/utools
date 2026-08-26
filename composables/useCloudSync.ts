@@ -221,8 +221,14 @@ export function useCloudSync() {
    * `force` 只给用户手点的「立即同步」用：那是明确的意图，不是后台轮询，
    * 不该被 5 分钟窗口挡在外面（「有变更才同步」那道闸对它同样豁免——
    * 用户点它往往正是因为想把另一台设备的改动拉过来）。
+   *
+   * `checkRemote` 给「打开页面 / 回到前台」：**只为问一句「云端变了没」**。
+   * 「有变更才同步」原本把**拉取**也一起挡住了——本机没有待上传的改动时一个请求都不发，
+   * 于是另一台设备的更新永远不知道，表现就是**「两台机器状态不一致、看着像本地优先」**。
+   * 现在问这一句只要一发 `?meta=1`（几十字节，见 cycle），云端没变就到此为止、
+   * 一个正文都不取，所以这道豁免不会把「省请求」那个初衷吃掉。
    */
-  const syncNow = async (opts: { force?: boolean; skipThrottle?: boolean } = {}): Promise<boolean> => {
+  const syncNow = async (opts: { force?: boolean; skipThrottle?: boolean; checkRemote?: boolean } = {}): Promise<boolean> => {
     if (typeof window === 'undefined' || !auth.token.value || syncing.value) return false
 
     const meta = pruneUnknown(readMeta())
@@ -230,9 +236,8 @@ export function useCloudSync() {
     const neverSynced = Object.keys(meta.rev).length === 0
 
     if (!opts.force) {
-      // 「有变更才同步」这道闸**对谁都不豁免**（除了用户手点的 force）：
-      // 没改过还发一轮请求纯属白跑
-      if (!hasDirty && !neverSynced) return false
+      // 没改过、也不是要问云端 → 白跑一轮，不发
+      if (!hasDirty && !neverSynced && !opts.checkRemote) return false
       // `skipThrottle` 给「按下暂停」那一路：它是个真实的好时机（进度刚落库、人要走开了），
       // 不该被 5 分钟窗口挡住。跑完 lastSyncAt 就更新了，窗口自然从那一刻重新开始算
       if (!opts.skipThrottle && Date.now() - meta.lastSyncAt < THROTTLE_MS) {
@@ -283,14 +288,24 @@ export function useCloudSync() {
     // 「现在就同步」——目前唯一的发起方是**用户按下暂停**（见 cloudSyncLocal.requestSyncFlush）。
     // 豁免 5 分钟节流但仍要求有改动；跑完节流窗口从那一刻重新开始算
     onFlushRequest(() => { void syncNow({ skipThrottle: true }) })
-    // 切走/关页时补一发，但仍受两道闸约束（没改过就不发）
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden') void syncNow()
+      // 切走：把本机的改动补推上去（没改过就不发）
+      if (document.visibilityState === 'hidden') { void syncNow(); return }
+      /**
+       * **回到前台：问一句云端变了没**。这台设备刚才可能在另一台上被追了几集，
+       * 不问的话它会一直拿着本地旧值（用户看到的就是「两台机器状态不一致」）。
+       * 受 5 分钟节流约束——来回切标签页不该每次都发。
+       */
+      void syncNow({ checkRemote: true })
     })
     window.addEventListener('pagehide', () => { void syncNow() })
     // 刚登录的那台设备 rev 是空的，这一发会真的拉；已经同步过又没改动的则原地返回
     watch(auth.token, t => { if (t) void syncNow({ force: true }) })
-    void syncNow()
+    /**
+     * 页面打开这一发**豁免节流也豁免「有变更才同步」**：用户刚在这台设备上打开站点，
+     * 正是最需要拿到另一台设备最新进度的时刻，而这一发在云端没变时只花一个 `?meta=1`。
+     */
+    void syncNow({ checkRemote: true, skipThrottle: true })
   }
 
   return { syncing, lastOkAt, syncError, pendingChanges, storeKind, syncNow, start }

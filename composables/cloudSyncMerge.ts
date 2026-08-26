@@ -53,6 +53,17 @@ export interface SyncSpec {
   keyOf?: (item: any) => string
   /** 一条的时间戳，合并的先后与墓碑比对都看它 */
   timeOf: (item: any) => number
+  /**
+   * 同一个键两边都有时**取本机那条**，不比时间（追剧进度就是这样：`video-watch`）。
+   *
+   * 理由是「这台设备上我正看着这部剧」比「另一台的时间戳更新」更可信：
+   * 本地那条是眼前正在发生的观看，被远端顶掉的话续看提示会当场跳到另一台的集数上。
+   * **不同的剧不受影响**——那是不同的键，照旧取并集，两边的剧都留着。
+   *
+   * 代价要认：同一部剧上「谁最后同步谁赢」，而不是「谁看得晚谁赢」。
+   * 在 A 上追到 20 集、B 上只打开过第 3 集的话，B 同步之后云端就是第 3 集。
+   */
+  preferLocal?: boolean
   /** 合并结果落盘后额外要做的事（刷新那些持在模块级 ref 里的状态） */
   onApplied?: () => void
 }
@@ -139,7 +150,9 @@ function mergeMap(spec: SyncSpec, local: any, cloud: any, tomb: Tomb, clearedAt:
   for (const k of new Set([...Object.keys(l), ...Object.keys(c)])) {
     const a = l[k]
     const b = c[k]
-    const v = a === undefined ? b : b === undefined ? a : pickNewer(spec, a, b)
+    // 两边都有这一条时才谈得上「谁赢」：preferLocal 的那几份一律本机说了算（见那个字段的注释），
+    // 其余按时间。**只有一边有的照旧留下**——不同的剧是不同的键，谁也不会被对方顶掉
+    const v = a === undefined ? b : b === undefined ? a : (spec.preferLocal ? a : pickNewer(spec, a, b))
     if (v === undefined || v === null) continue
     const t = spec.timeOf(v) || 0
     if ((tomb[k] ?? 0) >= t || clearedAt >= t) continue
