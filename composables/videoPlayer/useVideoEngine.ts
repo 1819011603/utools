@@ -761,8 +761,9 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     clearStartAnchor, isArrivingAtStart, getAppliedStartPos,
     isRelocatingStart, clearRelocating,
     forceRecomposite, videoTransform,
-    // 统计
-    updateHlsStats,
+    // 统计。getHls 只给「读一眼当前档位的编码/帧率/声明码率」这类展示用（见 useVideoContextMenu）——
+    // 别拿它去外部驱动 hls.js 的生命周期，那一律走上面几个方法
+    updateHlsStats, getHls: () => hls,
   }
 }
 

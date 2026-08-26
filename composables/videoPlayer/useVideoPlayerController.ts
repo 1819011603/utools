@@ -77,6 +77,8 @@ export function useVideoPlayerController() {
   const controls = useVideoUiControls({ media, autoTune, playlist })
   // 手势层建在控制层之上：它把「一次指针交互」翻译成控制层已有的动作
   const gestures = useVideoGestures({ media, controls, autoTune })
+  // 右键菜单/媒体信息面板：只读裸状态 + 问引擎要一眼当前档位，不参与任何加载决策
+  const contextMenu = useVideoContextMenu({ media, getHls: engine.getHls })
 
   // ── 持久化 ──
 
@@ -232,6 +234,7 @@ export function useVideoPlayerController() {
     engine.clearLoadTimeout()
     controls.unbindGlobalKeys()
     gestures.disposeGestures()
+    contextMenu.disposeContextMenu()
     events.disposeEvents()
     window.removeEventListener('beforeunload', playlist.saveCurrentProgress)
   }
@@ -251,6 +254,7 @@ export function useVideoPlayerController() {
     ...prewarm,
     ...controls,
     ...gestures,
+    ...contextMenu,
     ...events,
     ...query,
     saveState, mount, unmount,

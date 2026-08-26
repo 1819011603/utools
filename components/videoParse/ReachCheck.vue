@@ -176,15 +176,59 @@ const runDecodeProbe = async (r: ProbeResult, mine: number) => {
     })
     hls.attachMedia(video)
     hls.loadSource(manifestUrl)
+    /*
+     * **开头那几帧一律不算**：不少源站在正片前面拼了一段贴片/广告，编码跟正片压根不是一个
+     * （实测 ylsp 某剧前 8.1 秒是 1920×1080@30 的贴片、正片是 1920×808@25），
+     * 照头一帧报数就是「解析页写 1080p、点进去变 808p」
+     * （播放器那边播过去之后靠 `resize` 自己就修正了，只有这里会把贴片的数字一直挂着）。
+     *
+     * 判据是「往里跳一段再取」，**不去解 `#EXT-X-DISCONTINUITY`**：有的站压根不打这个标记、
+     * 只是把两段拼起来，那时分界点无从可查，而这个办法不在乎它有没有标记。
+     * 代价也一样——两种都只多付一片的下载。
+     */
+    const EVENTS = ['loadedmetadata', 'resize', 'seeked']
+    /**
+     * 取样位置：时长的 10%，夹在 15~120s，且离片尾留 5s。
+     * 贴片都在片头、几十秒的量级，10% 对一集正片（几十分钟）来说远远够；封 120s 是因为
+     * 再往里跳并不会更准，只是让那一片下得更久。片子本身太短（≤8s，多半是坏源）就不跳了。
+     */
+    const samplePos = (d: number) => (d > 8 ? Math.min(Math.max(d * 0.1, 15), 120, d - 5) : 0)
+
+    let target = 0
+    const settled = () => !!video.videoWidth && !!video.videoHeight && video.currentTime >= target
     await new Promise<void>(resolve => {
-      const done = () => { video.removeEventListener('loadedmetadata', done); resolve() }
-      video.addEventListener('loadedmetadata', done)
-      setTimeout(resolve, 8000)   // 兜底：拿不到就算了，别让检测卡在这一步；与探测本身的单通道超时对齐
+      const done = () => {
+        // 头一次拿到元数据才知道总时长 → 这时才算得出该跳到哪。target 只定一次
+        if (!target) {
+          target = samplePos(video.duration)
+          if (target > 0) { video.currentTime = target; return }
+        }
+        if (!settled()) return
+        for (const ev of EVENTS) video.removeEventListener(ev, done)
+        resolve()
+      }
+      /*
+       * 三个事件都要听，各补一种情况：
+       * · `loadedmetadata` —— 第一次拿到尺寸（也是发起 seek 的时机）
+       * · `resize` —— 跳过去之后分辨率变了（就是这个坑本身）
+       * · `seeked` —— 取样点跟片头**分辨率相同**时 resize 不会来，只有它能收工；
+       *   少了它这种流会一路干等到超时（结论对，但每次检测白等十几秒）
+       */
+      for (const ev of EVENTS) video.addEventListener(ev, done)
+      // 兜底：拿不到就算了，别让检测卡在这一步。比单通道超时（8s）多留 4s 给这一次 seek
+      setTimeout(resolve, 12000)
     })
     if (mine === seq && video.videoWidth && video.videoHeight) {
       decodedRes.value = `${video.videoHeight}p`
+      // 跳到位没跳到位要分开说：取样那一片下不下来（比如密钥取不到）时会一路等到超时，
+      // 此时读到的仍是片头那一段的尺寸——那种情况报「已取样」就是骗自己
+      if (target > 0) {
+        const ok = video.currentTime >= target
+        console.log(`[清晰度探测] ${ok ? '取样点' : '⚠️ 没跳到取样点（读数可能是片头贴片的）'}`,
+          { target: +target.toFixed(1), currentTime: +video.currentTime.toFixed(1), res: decodedRes.value })
+      }
     } else if (mine === seq) {
-      console.log('[清晰度探测] 超时未解出尺寸:', { videoWidth: video.videoWidth, videoHeight: video.videoHeight, readyState: video.readyState })
+      console.log('[清晰度探测] 超时未解出尺寸:', { videoWidth: video.videoWidth, videoHeight: video.videoHeight, readyState: video.readyState, target })
     }
   } catch (e) {
     console.log('[清晰度探测] 异常（不影响可达性结论）:', e)

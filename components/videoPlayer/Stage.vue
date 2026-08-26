@@ -29,7 +29,7 @@
       @pointercancel="onPointerCancel"
       @click="onClick"
       @dblclick="onDblClick"
-      @contextmenu.prevent
+      @contextmenu="openContextMenu"
     >
       <!--
         **不加 `crossorigin`**：HLS 走 MSE（src 是 blob，这属性对它毫无意义），而整片 MP4 直连时
@@ -230,6 +230,9 @@
       <VideoPlayerControlBar />
 
       <VideoPlayerEpisodeOverlay />
+
+      <!-- 右键菜单 + 它开出来的媒体信息面板（挂在容器内：容器就是全屏元素） -->
+      <VideoPlayerContextMenu />
     </div>
 
     <!--
@@ -376,6 +379,7 @@ const {
   onCanPlayThrough, onSeeking, onSeeked, onPlaying, onPause, onVolumeChange, onVideoError,
   // 清晰度徽标：播放器信息条和全屏顶栏（TopBar）共用同一份（见 useVideoEvents.videoRes）
   onVideoResize, videoRes,
+  openContextMenu,   // 右键菜单：本体在 VideoPlayerContextMenu，这里只要开菜单这一个入口
 } = useVideoPlayerCtx()
 
 // 维持**当前倍速**需要多少 KB/s。倍速是乘上去的：3x 要 3 倍码率的持续供给
