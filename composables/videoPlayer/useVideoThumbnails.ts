@@ -340,10 +340,10 @@ export function useVideoThumbnails(deps: VideoThumbnailsDeps) {
         chunks.push(value)
         got += value.byteLength
       }
-      // 整片比 limit 还小（短分片）时读到了 done，那就是完整的一片
+      // 读到了 done = 手上是完整的一片（limit 给 Infinity 的那一档、或分片本来就比 limit 小）
       const complete = got < limit
       try { await reader.cancel() } catch { /* 已经读完了 */ }
-      if (!complete) ctrl.abort()      // 上游不认 Range 时，这一下才是真正止住流量的那个动作
+      if (!complete) ctrl.abort()      // 真正止住流量的就是这一下（服务端还在发，我们把连接掐了）
 
       const buf = new Uint8Array(got)
       let off = 0
