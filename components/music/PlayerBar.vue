@@ -211,15 +211,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
     >
       <UIcon name="i-heroicons-exclamation-triangle" class="w-4 h-4 mt-0.5 shrink-0" />
       <span class="flex-1">{{ errorMessage }}</span>
-      <UButton
-        icon="i-heroicons-x-mark"
-        color="gray"
-        variant="ghost"
-        size="2xs"
-        title="关闭"
-        aria-label="关闭提示"
-        @click="dismissError"
-      />
+      <UTooltip text="关闭" :popper="{ placement: 'top' }">
+        <UButton
+          icon="i-heroicons-x-mark"
+          color="gray"
+          variant="ghost"
+          size="2xs"
+          aria-label="关闭提示"
+          @click="dismissError"
+        />
+      </UTooltip>
     </div>
 
     <!-- 进度条：整条可点可拖，圆钮常显（触摸端没有 hover，藏起来等于没有抓手） -->
@@ -287,40 +288,42 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       <div class="flex items-center gap-1 shrink-0">
         <!-- 「上一首」窄屏收进「更多」：手机上一行只放得下四五个可点区，
              而它远不如播放/下一首常用（同 QQ 音乐移动端的取舍） -->
-        <UButton
-          icon="i-heroicons-backward"
-          color="gray"
-          variant="ghost"
-          size="sm"
-          class="hidden md:inline-flex"
-          :disabled="!hasQueue"
-          title="上一首"
-          aria-label="上一首"
-          @click="playPrev"
-        />
-        <UButton
-          :icon="isResolving || isBuffering
-            ? 'i-heroicons-arrow-path'
-            : isPlaying ? 'i-heroicons-pause' : 'i-heroicons-play'"
-          :class="(isResolving || isBuffering) && 'animate-spin'"
-          color="primary"
-          variant="solid"
-          size="sm"
-          :disabled="!current"
-          :title="isPlaying ? '暂停' : '播放'"
-          :aria-label="isPlaying ? '暂停' : '播放'"
-          @click="togglePlay"
-        />
-        <UButton
-          icon="i-heroicons-forward"
-          color="gray"
-          variant="ghost"
-          size="sm"
-          :disabled="!hasQueue"
-          title="下一首"
-          aria-label="下一首"
-          @click="playNext"
-        />
+        <UTooltip text="上一首" :popper="{ placement: 'top' }" class="hidden md:inline-flex">
+          <UButton
+            icon="i-heroicons-backward"
+            color="gray"
+            variant="ghost"
+            size="sm"
+            :disabled="!hasQueue"
+            aria-label="上一首"
+            @click="playPrev"
+          />
+        </UTooltip>
+        <UTooltip :text="isPlaying ? '暂停' : '播放'" :popper="{ placement: 'top' }">
+          <UButton
+            :icon="isResolving || isBuffering
+              ? 'i-heroicons-arrow-path'
+              : isPlaying ? 'i-heroicons-pause' : 'i-heroicons-play'"
+            :class="(isResolving || isBuffering) && 'animate-spin'"
+            color="primary"
+            variant="solid"
+            size="sm"
+            :disabled="!current"
+            :aria-label="isPlaying ? '暂停' : '播放'"
+            @click="togglePlay"
+          />
+        </UTooltip>
+        <UTooltip text="下一首" :popper="{ placement: 'top' }">
+          <UButton
+            icon="i-heroicons-forward"
+            color="gray"
+            variant="ghost"
+            size="sm"
+            :disabled="!hasQueue"
+            aria-label="下一首"
+            @click="playNext"
+          />
+        </UTooltip>
       </div>
 
       <!--
@@ -335,15 +338,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       <!-- 右侧：音量（窄屏不渲染，触摸端没有 hover，滑条展不开）+ 循环 + 队列 -->
       <div class="flex items-center gap-1 shrink-0">
         <div class="hidden md:flex items-center gap-1">
-          <UButton
-            :icon="volumeIcon"
-            color="gray"
-            variant="ghost"
-            size="sm"
-            :title="isMuted ? '取消静音' : '静音'"
-            :aria-label="isMuted ? '取消静音' : '静音'"
-            @click="toggleMuted"
-          />
+          <UTooltip :text="isMuted ? '取消静音' : '静音'" :popper="{ placement: 'top' }">
+            <UButton
+              :icon="volumeIcon"
+              color="gray"
+              variant="ghost"
+              size="sm"
+              :aria-label="isMuted ? '取消静音' : '静音'"
+              @click="toggleMuted"
+            />
+          </UTooltip>
           <input
             type="range"
             min="0"
@@ -357,91 +361,91 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           >
         </div>
         <!-- 收藏/下载只对解析来的曲目有意义：直链是终态，收藏了也没有 resolver 能取回来 -->
-        <UButton
-          v-if="canCollect"
-          :icon="curFavorited ? 'i-heroicons-heart-solid' : 'i-heroicons-heart'"
-          :color="curFavorited ? 'primary' : 'gray'"
-          variant="ghost"
-          size="sm"
-          :title="curFavorited ? '取消收藏' : '收藏'"
-          :aria-label="curFavorited ? '取消收藏' : '收藏'"
-          @click="onToggleFav"
-        />
-        <UButton
-          v-if="canCollect"
-          icon="i-heroicons-arrow-down-tray"
-          color="gray"
-          variant="ghost"
-          size="sm"
-          class="hidden md:inline-flex"
-          title="下载这首"
-          aria-label="下载这首"
-          @click="onDownloadCurrent"
-        />
-        <UButton
-          :icon="repeatIcon"
-          :color="repeat === 'off' ? 'gray' : 'primary'"
-          variant="ghost"
-          size="sm"
-          class="hidden md:inline-flex"
-          :title="repeatLabel"
-          :aria-label="repeatLabel"
-          @click="cycleRepeat"
-        />
-        <UButton
-          icon="i-heroicons-arrows-right-left"
-          :color="shuffle ? 'primary' : 'gray'"
-          variant="ghost"
-          size="sm"
-          class="hidden md:inline-flex"
-          :title="shuffle ? '随机播放' : '顺序播放'"
-          aria-label="随机播放"
-          @click="shuffle = !shuffle"
-        />
-        <UButton
-          icon="i-heroicons-document-text"
-          :color="showLyrics ? 'primary' : 'gray'"
-          variant="ghost"
-          size="sm"
-          class="hidden md:inline-flex"
-          title="歌词"
-          aria-label="歌词"
-          @click="showLyrics = !showLyrics"
-        />
+        <UTooltip v-if="canCollect" :text="curFavorited ? '取消收藏' : '收藏'" :popper="{ placement: 'top' }">
+          <UButton
+            :icon="curFavorited ? 'i-heroicons-heart-solid' : 'i-heroicons-heart'"
+            :color="curFavorited ? 'primary' : 'gray'"
+            variant="ghost"
+            size="sm"
+            :aria-label="curFavorited ? '取消收藏' : '收藏'"
+            @click="onToggleFav"
+          />
+        </UTooltip>
+        <UTooltip v-if="canCollect" text="下载这首" :popper="{ placement: 'top' }" class="hidden md:inline-flex">
+          <UButton
+            icon="i-heroicons-arrow-down-tray"
+            color="gray"
+            variant="ghost"
+            size="sm"
+            aria-label="下载这首"
+            @click="onDownloadCurrent"
+          />
+        </UTooltip>
+        <UTooltip :text="repeatLabel" :popper="{ placement: 'top' }" class="hidden md:inline-flex">
+          <UButton
+            :icon="repeatIcon"
+            :color="repeat === 'off' ? 'gray' : 'primary'"
+            variant="ghost"
+            size="sm"
+            :aria-label="repeatLabel"
+            @click="cycleRepeat"
+          />
+        </UTooltip>
+        <UTooltip :text="shuffle ? '随机播放' : '顺序播放'" :popper="{ placement: 'top' }" class="hidden md:inline-flex">
+          <UButton
+            icon="i-heroicons-arrows-right-left"
+            :color="shuffle ? 'primary' : 'gray'"
+            variant="ghost"
+            size="sm"
+            aria-label="随机播放"
+            @click="shuffle = !shuffle"
+          />
+        </UTooltip>
+        <UTooltip text="歌词" :popper="{ placement: 'top' }" class="hidden md:inline-flex">
+          <UButton
+            icon="i-heroicons-document-text"
+            :color="showLyrics ? 'primary' : 'gray'"
+            variant="ghost"
+            size="sm"
+            aria-label="歌词"
+            @click="showLyrics = !showLyrics"
+          />
+        </UTooltip>
         <!-- 沉浸模式：黑底大字歌词，仿桌面播放器的「大屏」视图。没有正在播的曲目时没什么可展开的 -->
-        <UButton
-          icon="i-heroicons-arrows-pointing-out"
-          color="gray"
-          variant="ghost"
-          size="sm"
-          class="hidden md:inline-flex"
-          :disabled="!current"
-          title="沉浸模式"
-          aria-label="沉浸模式"
-          @click="showImmersive = true"
-        />
+        <UTooltip text="沉浸模式" :popper="{ placement: 'top' }" class="hidden md:inline-flex">
+          <UButton
+            icon="i-heroicons-arrows-pointing-out"
+            color="gray"
+            variant="ghost"
+            size="sm"
+            :disabled="!current"
+            aria-label="沉浸模式"
+            @click="showImmersive = true"
+          />
+        </UTooltip>
         <!-- 收藏栏（左侧抽屉）的开关。窄屏收进「更多」，但**一定要有入口** —— 抽屉在窄屏是滑出屏幕的 -->
-        <UButton
-          icon="i-heroicons-bars-3-bottom-left"
-          :color="showFavorites ? 'primary' : 'gray'"
-          variant="ghost"
-          size="sm"
-          class="hidden md:inline-flex"
-          :title="showFavorites ? '收起我的收藏' : '我的收藏'"
-          aria-label="我的收藏"
-          @click="showFavorites = !showFavorites"
-        />
-        <UButton
-          icon="i-heroicons-queue-list"
-          :color="showQueue ? 'primary' : 'gray'"
-          variant="ghost"
-          size="sm"
-          :title="`播放队列（${queue.length}）`"
-          aria-label="播放队列"
-          @click="showQueue = !showQueue"
-        >
-          <span v-if="queue.length" class="hidden md:inline text-xs tabular-nums">{{ queueIndex + 1 }}/{{ queue.length }}</span>
-        </UButton>
+        <UTooltip :text="showFavorites ? '收起我的收藏' : '我的收藏'" :popper="{ placement: 'top' }" class="hidden md:inline-flex">
+          <UButton
+            icon="i-heroicons-bars-3-bottom-left"
+            :color="showFavorites ? 'primary' : 'gray'"
+            variant="ghost"
+            size="sm"
+            aria-label="我的收藏"
+            @click="showFavorites = !showFavorites"
+          />
+        </UTooltip>
+        <UTooltip :text="`播放队列（${queue.length}）`" :popper="{ placement: 'top' }">
+          <UButton
+            icon="i-heroicons-queue-list"
+            :color="showQueue ? 'primary' : 'gray'"
+            variant="ghost"
+            size="sm"
+            aria-label="播放队列"
+            @click="showQueue = !showQueue"
+          >
+            <span v-if="queue.length" class="hidden md:inline text-xs tabular-nums">{{ queueIndex + 1 }}/{{ queue.length }}</span>
+          </UButton>
+        </UTooltip>
 
         <!--
           「更多」**只在窄屏出现**：手机上一行放不下九个图标，硬摆的结果是右边几个被顶出屏幕

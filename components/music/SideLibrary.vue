@@ -89,23 +89,24 @@ const sub = (t: { artist?: string; album?: string }) => [t.artist, t.album].filt
   >
     <!-- ── 收起态：只留一枚心和条数（窄屏这一支看不到，整块已经滑出屏幕了） ── -->
     <template v-if="!showFavorites">
-      <button
-        type="button"
-        class="relative mt-4 mx-auto w-10 h-10 grid place-items-center rounded-xl
-               text-primary-500 hover:bg-primary-50 dark:hover:bg-primary-950/40 transition-colors"
-        title="展开我的收藏"
-        aria-label="展开我的收藏"
-        @click="showFavorites = true"
-      >
-        <UIcon name="i-heroicons-heart-solid" class="w-5 h-5" />
-        <span
-          v-if="favorites.length"
-          class="absolute -top-1 -right-1 min-w-4 px-1 rounded-full bg-primary-500 text-white
-                 text-[10px] leading-4 text-center tabular-nums"
+      <UTooltip text="展开我的收藏" :popper="{ placement: 'right' }">
+        <button
+          type="button"
+          class="relative mt-4 mx-auto w-10 h-10 grid place-items-center rounded-xl
+                 text-primary-500 hover:bg-primary-50 dark:hover:bg-primary-950/40 transition-colors"
+          aria-label="展开我的收藏"
+          @click="showFavorites = true"
         >
-          {{ favorites.length > 99 ? '99+' : favorites.length }}
-        </span>
-      </button>
+          <UIcon name="i-heroicons-heart-solid" class="w-5 h-5" />
+          <span
+            v-if="favorites.length"
+            class="absolute -top-1 -right-1 min-w-4 px-1 rounded-full bg-primary-500 text-white
+                   text-[10px] leading-4 text-center tabular-nums"
+          >
+            {{ favorites.length > 99 ? '99+' : favorites.length }}
+          </span>
+        </button>
+      </UTooltip>
       <!-- 竖排的标题：窄轨上只有 3.5rem 宽，横着写一个字都放不下 -->
       <p class="mt-3 mx-auto text-[11px] tracking-widest text-gray-400 [writing-mode:vertical-rl]">
         我的收藏
@@ -119,15 +120,16 @@ const sub = (t: { artist?: string; album?: string }) => [t.artist, t.album].filt
         <span class="font-medium text-sm">我的收藏</span>
         <span class="text-xs text-gray-500 tabular-nums">{{ favorites.length }}</span>
         <div class="flex-1" />
-        <UButton
-          icon="i-heroicons-chevron-double-left"
-          color="gray"
-          variant="ghost"
-          size="2xs"
-          title="收起"
-          aria-label="收起"
-          @click="showFavorites = false"
-        />
+        <UTooltip text="收起" :popper="{ placement: 'top' }">
+          <UButton
+            icon="i-heroicons-chevron-double-left"
+            color="gray"
+            variant="ghost"
+            size="2xs"
+            aria-label="收起"
+            @click="showFavorites = false"
+          />
+        </UTooltip>
       </div>
 
       <div class="flex items-center gap-1 px-3 py-2 shrink-0">
@@ -192,26 +194,26 @@ const sub = (t: { artist?: string; album?: string }) => [t.artist, t.album].filt
             **窄屏一律常显**——触摸端没有 hover，藏起来就等于这两个功能不存在
             （同 PlayerBar 里音量条那条取舍）。
           -->
-          <UButton
-            icon="i-heroicons-play"
-            color="gray"
-            variant="ghost"
-            size="2xs"
-            class="lg:invisible lg:group-hover:visible"
-            :title="`播放《${t.name}》`"
-            aria-label="播放"
-            @click.stop="playFrom(i)"
-          />
-          <UButton
-            icon="i-heroicons-heart-solid"
-            color="primary"
-            variant="ghost"
-            size="2xs"
-            class="lg:invisible lg:group-hover:visible"
-            title="取消收藏"
-            aria-label="取消收藏"
-            @click.stop="removeFavorite(t.key)"
-          />
+          <UTooltip :text="`播放《${t.name}》`" :popper="{ placement: 'top' }" class="lg:invisible lg:group-hover:visible">
+            <UButton
+              icon="i-heroicons-play"
+              color="gray"
+              variant="ghost"
+              size="2xs"
+              aria-label="播放"
+              @click.stop="playFrom(i)"
+            />
+          </UTooltip>
+          <UTooltip text="取消收藏" :popper="{ placement: 'top' }" class="lg:invisible lg:group-hover:visible">
+            <UButton
+              icon="i-heroicons-heart-solid"
+              color="primary"
+              variant="ghost"
+              size="2xs"
+              aria-label="取消收藏"
+              @click.stop="removeFavorite(t.key)"
+            />
+          </UTooltip>
         </div>
       </div>
     </template>

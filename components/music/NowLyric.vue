@@ -13,7 +13,7 @@
  */
 import { activeLrcIndex } from '~/composables/musicPlayer/lrc'
 
-const { current, currentTime, showLyrics } = useMusicPlayerCtx()
+const { current, currentTime, showImmersive } = useMusicPlayerCtx()
 // 取词由 PlayerBar 统一驱动，这里只读（模块级单例，两处拿到的是同一份）
 const { parsed, loading } = useMusicLyrics()
 
@@ -40,15 +40,16 @@ const hint = computed(() => {
 
 <template>
   <!--
-    整块可点：点一下开合下面的歌词面板（和右侧那枚歌词按钮同一个开关）。
+    整块可点：点一下进沉浸模式（黑底大字歌词），跟网易云/QQ音乐点小窗歌词展开大屏是同一个手势。
+    右侧播放条上单独那枚「歌词」按钮走的是另一条路——收进页面里的卡片，两者互不影响。
     固定高度而不是让内容撑开——句子有长有短，撑开会让整条播放条随着唱词一跳一跳。
   -->
   <div
     v-if="current"
     class="h-11 flex flex-col justify-center items-center text-center cursor-pointer select-none
            px-2 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800/60 transition-colors"
-    :title="showLyrics ? '收起歌词' : '展开歌词'"
-    @click="showLyrics = !showLyrics"
+    title="展开沉浸模式"
+    @click="showImmersive = true"
   >
     <template v-if="hint">
       <p class="truncate w-full text-xs text-gray-400">{{ hint }}</p>

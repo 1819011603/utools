@@ -37,7 +37,7 @@ provide(MUSIC_PLAYER_KEY, player)
 
 const {
   urlInput, playDirectUrl, setQueue, current, isResolving, errorMessage, errorKind,
-  downloadTrack, showDownloads, showFavorites, showQueue, showLyrics, mount, unmount,
+  downloadTrack, showDownloads, showFavorites, showQueue, mount, unmount,
 } = player
 
 // 收藏是页面级能力，不经过播放器上下文（播放器不该认识「收藏」这回事）
@@ -192,9 +192,8 @@ onBeforeUnmount(unmount)
         @retry="(site: MusicSiteId) => retry(site)"
       />
 
-      <!-- 歌词和下载留在页面流里：一个是要整段读的长文，一个是要盯着进度的任务，
-           两者都不是「看一眼就关」。收藏在左侧常驻栏、队列在右侧抽屉，各自的理由见那两个组件 -->
-      <MusicLyrics v-if="showLyrics" />
+      <!-- 下载留在页面流里：是要盯着进度的任务，不是「看一眼就关」。歌词走沉浸模式（黑底大字全屏），
+           不再有页面里那张小卡片——两个入口都指向同一份体验，用户不用猜点哪个 -->
       <MusicDownloadPanel v-if="showDownloads" />
 
       <!--

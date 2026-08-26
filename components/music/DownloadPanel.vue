@@ -123,15 +123,16 @@ const subtitle = (d: MusicDownloadItem) =>
             >
               清除已完成
             </UButton>
-            <UButton
-              icon="i-heroicons-x-mark"
-              color="gray"
-              variant="ghost"
-              size="2xs"
-              title="关闭"
-              aria-label="关闭下载面板"
-              @click="showDownloads = false"
-            />
+            <UTooltip text="关闭" :popper="{ placement: 'top' }">
+              <UButton
+                icon="i-heroicons-x-mark"
+                color="gray"
+                variant="ghost"
+                size="2xs"
+                aria-label="关闭下载面板"
+                @click="showDownloads = false"
+              />
+            </UTooltip>
           </div>
         </div>
       </template>
@@ -177,16 +178,16 @@ const subtitle = (d: MusicDownloadItem) =>
             否则每下完一首整列按钮就横向抖一下。
           -->
           <div class="w-6 shrink-0 grid place-items-center">
-            <UButton
-              v-if="isRunning(d.status)"
-              icon="i-heroicons-x-circle"
-              color="gray"
-              variant="ghost"
-              size="2xs"
-              :aria-label="`取消下载 ${d.name}`"
-              title="取消这一首"
-              @click="cancelDownload?.(d.key)"
-            />
+            <UTooltip v-if="isRunning(d.status)" text="取消这一首" :popper="{ placement: 'top' }">
+              <UButton
+                icon="i-heroicons-x-circle"
+                color="gray"
+                variant="ghost"
+                size="2xs"
+                :aria-label="`取消下载 ${d.name}`"
+                @click="cancelDownload?.(d.key)"
+              />
+            </UTooltip>
             <UIcon
               v-else-if="d.status === 'done'"
               name="i-heroicons-check-circle"

@@ -95,7 +95,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
   <Teleport to="body">
     <div
       v-if="showImmersive && current"
-      class="fixed inset-0 z-[60] flex flex-col text-zinc-100"
+      class="fixed inset-0 z-[60] flex flex-col overflow-hidden text-zinc-100"
       style="background: radial-gradient(120% 100% at 20% 0%, #2a1f2a 0%, #1a1418 45%, #0a0708 100%)"
     >
       <!-- 退出 -->
@@ -139,6 +139,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
               <template v-if="current.album">专辑：{{ current.album }}</template>
               <template v-if="!current.artist && !current.album">还没有更多信息</template>
             </p>
+            <!--
+              不是所有匹配到的词都带时间轴（纯文本 LRC、或站点原样给的没有 `[mm:ss]` 标签）——
+              这种没法跟着高亮/滚动，整页看着就是静止的，容易被当成"没生效"。说清楚是缺时间轴，
+              不是沉浸模式坏了（同 `NowLyric.vue` 那句提示，这里只是全屏下把它摆出来）。
+            -->
+            <p v-if="hasLyrics && !parsed.synced" class="text-xs text-amber-400/80 mt-2">
+              这份歌词没有时间轴，没法跟着播放高亮，完整内容看右边
+            </p>
           </div>
 
           <div class="flex-1 min-h-0 relative">
@@ -148,10 +156,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
             <div v-else-if="!hasLyrics" class="h-full flex items-center justify-center text-sm text-zinc-500">
               没有找到这首歌的歌词
             </div>
+            <!--
+              上下各垫大半屏空白，好让第一句/最后一句也能被 `scrollIntoView({block:'center'})` 顶到正中间。
+              **必须用 `vh` 不能用 `%`**：CSS 规范里 padding-top/bottom 的百分比是相对**容器宽度**算的，
+              不是高度——这栏歌词是页面右半边的窄列，`%` 算出来的垫高跟这一列的实际高度对不上，
+              轻则居中偏得离谱、重则把整块撑得比视口还高，顶飞上面的标题（实测过一次）。
+            -->
             <div
               v-else
               ref="listEl"
-              class="immersive-lyrics h-full overflow-y-auto py-[38%] lg:py-[32%] text-center lg:text-left"
+              class="immersive-lyrics h-full overflow-y-auto overscroll-contain py-[40vh] text-center lg:text-left"
             >
               <p
                 v-for="(l, i) in parsed.lines"

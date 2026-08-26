@@ -75,15 +75,16 @@ watch([queueIndex, showQueue], async () => {
       >
         清空
       </UButton>
-      <UButton
-        icon="i-heroicons-chevron-double-right"
-        size="2xs"
-        color="gray"
-        variant="ghost"
-        title="收起"
-        aria-label="收起"
-        @click="showQueue = false"
-      />
+      <UTooltip text="收起" :popper="{ placement: 'top' }">
+        <UButton
+          icon="i-heroicons-chevron-double-right"
+          size="2xs"
+          color="gray"
+          variant="ghost"
+          aria-label="收起"
+          @click="showQueue = false"
+        />
+      </UTooltip>
     </div>
 
     <div v-if="!queue.length" class="px-4 py-10 text-center text-sm text-gray-500">
@@ -102,15 +103,16 @@ watch([queueIndex, showQueue], async () => {
         :class="i === queueIndex && 'bg-primary-50/70 dark:bg-primary-950/30'"
         @dblclick="playAt(i)"
       >
-        <UButton
-          :icon="i === queueIndex && isPlaying ? 'i-heroicons-speaker-wave' : 'i-heroicons-play'"
-          :color="i === queueIndex ? 'primary' : 'gray'"
-          variant="ghost"
-          size="2xs"
-          :title="`播放《${t.name}》`"
-          :aria-label="`播放 ${t.name}`"
-          @click.stop="playAt(i)"
-        />
+        <UTooltip :text="`播放《${t.name}》`" :popper="{ placement: 'top' }">
+          <UButton
+            :icon="i === queueIndex && isPlaying ? 'i-heroicons-speaker-wave' : 'i-heroicons-play'"
+            :color="i === queueIndex ? 'primary' : 'gray'"
+            variant="ghost"
+            size="2xs"
+            :aria-label="`播放 ${t.name}`"
+            @click.stop="playAt(i)"
+          />
+        </UTooltip>
         <div class="min-w-0 flex-1">
           <div
             class="truncate text-sm"
@@ -126,16 +128,16 @@ watch([queueIndex, showQueue], async () => {
           {{ formatTrackTime(t.duration) }}
         </span>
         <!-- 移除按钮宽屏才靠 hover 露出：触摸端没有 hover，藏起来等于这功能不存在 -->
-        <UButton
-          icon="i-heroicons-x-mark"
-          color="gray"
-          variant="ghost"
-          size="2xs"
-          class="lg:invisible lg:group-hover:visible"
-          title="从队列移除"
-          aria-label="从队列移除"
-          @click.stop="removeAt(i)"
-        />
+        <UTooltip text="从队列移除" :popper="{ placement: 'top' }" class="lg:invisible lg:group-hover:visible">
+          <UButton
+            icon="i-heroicons-x-mark"
+            color="gray"
+            variant="ghost"
+            size="2xs"
+            aria-label="从队列移除"
+            @click.stop="removeAt(i)"
+          />
+        </UTooltip>
       </div>
     </div>
   </aside>
