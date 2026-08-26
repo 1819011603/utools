@@ -35,12 +35,17 @@ export interface Search24bitRow {
   cover?: string
 }
 
-/** 解析搜索接口的原始响应体，`status` 不为真或解析失败一律当「没有结果」，不抛错 */
-export function parse24bitSearchBody(body: string): Search24bitRow[] {
+/**
+ * 解析搜索接口的原始响应体。**`ok: false` 和「搜到 0 条」必须分得清**——
+ * 前者是接口本身没吐出预期的 `status:true`（响应格式不对/被拦截页顶替），该报错；
+ * 后者是正经搜索、这页恰好没有结果，不该报错。两边混成一个「空数组」的话，
+ * 调用方没法区分「该不该抛错」，之前就因为这个在服务端和客户端各写了一份不一致的判断。
+ */
+export function parse24bitSearchBody(body: string): { ok: boolean; rows: Search24bitRow[] } {
   let json: { status?: boolean; result?: Search24bitRow[] } | null = null
-  try { json = JSON.parse(body) } catch { /* 按「没有结果」处理 */ }
-  if (!json?.status) return []
-  return Array.isArray(json.result) ? json.result : []
+  try { json = JSON.parse(body) } catch { /* ok 会是 false，按下面统一处理 */ }
+  if (!json?.status) return { ok: false, rows: [] }
+  return { ok: true, rows: Array.isArray(json.result) ? json.result : [] }
 }
 
 /**

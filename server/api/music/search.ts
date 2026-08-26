@@ -16,25 +16,15 @@
  * 代价是多一跳、吃 CF Pages 的请求配额，但可用性优先 —— 前端直连在真实浏览器里跑不通，
  * 省下的那一跳没有意义。
  *
+ * **有本机中继时前端会绕开这条路**，见 `composables/musicSites/localRelay.ts`——
+ * 那条路直接从用户自己的家庭网络出口打 24bit.net，不吃这里的 CF 风控。
+ * 这条服务端路径是没开中继（或中继连不上）时的兜底，请求怎么拼、响应怎么解析
+ * 挪进了 `utils/music24bitProtocol.ts`，两条路共用同一份，不会各写各的漂移。
+ *
  * 实现约束同 proxy.ts：不静态 import 任何 `node:*`（Nitro preset 是 cloudflare-pages）。
  */
+import { build24bitSearchBody, build24bitSearchUrl, parse24bitSearchBody, toSearch24bitItems } from '~/utils/music24bitProtocol'
 import { cfWallMessage, isCloudflareWall, musicFetch } from '../../utils/musicFetch'
-
-const BASE = 'https://www.24bit.net'
-
-/** 站点只有这两个搜索接口，白名单挡住拼接注入 */
-const APIS: Record<string, string> = {
-  one: 'searchOnlineMusicOne',
-  two: 'searchOnlineMusicTwo',
-}
-
-interface Row {
-  id?: string
-  name?: string
-  player?: string
-  album?: string
-  cover?: string
-}
 
 export default defineEventHandler(async (event) => {
   const query = getQuery(event)
@@ -44,17 +34,18 @@ export default defineEventHandler(async (event) => {
   const page = Math.min(Math.max(Number.parseInt((query.page as string) || '1', 10) || 1, 1), 99)
 
   if (!kw) throw createError({ statusCode: 400, statusMessage: '缺少 kw 参数' })
-  const api = APIS[source]
-  if (!api) throw createError({ statusCode: 400, statusMessage: 'source 只能是 one 或 two' })
+  if (source !== 'one' && source !== 'two') {
+    throw createError({ statusCode: 400, statusMessage: 'source 只能是 one 或 two' })
+  }
 
-  const res = await musicFetch(`${BASE}/api/player/${api}`, {
+  const res = await musicFetch(build24bitSearchUrl(source), {
     // 用户自己的登录态（可选），走请求头不走 query —— 凭证不该进日志和浏览器历史
     cookie: getRequestHeader(event, 'x-music-cookie'),
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       // 站点自己发这个请求时 Origin 就是它自己；带上比不带稳（有的 WAF 拿它做一致性检查）
-      'Origin': BASE,
+      'Origin': 'https://www.24bit.net',
       'Accept': '*/*',
       /*
        * **漏了这个头，这个接口每一发都过不了 CF**——实测确认过：完全相同的请求，
@@ -63,13 +54,9 @@ export default defineEventHandler(async (event) => {
        * Referer 天然就是自己的页面，我们服务端替用户转发时没照抄这一条，
        * 变成了「看起来像脚本」的请求，每次都被拦，跟出口 IP、跟运气都无关。
        */
-      'Referer': `${BASE}/`,
+      'Referer': 'https://www.24bit.net/',
     },
-    /*
-     * `keyword` 是**双重编码**的：站点前端先 encodeURIComponent() 再 JSON.stringify()。
-     * 塞原文进去恒回空结果 —— 这不是我们在绕什么，是照抄它自己的请求。
-     */
-    body: JSON.stringify({ keyword: encodeURIComponent(kw), page }),
+    body: build24bitSearchBody(kw, page),
   })
 
   // 撞 CF 墙时说人话。本地开发下这几乎总是「dev server 带了 HTTPS_PROXY」造成的，
@@ -81,11 +68,8 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 502, statusMessage: `搜索接口返回 ${res.status}` })
   }
 
-  let json: { status?: boolean; result?: Row[] } | null = null
-  try { json = JSON.parse(res.body) } catch { /* 下面统一按「没给结果」处理 */ }
-  if (!json?.status) throw createError({ statusCode: 502, statusMessage: '搜索接口没有返回结果' })
-
-  const rows = Array.isArray(json.result) ? json.result : []
+  const { ok, rows } = parse24bitSearchBody(res.body)
+  if (!ok) throw createError({ statusCode: 502, statusMessage: '搜索接口没有返回结果' })
 
   // 搜索结果不缓存：站点会限流，缓存反而会让「刚搜到的东西点不开」更难归因
   setResponseHeader(event, 'Cache-Control', 'no-store')
@@ -93,13 +77,6 @@ export default defineEventHandler(async (event) => {
   return {
     source,
     page,
-    /*
-     * 只透传我们要用的字段。`cover` 故意**不透传**：实测它是 segmentfault 图床的占位图，
-     * 同一次搜索里所有条目完全相同，摆到界面上只会让整页看起来像同一首歌。
-     * 真封面只有详情页的 itemMusic.cover 有，取址成功后会回填。
-     */
-    items: rows
-      .filter(r => r.id && r.name)
-      .map(r => ({ id: r.id!, name: r.name!, player: r.player ?? '', album: r.album ?? '' })),
+    items: toSearch24bitItems(rows),
   }
 })

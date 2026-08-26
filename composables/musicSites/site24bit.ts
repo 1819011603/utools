@@ -13,6 +13,16 @@
  * 拦截来自站点侧，不是我们能改的。详见 `server/api/music/search.ts` 的文件注释。
  */
 import type { MusicResolved, MusicSearchRow, MusicSite } from './types'
+import {
+  build24bitDetailUrl,
+  build24bitSearchBody,
+  build24bitSearchUrl,
+  extractItemMusic24bit,
+  isQuotaExhausted24bit,
+  parse24bitSearchBody,
+  toResolvedPayload,
+  toSearch24bitItems,
+} from '~/utils/music24bitProtocol'
 
 /**
  * 详情页的两个前缀 —— **它们是两个音源，不是搜索接口的映射**。
@@ -71,10 +81,29 @@ export const SITE_24BIT: MusicSite = {
   homepage: 'https://www.24bit.net/',
 
   async search(source, kw, page, signal): Promise<MusicSearchRow[]> {
+    const auth = useMusic24bitAuth()
+
+    /*
+     * 本机中继优先，但**带了登录态就跳过**——中继不转发 Cookie（见 `localRelay.ts`
+     * 文件顶部的说明），走它会让用户的登录态悄悄失效而不自知，宁可稳一点走服务端老路。
+     */
+    if (!auth.hasAuth.value && (source === 'one' || source === 'two')) {
+      const relay = await viaLocalRelay(build24bitSearchUrl(source), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: build24bitSearchBody(kw, page),
+      })
+      if (relay?.status === 200) {
+        const { ok, rows } = parse24bitSearchBody(relay.body)
+        if (ok) return toSearch24bitItems(rows).map(r => ({ ...r, site: '24bit' as const }))
+      }
+      // 中继没开 / 超时 / 响应不对 → 落回下面服务端那条路，不抛错
+    }
+
     const res = await $fetch<{ items: Omit<MusicSearchRow, 'site'>[] }>('/api/music/search', {
       query: { source, kw, page },
       // 用户填了自己的登录态就带上（配额另算）。没填就是空对象，照常匿名请求
-      headers: useMusic24bitAuth().authHeaders(),
+      headers: auth.authHeaders(),
       signal,
       // ofetch 对 GET 默认失败重试一次——服务端那边 `musicFetch` 撞 CF 墙时自己已经
       // 原地重试了好几次，两层重试叠在一起等于短时间内把请求量翻好几倍地砸给 24bit.net，
@@ -84,12 +113,24 @@ export const SITE_24BIT: MusicSite = {
     return (res?.items ?? []).map(r => ({ ...r, site: '24bit' as const }))
   },
 
-  resolve(id, tier, signal): Promise<MusicResolved> {
+  async resolve(id, tier, signal): Promise<MusicResolved> {
+    const auth = useMusic24bitAuth()
+
+    if (!auth.hasAuth.value && (tier === 'b' || tier === 'c')) {
+      const relay = await viaLocalRelay(build24bitDetailUrl(tier, id))
+      if (relay?.status === 200 && !isQuotaExhausted24bit(relay.body)) {
+        const item = extractItemMusic24bit(relay.body)
+        if (item?.url) return { ...toResolvedPayload(item), src: tier }
+      }
+      // 中继没开 / 超时 / 这个档没资源 / 配额用完（服务端那份配额跟中继各按各的出口 IP 算，
+      // 中继撞了配额不代表服务端也撞了）→ 落回下面服务端那条路，不抛错
+    }
+
     // 详情页 HTML 没有 ACAO，浏览器跨域取不到 → 这一段必须经服务端
     return $fetch<MusicResolved>('/api/music/resolve', {
       query: { id, src: tier },
       // 凭证走请求头不走 query —— query 会进日志、浏览器历史和 Referer
-      headers: useMusic24bitAuth().authHeaders(),
+      headers: auth.authHeaders(),
       signal,
       retry: 0,
     })
