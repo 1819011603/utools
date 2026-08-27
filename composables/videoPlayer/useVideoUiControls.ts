@@ -222,6 +222,31 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   let pendingIsRestore = false
 
   /**
+   * 挂起 `restore` 意图期间，在 **document** 上守一发一次性的 pointerdown。
+   *
+   * 安卓切回来时全屏已经被系统退掉了，而「窗口重新获得焦点」不算用户激活 →
+   * `requestFullscreen()` 必被拒，只能等他碰一下。**但他碰的地方常常不在播放器上**：
+   * 退出全屏后整页都露出来了，手指第一下多半落在别处（尤其锁定态，画面上什么都没有）。
+   * 只在容器上等的话那一下白费，于是卡在「锁定 + 小窗」（用户点名报过）。
+   * **只给触摸端**：桌面上任何一次点页面都突然全屏太惊吓，那边靠点画面那条路就够了。
+   */
+  let restoreTapBound = false
+  const onAnyTapRestore = () => {
+    restoreTapBound = false
+    if (pendingIsRestore) void enterAutoFullscreen()
+  }
+  const bindRestoreTap = () => {
+    if (restoreTapBound || !isTouchPrimary()) return
+    restoreTapBound = true
+    document.addEventListener('pointerdown', onAnyTapRestore, { capture: true, once: true })
+  }
+  const unbindRestoreTap = () => {
+    if (!restoreTapBound) return
+    restoreTapBound = false
+    document.removeEventListener('pointerdown', onAnyTapRestore, true)
+  }
+
+  /**
    * 兑现自动全屏。手机浏览器要求**用户激活**才准进全屏，页面加载完自动调必被拒 →
    * 拒了就把意图挂着，等用户碰画面时补上。
    */
@@ -229,6 +254,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     if (!playerContainer.value || document.fullscreenElement) {
       pendingAutoFullscreen.value = false
       pendingIsRestore = false
+      unbindRestoreTap()
       return
     }
     /*
@@ -242,10 +268,12 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
       isFullscreen.value = true
       pendingAutoFullscreen.value = false
       pendingIsRestore = false
+      unbindRestoreTap()
       await lockLandscape()
     } catch {
       // 没有用户激活。留着意图等下一次交互补兑现；只有「设置」那一种在桌面上就地作废
       if (!isTouchPrimary() && !pendingIsRestore) pendingAutoFullscreen.value = false
+      if (pendingIsRestore) bindRestoreTap()   // 他下一次碰屏幕（哪儿都算）就还回去
     }
   }
 
@@ -307,6 +335,8 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   let backgrounded = false
   let wasFullscreenBeforeHide = false
   let lockedAutoPaused = false
+  /** 回前台后补打的那几发 requestFullscreen（见 onForeground） */
+  let restoreShots: ReturnType<typeof setTimeout>[] = []
 
   /**
    * 切走。三件事：记住全屏状态（回来要还给他）、**锁定态下主动暂停**、把进度落库
@@ -334,6 +364,16 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     if (wasFullscreenBeforeHide && !document.fullscreenElement) {
       pendingIsRestore = true
       pendingAutoFullscreen.value = true
+      /*
+       * **补几枪。** 安卓上「回到前台」这一发 requestFullscreen 多半当场被拒（没有用户激活），
+       * 但拒不拒跟时机有关：有些机型/版本在恢复后的头一两百毫秒里是放行的。
+       * 被拒是静默的，白试几次没有代价，而试中了用户就不用自己再点一下。
+       * 一直失败也不要紧 —— `bindRestoreTap` 已经在守他的下一次触摸。
+       */
+      restoreShots.forEach(clearTimeout)
+      restoreShots = [160, 500, 1200].map(ms => setTimeout(() => {
+        if (pendingIsRestore) void enterAutoFullscreen()
+      }, ms))
     }
     wasFullscreenBeforeHide = false
     if (!lockedAutoPaused) return
@@ -518,6 +558,9 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     document.removeEventListener('visibilitychange', handleVisibility)
     window.removeEventListener('blur', handleWindowBlur)
     window.removeEventListener('focus', handleWindowFocus)
+    unbindRestoreTap()
+    restoreShots.forEach(clearTimeout)
+    restoreShots = []
     if (controlsTimer) clearTimeout(controlsTimer)
     if (playIconTimer) clearTimeout(playIconTimer)
   }
