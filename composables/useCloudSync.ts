@@ -7,7 +7,7 @@
  * ## 两条节流规则（都是刻意的）
  *
  * · **有变更才同步**：`dirty` 空着就不发**推送**。例外是几个「该问问云端」的时机
- *   （打开页面 / 回到前台 / 前台每 5 分钟一次，都走 `checkRemote`）和**这台设备还从没同步过**
+ *   （打开页面 / 回到前台 走 `checkRemote`；前台每分钟一次走 `peekRemote`）和**这台设备还从没同步过**
  *   （刚登录 / 换了浏览器）。这道闸挡的是白推，不该连拉取一起挡住——挡住的话
  *   「换设备接着看」等于没有，而问一句的代价只是一发 `?meta=1`（云端没变就到此为止）。
  * · **两次之间至少 5 分钟**。落在窗口里的改动**不发请求、只留着 `dirty` 标记**：
@@ -31,7 +31,7 @@ import { notifyApplied, onDirty, onFlushRequest, patchMeta, readMeta, writeMeta 
 const THROTTLE_MS = 5 * 60_000
 /** 连着改好几下（连点几个收藏）只算一次 */
 const DEBOUNCE_MS = 5_000
-/** 定时问云端的醒来间隔。真正的节奏由上面那道 5 分钟节流定，见 start 里的注释 */
+/** 前台每隔多久探一次云端（一发 `?meta=1`，见 peekRemote）。推送不受它影响，仍归上面那道节流管 */
 const REMOTE_POLL_MS = 60_000
 
 interface PullRes {
@@ -272,6 +272,35 @@ export function useCloudSync() {
     }
   }
 
+  /**
+   * **每分钟探一次「云端变了没」**——补的是「两台设备都开着页面、谁都不切标签页」这个洞：
+   * 除了「打开页面」和「回到前台」，原本**一辈子不会再问一次云端**，
+   * 一台上追的进度另一台永远等不到，看着就是「不同步」。
+   *
+   * 为什么不是直接每分钟跑一轮 `syncNow`：那会把**推送**也变成一分钟一次。
+   * 正在看的那台每保存一次进度就标一次脏（`recordWatchProgress`），
+   * 于是每分钟一个 POST + 一次 D1 写入，而 5 分钟的滞后本来就无所谓——数据在 localStorage 里。
+   *
+   * 所以这里只发**一发 `?meta=1`**（几十字节，没有 payload），rev 全对得上就到此为止；
+   * 真变了才叫 `syncNow({ force: true })` 去走完整的一轮。也就是说：
+   * **拉是一分钟一次，推仍归那道 5 分钟节流管**。
+   *
+   * 失败一声不吭：这是后台探测，弹错只会打断正在看片的人，等下一分钟就是了。
+   * 也**不动 `lastSyncAt`**——那是节流的时钟，让这条把它顶掉的话推送会被推迟到下一个窗口。
+   */
+  const peekRemote = async () => {
+    if (typeof window === 'undefined' || !auth.token.value || syncing.value) return
+    try {
+      const head = await auth.authFetch<PullRes>('/api/user/sync?meta=1')
+      storeKind.value = head.store || ''
+      const m = readMeta()
+      // 只认清单表里还有的那几份：认不出的 id 本机没有 rev，比出来恒为「变了」→ 每分钟白跑一整轮
+      const known = new Set(SYNC_COLLECTIONS.map(s => s.id))
+      const changed = head.colls.some(c => known.has(c.coll) && (c.rev ?? 0) !== (m.rev[c.coll] ?? 0))
+      if (changed) await syncNow({ force: true })
+    } catch { /* 探测失败不报错，下一分钟再来 */ }
+  }
+
   const schedule = () => {
     if (debounceTimer) clearTimeout(debounceTimer)
     debounceTimer = setTimeout(() => { void syncNow() }, DEBOUNCE_MS)
@@ -302,24 +331,11 @@ export function useCloudSync() {
       void syncNow({ checkRemote: true })
     })
     window.addEventListener('pagehide', () => { void syncNow() })
-    /**
-     * **前台开着就每 5 分钟问一句「云端变了没」**。
-     *
-     * 补的是这么一个洞：两台设备都开着页面、谁都不切标签页（一台在放映厅看着、
-     * 另一台摆在那），那么除了「打开页面」和「回到前台」，**一辈子都不会再问一次云端** ——
-     * 一台上追的进度另一台永远等不到，看着还是「不同步」。
-     *
-     * 这条**只负责拉**：`checkRemote` 只豁免「有变更才同步」那道闸，云端 rev 没动时
-     * 整轮就是一发 `?meta=1`（几十字节），一个正文都不取、一个 POST 都不发。
-     * 真变了才会取正文并合并，而合并之后该推的照旧推 —— 那是收敛必需的，不是白推。
-     *
-     * 每分钟醒一次而不是每 5 分钟：**节奏交给 `syncNow` 里那道 5 分钟节流**（时钟是「上次尝试」），
-     * 定时器自己掐 5 分钟的话会跟节流窗口错开一点点，隔一轮被挡掉一次，实际变成 10 分钟。
-     * `hidden` 时直接跳过：后台标签页问了也没人看，回到前台那一发已经覆盖。
-     */
+    // 前台开着就每分钟探一次云端（见 peekRemote）。`hidden` 时跳过：
+    // 后台标签页探了也没人看，回到前台那一发已经覆盖
     setInterval(() => {
       if (document.visibilityState === 'hidden') return
-      void syncNow({ checkRemote: true })
+      void peekRemote()
     }, REMOTE_POLL_MS)
     // 刚登录的那台设备 rev 是空的，这一发会真的拉；已经同步过又没改动的则原地返回
     watch(auth.token, t => { if (t) void syncNow({ force: true }) })
