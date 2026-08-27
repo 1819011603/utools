@@ -71,6 +71,31 @@
         </span>
       </div>
 
+      <!--
+        手机竖屏时齿轮和选集在**顶栏**（安卓客户端也是这么摆的）：底部那一行放不下这么多，
+        它只留倍速 · 画中画 · 全屏。宽屏和全屏里这两颗在控制栏，这儿就不重复出。
+      -->
+      <button
+        v-if="compact"
+        class="p-1.5 rounded-lg shrink-0 hover:bg-white/15 active:scale-90 transition-all"
+        title="播放设置"
+        @click="openOverlay('settings')"
+      >
+        <UIcon
+          name="i-heroicons-cog-6-tooth" class="w-5 h-5 transition-transform"
+          :class="{ 'rotate-90': showSettings }"
+        />
+      </button>
+      <button
+        v-if="compact && playlist.length > 1"
+        class="p-1.5 rounded-lg shrink-0 transition-all active:scale-90"
+        :class="showEpisodes ? 'bg-rose-500/80' : 'hover:bg-white/15'"
+        title="选集"
+        @click="openOverlay('episodes')"
+      >
+        <UIcon name="i-heroicons-queue-list" class="w-5 h-5" />
+      </button>
+
       <!-- 收藏摆在画面里：全屏时页面整个看不见，而「这部好看，留一下」恰恰是看着看着才冒出来的念头。
            **认不出是哪部剧就不出**（手工贴地址播的列表收了也找不回来） -->
       <button
@@ -95,12 +120,18 @@ const {
   playlistTitle, currentVideoName, playlist, currentIndex,
   isFullscreen, controlsVisible, toggleFullscreen, keepControlsAlive,
   canFavorite, isFavorited, toggleFavorite,
+  // 手机竖屏时齿轮/选集在顶栏（见模板里的 compact）
+  showSettings, showEpisodes, openOverlay,
   isHls, aggregateKBps, strategy, dualChannel,
   mp4AvgMbps, mp4Kbps, playbackRate,
   videoRes,
 } = useVideoPlayerCtx()
 
 const router = useRouter()
+
+// 「手机竖屏」= 窄屏且不在全屏里。与 ControlBar 那份判据一致（那边靠它砍按钮，这边靠它补回来）
+const isNarrow = useNarrowScreen()
+const compact = computed(() => isNarrow.value && !isFullscreen.value)
 
 /** 全屏里是「退出全屏」，小窗里是「离开这一页」——这一页没有站点的品牌栏，它是唯一的出口 */
 const goBack = () => {

@@ -200,13 +200,14 @@
             />
           </button>
 
+          <!-- 画中画：手机竖屏也留（用户点名留下的两颗之一） -->
           <button
-            v-if="supportsPiP && !isNarrow"
-            class="p-1.5 rounded-lg text-white hover:bg-white/15 transition-all"
+            v-if="supportsPiP"
+            class="p-1 sm:p-1.5 rounded-lg text-white hover:bg-white/15 transition-all"
             title="画中画（I）"
             @click="togglePiP"
           >
-            <UIcon name="i-heroicons-rectangle-stack" class="w-6 h-6" />
+            <UIcon name="i-heroicons-rectangle-stack" class="w-5 h-5 sm:w-6 sm:h-6" />
           </button>
 
           <button
@@ -244,7 +245,7 @@ const {
   showEpisodes, showSettings, showLines,
   playlistLines, playlistSource, isSwitchingLine,
   togglePlay, startSeek, updateHoverTime, setVolume, toggleMute, setPlaybackRate, rateOptions,
-  toggleFullscreen, togglePiP, keepControlsAlive, playPrev, playNext,
+  toggleFullscreen, togglePiP, keepControlsAlive, playPrev, playNext, openOverlay,
   videoRes,
 } = useVideoPlayerCtx()
 
@@ -253,13 +254,6 @@ onClickOutside(speedMenuRef, () => { showSpeedMenu.value = false })
 // 当前线路名只进「换源」按钮的 tooltip：控制栏上不再单独摆一枚「L4」徽标（用户点名去掉）
 const lineName = computed(() =>
   playlistLines.value[playlistSource.value?.line ?? -1]?.name || playlistSource.value?.lineName || '')
-
-/** 三个浮层互斥：两块都摊在画面右侧，同时开就是叠在一起 */
-const openPanel = (which: 'episodes' | 'settings' | 'lines') => {
-  showEpisodes.value = which === 'episodes' && !showEpisodes.value
-  showSettings.value = which === 'settings' && !showSettings.value
-  showLines.value = which === 'lines' && !showLines.value
-}
 
 /**
  * 打开倍速菜单时把当前档位滚到视野中间。用 scrollTop 手算而不是
@@ -275,8 +269,15 @@ watch(showSpeedMenu, async (open) => {
   box.scrollTop = item.offsetTop - (box.clientHeight - item.offsetHeight) / 2
 })
 
-// 窄屏（手机竖屏）：画中画这类低频项直接不渲染。断点收在 useNarrowScreen 里（Stage 也要用同一个）
+/**
+ * 「手机竖屏」= 窄屏且不在全屏里。这一档只留倍速 · 画中画 · 全屏三颗，
+ * 换源/上一集/选集/齿轮全去顶栏或不出（用户点名）。
+ * **必须带上 `!isFullscreen`**：手机竖屏按全屏键之后视口还是窄的，
+ * 只判 isNarrow 会把全屏里的按钮也一起砍掉，而全屏那套要求「保持不变」。
+ * 断点收在 useNarrowScreen 里（Stage/TopBar 也用同一个，各写一份必然漂移）。
+ */
 const isNarrow = useNarrowScreen()
+const compact = computed(() => isNarrow.value && !isFullscreen.value)
 </script>
 
 <style scoped>
