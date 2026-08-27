@@ -17,7 +17,7 @@
 import type { ParseRule, ParseResult, PowChallenge } from '../../composables/videoParseRules'
 import { matchParser } from '../parsers'
 import { dropCookie, readCookie, saveCookie } from '../parsers/cookieStore'
-import { hostOf } from '../parsers/utils'
+import { hostOf, isCloudflareChallenge } from '../parsers/utils'
 import { fetchSitePage as fetchPage } from '../utils/siteFetch'
 
 export default defineEventHandler(async (event): Promise<ParseResult | PowChallenge> => {
@@ -66,6 +66,17 @@ export default defineEventHandler(async (event): Promise<ParseResult | PowChalle
     }
     setResponseHeader(event, 'Cache-Control', 'no-store')
     return { needPow: true, kind: challenge.kind, ...ch }
+  }
+
+  // Cloudflare 的人机校验（不是站点自己那套 PoW，浏览器里要点一下的那种，服务端解不了）。
+  // 必须与「源站返回 403」分开说：403 也可能是防盗链或封 IP，而这两条的下一步动作完全不同
+  //（前者只能重试/换网络，后者要去改 origin/referer）。siteFetch 已经自动重发过几次
+  // （见 CF_RETRIES：这类校验常常是间歇性的），走到这说明连着几发都没过
+  if (isCloudflareChallenge(page.status, page.body, page.headers)) {
+    throw createError({
+      statusCode: 502,
+      statusMessage: `${host} 挂着 Cloudflare 人机校验，连试几次都没过。这种校验要在浏览器里点一下才过得去，服务端解不了。过一会儿再试通常就好了`,
+    })
   }
 
   if (page.status !== 200) {

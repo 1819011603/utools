@@ -20,7 +20,7 @@
  */
 
 import type { FetchedPage } from '../parsers/types'
-import { hostOf } from '../parsers/utils'
+import { hostOf, isCloudflareChallenge } from '../parsers/utils'
 
 // 源站普遍按 UA 做粗筛，与 proxy.ts:63 保持一致
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
@@ -68,8 +68,37 @@ export async function getSiteDispatcher(): Promise<any> {
 }
 
 /**
+ * Cloudflare 人机校验的重试次数（额外几发，不含第一发）。
+ *
+ * 由来：有的站点的校验**不是常开的，而是按出口 IP 的信誉分现算的**——实测 jable.tv
+ * 的 `/videos/`：低频访问时连打 10 次是 `403 200 200 200 200 200 200 200 200 200`，
+ * 冷的那一发被挑战、紧接着的几发全过，所以重发就能救。
+ *
+ * 不重试的代价是「解析十次坏三次」这种最难查的间歇故障：用户看到的只是一句
+ * 「源站返回 403」，刷新一下又好了，只会以为规则写坏了（**踩过**：接 jable 时第一发就是它）。
+ *
+ * **但重试救不了信誉分被打没的情况，而那正是「排查」本身会造成的**：接 jable 时几分钟内
+ * 往 `/videos/` 打了三十来发探测，之后同一个出口 IP 上**连 curl 都恒 403**，重几次都一样。
+ * 也就是说这条路径上「403 变成常态」的第一嫌疑人是**自己刚才探得太狠**，不是指纹、不是
+ * 请求头、也不是 HTTP 版本 —— 那三个都排查过：换完整 Chrome UA、带/不带 cookie、
+ * undici 开 `allowH2`、curl 强制 `--http1.1`，四组结果与对照组逐一相同。
+ * 所以**排查这类站点必须低频**（几秒一发、总数十几发以内），否则会把唯一的判据毁掉。
+ *
+ * 定在 3 发是因为常开校验的站点（实测 kpkuang 的 `/vodsearch/`，那条路已绕开）
+ * 无论重几次都不会过，多试只是白等 —— 够救间歇型，又不至于在死路上耗太久。
+ */
+const CF_RETRIES = 3
+const CF_RETRY_DELAY_MS = [400, 900, 1600]
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+/**
  * 抓一个源站页面。**返回状态码而不是抛错**：反爬挑战页用的是非标准状态码
  * （实测 cdndefend 回 850），调用方要拿 body 里的挑战常量，交给 ofetch 会被直接当错误吞掉。
+ *
+ * 撞上 Cloudflare 人机校验时会自动重发几次（见 CF_RETRIES）。重试收在这一层而不是
+ * resolve.ts 里，是因为吃这一发的地方不止解析首页：按需取址的逐集取址（`?only=1`）、
+ * 搜索、补封面走的都是这个函数，各写一份必然漂移，漏掉哪个就是那条路上的间歇故障。
  */
 export async function fetchSitePage(
   url: string,
@@ -90,9 +119,17 @@ export async function fetchSitePage(
   if (dispatcher) opts.dispatcher = dispatcher
 
   try {
-    const res = await fetch(url, opts as RequestInit)
-    // 有的站点只在响应头上留标记（Cloudflare 的 cf-mitigated: challenge），body 里看不出来
-    return { status: res.status, body: await res.text(), headers: res.headers }
+    let res = await fetch(url, opts as RequestInit)
+    // 有的站点只在响应头上留标记（Cloudflare 的 cf-mitigated: challenge），body 里看不出来。
+    // body 只能读一次，所以判据要在读之前用响应头先过一遍，读完再用文本兜底
+    let body = await res.text()
+    for (let i = 0; i < CF_RETRIES && isCloudflareChallenge(res.status, body, res.headers); i++) {
+      console.log(`[siteFetch] ${hostOf(url)} 撞上 Cloudflare 人机校验，第 ${i + 1} 次重发`)
+      await sleep(CF_RETRY_DELAY_MS[i] ?? 900)
+      res = await fetch(url, opts as RequestInit)
+      body = await res.text()
+    }
+    return { status: res.status, body, headers: res.headers }
   } catch (e) {
     // 原始报错只有一句 "fetch failed"，根本没法排查，把 cause 带出来。
     // 必须用 createError 而不是裸 Error：裸 Error 会被 h3 归成 500 +「internal server error」，
