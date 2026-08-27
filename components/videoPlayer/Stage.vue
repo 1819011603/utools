@@ -1,15 +1,14 @@
 <template>
   <!--
-    **横向铺出容器**：窄屏通栏贴边，宽屏也要明显比页面容器（max-w-7xl = 1216px）宽——
-    画面是这一页唯一的主角，两侧留白只会把它压小。
-    宽度 = min(视口-3rem, 1600px, 142vh)；最后一项把 16:9 的高度封在 ~80vh 以内，
-    否则宽屏上算出的高度超过视口，画面会被 object-contain 挤出左右黑边（看着像片源比例不对）。
+    **只有窄屏（手机）通栏铺满**：手机上 16:9 本来就不高，两侧再留白只会把它压得更小；
+    宽屏则老老实实待在容器里（照旧带圆角）。
+    ⚠️ 这里曾试过 `sm:w-[calc(100vw-3rem)]` 想把画面铺得更宽 —— **`calc` 里的 `-` 两边必须有空格**，
+    `calc(100vw-3rem)` 是无效 CSS，整条声明被丢掉 → 基础的 `w-screen` 在所有断点上都生效，
+    画面当场变成整个视口宽、高度顶出屏幕。要写的话得用 Tailwind 的下划线转义
+    （`calc(100vw_-_3rem)`），但眼下不需要：画面大小保持原样。
     100vw 比可用宽度多出的滚动条宽度由 layouts/default.vue 根上的 overflow-x-clip 兜住。
   -->
-  <div
-    class="relative left-1/2 -translate-x-1/2 w-screen
-           sm:w-[calc(100vw-3rem)] sm:max-w-[min(1600px,142vh)]"
-  >
+  <div class="relative left-1/2 -translate-x-1/2 w-screen sm:left-auto sm:translate-x-0 sm:w-auto">
     <!-- 手势全部走 Pointer Events（鼠标/触摸同一套，见 useVideoGestures） -->
     <div
       ref="playerContainer"
@@ -234,17 +233,17 @@
         {{ currentVideoName }}
       </UBadge>
 
-      <!-- 换线路已经做进画面里了（控制栏的「换源」），这一颗是「回解析页重挑一次」 -->
+      <!-- 回解析页换线路。控制栏那颗「换源」是原地换（留在这一集），这一颗是回去重挑一次，两个都要留 -->
       <UButton
         v-if="playlistSource"
         size="xs"
         variant="soft"
         color="violet"
         icon="i-heroicons-arrow-uturn-left"
-        title="回解析页重挑线路/集数（带着本片地址和当前线路过去）"
+        title="回解析页，可换线路/换集（带着本片地址和当前线路过去）"
         @click="backToParseSource"
       >
-        解析页
+        换线路
       </UButton>
 
       <!-- 用 <a>（:to + external）而不是 window.open：后者只能在用户手势的调用栈里同步调。
@@ -301,15 +300,22 @@ const {
  * 画面尺寸（设置抽屉里那一排）。
  * 非全屏一律保持 16:9 的盒子——页面版式不能被片源比例带着跳，只换 object-fit；
  * 全屏才允许换盒子形状。默认档在全屏里给 `w-auto h-full`，让画面按自己的比例居中。
+ *
+ * ⚠️ **比例只能写 `aspect-[16/9]`，绝不能用 `aspect-video`**：@nuxt/ui 挂了老的
+ * `@tailwindcss/aspect-ratio` 插件，它把 `theme.aspectRatio` 整个换成 `{1…16}`（给
+ * `aspect-w-16`/`aspect-h-9` 用的），于是 `video` 这个键压根不存在 —— `aspect-video`
+ * **一个字节的 CSS 都不生成**，而任意值 `aspect-[16/9]` 照旧可用。
+ * 这个坑在 16:9 片源上看不出来（`<video>` 自己就是 16:9），
+ * 换成 4:3 的源（实测 ncat22 某剧）盒子当场长到 4:3、高度顶出屏幕。
  */
 const fitClass = computed(() => {
   const fs = isFullscreen.value
-  const box = fs ? 'w-full h-full' : 'w-full aspect-video max-h-[80vh]'
+  const box = fs ? 'w-full h-full' : 'w-full aspect-[16/9] max-h-[78vh]'
   switch (fitMode.value) {
     case 'cover': return `${box} object-cover`
     case 'fill': return `${box} object-fill`
-    case '16-9': return `${fs ? 'h-full aspect-video' : box} object-fill`
-    case '4-3': return `${fs ? 'h-full aspect-[4/3]' : 'w-full aspect-[4/3] max-h-[80vh]'} object-fill`
+    case '16-9': return `${fs ? 'h-full aspect-[16/9]' : box} object-fill`
+    case '4-3': return `${fs ? 'h-full aspect-[4/3]' : 'w-full aspect-[4/3] max-h-[78vh]'} object-fill`
     default: return fs ? 'w-auto h-full' : `${box} object-contain`
   }
 })

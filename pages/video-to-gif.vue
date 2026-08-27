@@ -41,7 +41,9 @@
         </div>
 
         <div v-else class="space-y-4">
-          <div class="rounded-lg overflow-hidden bg-black aspect-video relative">
+          <!-- 比例必须写 `aspect-[16/9]`：@nuxt/ui 挂的老 aspect-ratio 插件把 theme.aspectRatio
+               换成了 {1…16}，`aspect-video` 一个字节的 CSS 都不生成（16:9 的源看不出来） -->
+          <div class="rounded-lg overflow-hidden bg-black aspect-[16/9] relative">
             <video
               ref="videoRef"
               :src="videoUrl"
