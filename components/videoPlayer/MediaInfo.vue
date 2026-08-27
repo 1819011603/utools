@@ -142,9 +142,7 @@ const readyStateText = computed(() => READY_STATE[mediaInfo.value.readyState] ??
 </script>
 
 <style scoped>
-/* 滚动条那条灰槽在黑画面上是最扎眼的一块，而且它不吃 backdrop-blur（同 Stage 里那份 .no-sb） */
-.no-sb { scrollbar-width: none; -ms-overflow-style: none; }
-.no-sb::-webkit-scrollbar { display: none; }
+/* .no-sb（隐藏滚动条）在 assets/css/motion.css 里，scoped 罩不到别的组件、抄一份漏一份 */
 
 .info-enter-active { transition: opacity .16s ease, transform .24s cubic-bezier(.2, 1.4, .4, 1); }
 .info-leave-active { transition: opacity .16s ease; }

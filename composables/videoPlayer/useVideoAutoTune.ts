@@ -38,18 +38,17 @@ export interface VideoAutoTuneDeps {
 
 export function useVideoAutoTune(deps: VideoAutoTuneDeps) {
   const { media, tier, conn, engine } = deps
-  const { isHls, videoEl, playbackRate, desiredRate, autoBestRate } = media
+  const { isHls, videoEl, playbackRate, desiredRate, autoBestRate, boostRatePref } = media
   const { strategy, stall } = engine
 
   let lastAutoRateAt = 0     // 上次自动调整时刻（惰性期起点）
   let downSince = 0          // 「带宽撑不住」持续起点（0=当前撑得住）
   let nudgePending = false   // 用户刚改上限：下一次提速可跳过台阶与「连续流畅」门槛（点了要有反应）
 
-  // 长按倍速（手势层的「按住加速」）。它是**临时叠加**，不写进 playbackRate——
-  // 后者是闭环算出来的稳态值，被临时值污染的话松手后自愈环会以为用户改了倍速。
-  // 于是这里只改 <video> 元素本身，闭环照常跑，setRate 每次都把叠加重新贴上去。
+  // 长按倍速是**临时叠加**，不写进 playbackRate——后者是闭环算出的稳态值，
+  // 被临时值污染的话松手后自愈环会以为用户改了倍速。所以只改 <video> 本身
   const boostActive = ref(false)
-  const BOOST_RATE = 2
+  const boostFloor = () => boostRatePref.value || 2
 
   /**
    * 自动模式的倍速上限：默认 2x；用户在倍速菜单里选了更高的档位就以那个为准。
@@ -59,7 +58,7 @@ export function useVideoAutoTune(deps: VideoAutoTuneDeps) {
 
   const setRate = (r: number) => {
     playbackRate.value = r
-    if (videoEl.value) videoEl.value.playbackRate = boostActive.value ? Math.max(BOOST_RATE, r) : r
+    if (videoEl.value) videoEl.value.playbackRate = boostActive.value ? Math.max(boostFloor(), r) : r
   }
 
   /** 长按加速的开关。松手立刻回到闭环当前认定的倍速（而不是回到 1x） */
@@ -67,12 +66,12 @@ export function useVideoAutoTune(deps: VideoAutoTuneDeps) {
     if (boostActive.value === on) return
     boostActive.value = on
     if (videoEl.value) {
-      videoEl.value.playbackRate = on ? Math.max(BOOST_RATE, playbackRate.value) : playbackRate.value
+      videoEl.value.playbackRate = on ? Math.max(boostFloor(), playbackRate.value) : playbackRate.value
     }
   }
 
   /** 长按期间实际生效的倍速（HUD 上要显示真实值，用户可能本来就在 3x） */
-  const boostRate = computed(() => Math.max(BOOST_RATE, playbackRate.value))
+  const boostRate = computed(() => Math.max(boostRatePref.value || 2, playbackRate.value))
 
   /**
    * 计算并应用「实际生效倍速」：

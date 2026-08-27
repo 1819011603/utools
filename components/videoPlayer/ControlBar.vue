@@ -4,23 +4,15 @@
       v-show="controlsVisible"
       data-no-gesture
       class="absolute z-10 bottom-0 left-0 right-0 pointer-events-none
-             bg-gradient-to-t from-black/85 via-black/40 to-transparent px-2.5 pb-2.5 pt-8 sm:px-4 sm:pb-4 sm:pt-12"
+             bg-gradient-to-t from-black/90 via-black/45 to-transparent
+             px-2.5 pb-2 pt-8 sm:px-5 sm:pb-3.5 sm:pt-14"
       @click.stop
       @pointerdown="keepControlsAlive"
       @pointerup="keepControlsAlive"
     >
-      <!--
-        腾讯视频移动端那套排布：竖屏时进度条**内联在按钮行里**（播放 | 时间 | 进度 | 倍速 | 全屏），
-        宽屏才让它独占上面一行。原来固定「进度条一行 + 按钮一行」，
-        窄屏上十来个控件挤成一坨还互相压字（实测截图里时间和齿轮叠在一起）。
-        一行流式布局 + order 换位，两种屏幕共用同一个 progressBar ref。
-      -->
-      <!--
-        `pointer-events-auto` 只给这一行：外层那圈渐变+上留白在小窗里有几十 px 高，
-        让它吃事件的话，画面中间的双击（播放/暂停）全被它接走了——表现就是「小窗点不动」。
-        `flex-nowrap`：窄屏一换行就摞成两排糊在画面中间（实测截图），宁可各项收小。
-      -->
-      <div class="pointer-events-auto flex items-center gap-1 flex-nowrap sm:gap-1.5 sm:flex-wrap">
+      <!-- `pointer-events-auto` 只给这一行：外层那圈渐变在小窗里有几十 px 高，
+           让它吃事件的话画面中间的双击全被它接走（表现是「小窗点不动」） -->
+      <div class="pointer-events-auto flex items-center gap-1 flex-nowrap sm:gap-2 sm:flex-wrap">
         <button
           class="order-1 p-1 sm:p-1.5 rounded-lg text-white hover:bg-white/15 active:scale-90 transition-all shrink-0"
           @click="togglePlay"
@@ -28,24 +20,12 @@
           <UIcon :name="isPlaying ? 'i-heroicons-pause-solid' : 'i-heroicons-play-solid'" class="w-6 h-6 sm:w-7 sm:h-7" />
         </button>
 
-        <!--
-          **窄屏也要有「上一集」**。原来是 `hidden sm:block`（竖屏一行放不下就砍它），
-          代价是手机上根本没法往回切集，而且更坑的是：用户会去点「本该有这枚按钮的位置」，
-          那儿是画面本身 → 连点两下正好被手势层判成双击 → 整个进了全屏
-          （用户报「小屏点上下集就全屏了，没法切集」，根因就是这枚按钮不在）。
-          一行放得下：窄屏本来就把音量整组、下载、画中画都收了。
-
-          两个按钮在切集期间换成转圈图标：切集要等取址/探测/建流，画面中央那个转圈
-          离手指很远，按钮自己不给反馈的话看着就像「点了没用」（于是用户又点一下）。
-          **但绝不能 `:disabled`**：Chrome 不给 disabled 控件派发鼠标事件，那一下会落到
-          容器上被手势层接走 → 又是「点切集结果全屏了」。切集中照样可点，
-          交给 playByIndex 的 latest-wins 排队处理（连点两下就是跳两集，本来就该这样）。
-        -->
+        <!-- 窄屏也必须有「上一集」，且切集期间只换转圈图标、**绝不 `:disabled`**
+             （两条都是为了不让那一下落到手势层上变成「点切集结果全屏了」） -->
         <button
           v-if="playlist.length > 1"
           class="order-1 p-1 sm:p-1.5 rounded-lg text-white transition-all shrink-0"
           :class="hasPrev ? 'hover:bg-white/15 active:scale-90' : 'opacity-40 cursor-not-allowed'"
-          :disabled="!hasPrev"
           title="上一集（P）"
           @click="playPrev"
         >
@@ -54,16 +34,11 @@
             class="w-5 h-5 sm:w-6 sm:h-6" :class="{ 'animate-spin': isSwitching }"
           />
         </button>
-        <!--
-          hover / 手指按下就开始备下一集（见 useVideoPrewarm.prewarmNextNow）：
-          比任何时间窗口都准的意图信号，能把「中途手动点下一集」从全冷路径救回来。
-          pointerenter 覆盖鼠标与触摸笔，touchstart 补上手指（触摸端没有真正的 hover）。
-        -->
+        <!-- hover / 手指按下就开始备下一集：比任何时间窗口都准的意图信号 -->
         <button
           v-if="playlist.length > 1"
           class="order-1 p-1 sm:p-1.5 rounded-lg text-white transition-all shrink-0"
           :class="hasNext ? 'hover:bg-white/15 active:scale-90' : 'opacity-40 cursor-not-allowed'"
-          :disabled="!hasNext"
           title="下一集（N）"
           @pointerenter="hasNext && prewarmNextNow()"
           @touchstart.passive="hasNext && prewarmNextNow()"
@@ -75,8 +50,8 @@
           />
         </button>
 
-        <!-- 手机上没有 hover，滑条永远展不开；音量有硬件键和竖滑手势，整组藏起来腾地方 -->
-        <div class="order-1 hidden sm:flex items-center gap-2 group/volume ml-1 shrink-0">
+        <!-- 手机上没有 hover，滑条永远展不开；音量有硬件键、竖滑手势和设置抽屉，整组藏起来腾地方 -->
+        <div class="order-1 hidden sm:flex items-center gap-2 group/volume shrink-0">
           <button class="p-1.5 rounded-lg text-white hover:bg-white/15 transition-all" @click="toggleMute">
             <UIcon :name="volumeIcon" class="w-6 h-6" />
           </button>
@@ -84,120 +59,157 @@
             <input
               type="range" min="0" max="1" step="0.05"
               :value="volume"
-              class="w-full h-1 bg-white/30 rounded-full appearance-none cursor-pointer accent-violet-500"
+              class="w-full h-1 bg-white/30 rounded-full appearance-none cursor-pointer accent-rose-500"
               @input="setVolume"
-            />
+            >
           </div>
         </div>
 
-        <span class="order-2 text-white text-[11px] sm:text-sm font-mono tabular-nums whitespace-nowrap shrink-0">
-          {{ formatTime(currentTime) }}<span class="text-white/50"> / {{ formatTime(duration) }}</span>
-        </span>
-
-        <!-- 进度条：窄屏内联占据中间空档，宽屏 order-first + w-full 自己占一行 -->
+        <!-- 进度那一组：时间 | 条 | 总时长。窄屏内联占中间空档，宽屏独占上面一行 -->
         <div
-          ref="progressBar"
-          class="order-3 flex-1 min-w-[64px] sm:order-first sm:w-full sm:flex-none sm:mb-1.5
-                 relative h-1 sm:h-1.5 bg-white/25 rounded-full cursor-pointer group/progress touch-none"
-          @pointerdown="startSeek"
-          @mousemove="updateHoverTime"
-          @mouseleave="hoverTime = null"
+          class="order-3 flex-1 min-w-0 flex items-center gap-2 sm:gap-3
+                 sm:order-first sm:w-full sm:flex-none sm:mb-1"
         >
-          <div class="absolute h-full bg-white/35 rounded-full" :style="{ width: bufferedPercent + '%' }" />
+          <span class="shrink-0 text-white text-[11px] sm:text-[13px] font-mono tabular-nums">
+            {{ formatTime(currentTime) }}
+          </span>
+
           <div
-            class="absolute h-full rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-400
-                   shadow-[0_0_8px_rgba(167,139,250,.7)]"
-            :style="{ width: progressPercent + '%' }"
-          />
-          <!-- 圆钮常显（腾讯也是常显）：触摸端没有 hover，藏起来就等于没有抓手 -->
-          <div
-            class="absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 sm:w-4 sm:h-4 bg-white rounded-full shadow-lg
-                   ring-2 ring-violet-400/50 transition-transform group-hover/progress:scale-125"
-            :style="{ left: `calc(${progressPercent}% - 7px)` }"
-          />
-          <!--
-            悬浮预览：只报时间。**这里曾经有缩略图，已整套删除**——
-            这些源站不提供任何预生成的预览图（清单里既没有 `EXT-X-IMAGE-STREAM-INF` 也没有雪碧图），
-            自己解帧就必须为每个位置下几百 KB 的分片再解码，慢、抢连接、还挑封装。
-            腾讯那种秒出的预览是转码时预生成好的静态图，我们这边没有那个前提。
-          -->
-          <div
-            v-if="hoverTime !== null"
-            class="absolute bottom-full mb-2.5 px-2 py-1 bg-black/80 text-white text-xs rounded
-                   font-mono tabular-nums -translate-x-1/2 pointer-events-none"
-            :style="{ left: hoverPercent + '%' }"
+            ref="progressBar"
+            class="relative flex-1 min-w-[52px] h-[3px] sm:h-1 bg-white/25 rounded-full
+                   cursor-pointer group/progress touch-none"
+            @pointerdown="startSeek"
+            @mousemove="updateHoverTime"
+            @mouseleave="hoverTime = null"
           >
-            {{ formatTime(hoverTime) }}
+            <div class="absolute h-full bg-white/35 rounded-full" :style="{ width: bufferedPercent + '%' }" />
+            <div
+              class="absolute h-full rounded-full bg-gradient-to-r from-rose-500 to-fuchsia-400
+                     shadow-[0_0_8px_rgba(244,63,94,.6)]"
+              :style="{ width: progressPercent + '%' }"
+            />
+            <!-- 圆钮常显：触摸端没有 hover，藏起来就等于没有抓手 -->
+            <div
+              class="absolute top-1/2 -translate-y-1/2 w-3 h-3 sm:w-3.5 sm:h-3.5 bg-rose-500 rounded-full
+                     shadow-lg ring-2 ring-white/70 transition-transform group-hover/progress:scale-125"
+              :style="{ left: `calc(${progressPercent}% - 6px)` }"
+            />
+            <div
+              v-if="hoverTime !== null"
+              class="absolute bottom-full mb-2 px-1.5 py-0.5 bg-black/85 text-white text-[11px] rounded
+                     font-mono tabular-nums -translate-x-1/2 pointer-events-none"
+              :style="{ left: hoverPercent + '%' }"
+            >{{ formatTime(hoverTime) }}</div>
+            <div
+              v-else-if="seekPreviewTime !== null"
+              class="absolute bottom-full mb-2 px-1.5 py-0.5 bg-black/85 text-white text-[11px] rounded
+                     font-mono tabular-nums -translate-x-1/2"
+              :style="{ left: seekPreviewPercent + '%' }"
+            >{{ formatTime(seekPreviewTime) }}</div>
           </div>
-          <div
-            v-else-if="seekPreviewTime !== null"
-            class="absolute bottom-full mb-2.5 px-2 py-1 bg-black/80 text-white text-xs rounded
-                   font-mono tabular-nums transform -translate-x-1/2"
-            :style="{ left: seekPreviewPercent + '%' }"
-          >
-            {{ formatTime(seekPreviewTime) }}
-          </div>
+
+          <span class="shrink-0 text-white/55 text-[11px] sm:text-[13px] font-mono tabular-nums">
+            {{ formatTime(duration) }}
+          </span>
         </div>
 
-        <!--
-          右侧一组：宽屏时靠 ml-auto 推到最右（进度条独占上一行后这行需要自己撑开）。
-          **间距和触靶都比左侧一组松**：这几个是最常点的（倍速/设置/全屏），
-          原来 `gap-0.5` + `p-1.5` 在宽屏上挤成一坨、几个图标边缘几乎贴着（用户反馈）。
-          窄屏仍收紧——那一行本来就快放不下（`flex-nowrap`，一换行就摞成两排糊在画面中间）。
-        -->
-        <div class="order-4 flex items-center gap-1 sm:gap-2 shrink-0 sm:ml-auto">
-          <!-- 清晰度：优先显示解码实测的真实像素，清单声明的值不总是准（见 useVideoEvents.videoRes）。
-               窄屏藏起来——这一行本来就挤，清晰度不如倍速/设置/全屏要紧 -->
-          <span v-if="videoRes" class="hidden sm:inline px-1 text-xs font-medium text-white/70 whitespace-nowrap">{{ videoRes }}</span>
+        <!-- 右侧一组：宽屏靠 ml-auto 推到最右（进度条独占上一行后这行要自己撑开） -->
+        <div class="order-4 flex items-center gap-0.5 sm:gap-2 shrink-0 sm:ml-auto">
+          <!-- 换源：线路表来自解析，只有真的有第二条线路才出。全屏时页面上那些入口全看不见 -->
+          <button
+            v-if="playlistLines.length > 1"
+            class="hidden sm:flex items-center gap-1 px-2 py-1.5 rounded-lg text-white text-sm
+                   hover:bg-white/15 active:scale-95 transition-all whitespace-nowrap"
+            :class="{ 'bg-white/15': showLines }"
+            title="换线路（留在这一集、接着当前进度）"
+            @click="openPanel('lines')"
+          >
+            <UIcon v-if="isSwitchingLine" name="i-heroicons-arrow-path" class="w-4 h-4 animate-spin" />
+            换源
+          </button>
+          <!-- 当前线路：安卓端就是这么一枚「L4」，占地小、又一眼看得出在哪条线上 -->
+          <span
+            v-if="lineTag"
+            class="px-1 text-xs font-medium text-white/60 tabular-nums whitespace-nowrap"
+            :title="`当前线路：${lineName}`"
+          >{{ lineTag }}</span>
+
+          <span v-if="videoRes" class="hidden sm:inline px-1 text-xs font-medium text-white/60 whitespace-nowrap">
+            {{ videoRes }}
+          </span>
+
           <div ref="speedMenuRef" class="relative">
             <button
-              class="px-1.5 sm:px-2.5 py-1.5 sm:py-2 rounded-lg text-white hover:bg-white/15 transition-all text-xs sm:text-sm font-semibold whitespace-nowrap"
+              class="px-1.5 sm:px-2 py-1.5 rounded-lg text-white hover:bg-white/15 transition-all
+                     text-xs sm:text-sm font-semibold whitespace-nowrap"
               :title="autoBestRate
                 ? `自动最佳倍速：上限 ${autoRateCap}x，当前带宽下实际 ${playbackRate}x` : `倍速 ${playbackRate}x`"
               @click="showSpeedMenu = !showSpeedMenu"
             >
-              <!-- 「/上限」只要开着自动就常显：早先加了 playbackRate !== autoRateCap 的条件，
-                   生效倍速一爬到上限后缀就消失，控制栏上反而看不出自动还开着、上限是几 -->
-              {{ playbackRate }}x<span v-if="autoBestRate" class="text-white/50">/{{ autoRateCap }}</span>
+              {{ playbackRate }}x<span v-if="autoBestRate" class="text-white/45">/{{ autoRateCap }}</span>
             </button>
             <Transition name="fade">
               <!--
-                   z-30：菜单要盖过顶部信息条（z-[5]）和控制栏自己。原来没设 z，
-                   菜单往上展开时最上面那几档（3.0x）正好落在顶部信息条底下，点不着。
-                   再加高度上限 + 自身滚动：画面只有 200 多 px 高时，八个档位一屏放不下。
+                高度上限分两档：竖屏时播放器只有 200 多 px 高、容器又是 overflow-hidden，
+                给 vh 的话菜单会被裁掉一半（`60vh` 在手机上远大于播放器本身）。
               -->
               <div
                 v-if="showSpeedMenu"
                 ref="speedMenuList"
-                class="no-sb absolute z-30 bottom-full right-0 mb-2 rounded-xl overflow-y-auto
-                       min-w-[88px] max-h-[min(60vh,240px)]
-                       bg-gradient-to-br from-white/10 via-rose-200/10 to-violet-300/15
-                       backdrop-blur-md ring-1 ring-white/20 shadow-xl shadow-violet-950/20"
+                class="no-sb absolute z-30 bottom-full right-0 mb-2 rounded-lg overflow-y-auto
+                       min-w-[64px] max-h-[104px] sm:max-h-[228px]
+                       bg-black/80 backdrop-blur-xl ring-1 ring-white/10 shadow-xl"
               >
-                <!-- 档位表来自 controls.rateOptions：开了「超快倍速」才多出 3.5~5x 那几档 -->
                 <button
                   v-for="rate in rateOptions"
                   :key="rate"
                   :data-rate="rate"
-                  class="block w-full px-5 py-2.5 text-sm text-white text-center transition-colors
-                         hover:bg-white/15 drop-shadow-[0_1px_2px_rgba(0,0,0,.8)]"
-                  :class="{ 'bg-gradient-to-r from-rose-400/45 to-violet-400/45 font-semibold': desiredRate === rate }"
+                  class="block w-full px-3.5 py-1.5 text-xs text-white/85 text-center transition-colors hover:bg-white/10"
+                  :class="{ 'bg-rose-500/85 text-white font-semibold': desiredRate === rate }"
                   @click="setPlaybackRate(rate)"
-                >
-                  {{ rate }}x
-                </button>
+                >{{ rate }}x</button>
               </div>
             </Transition>
           </div>
 
-          <!-- 自动全屏 / 自动倍速 / 跳过片头片尾：全是看片当下才改的，放这儿手不用离开画面 -->
-          <VideoPlayerSettingsMenu />
-
-          <button v-if="supportsPiP && !isNarrow" class="p-1.5 sm:p-2 rounded-lg text-white hover:bg-white/15 transition-all" title="画中画（I）" @click="togglePiP">
-            <UIcon name="i-heroicons-rectangle-stack" class="w-6 h-6 sm:w-7 sm:h-7" />
+          <!-- 选集：从顶栏挪到这儿（安卓端也在这一行）。全屏里换集是最高频的动作 -->
+          <button
+            v-if="playlist.length > 1"
+            class="flex items-center gap-1 px-1.5 sm:px-2 py-1.5 rounded-lg text-white text-xs sm:text-sm
+                   transition-all active:scale-95 whitespace-nowrap"
+            :class="showEpisodes ? 'bg-rose-500/80' : 'hover:bg-white/15'"
+            title="选集"
+            @click="openPanel('episodes')"
+          >
+            <UIcon name="i-heroicons-queue-list" class="w-5 h-5 sm:hidden" />
+            <span class="hidden sm:inline">选集</span>
           </button>
 
-          <button class="p-1.5 sm:p-2 rounded-lg text-white hover:bg-white/15 active:scale-90 transition-all" title="全屏（F）" @click="toggleFullscreen">
+          <button
+            class="p-1 sm:p-1.5 rounded-lg text-white hover:bg-white/15 transition-all"
+            title="播放设置"
+            @click="openPanel('settings')"
+          >
+            <UIcon
+              name="i-heroicons-cog-6-tooth" class="w-5 h-5 sm:w-6 sm:h-6 transition-transform"
+              :class="{ 'rotate-90': showSettings }"
+            />
+          </button>
+
+          <button
+            v-if="supportsPiP && !isNarrow"
+            class="p-1.5 rounded-lg text-white hover:bg-white/15 transition-all"
+            title="画中画（I）"
+            @click="togglePiP"
+          >
+            <UIcon name="i-heroicons-rectangle-stack" class="w-6 h-6" />
+          </button>
+
+          <button
+            class="p-1 sm:p-1.5 rounded-lg text-white hover:bg-white/15 active:scale-90 transition-all"
+            title="全屏（F）"
+            @click="toggleFullscreen"
+          >
             <UIcon
               :name="isFullscreen ? 'i-heroicons-arrows-pointing-in' : 'i-heroicons-arrows-pointing-out'"
               class="w-6 h-6 sm:w-7 sm:h-7"
@@ -211,13 +223,11 @@
 
 <script setup lang="ts">
 /**
- * 播放器底部控制栏：播放/上下集/音量/时间/进度条/倍速/设置/画中画/全屏。
+ * 底部控制栏。**不传 props**，跟其它子组件一样各自 `useVideoPlayerCtx()`
+ * ——所以各模块返回的键名不能重复（见 useVideoPlayerController）。
  *
- * 从 Stage.vue 拆出来（那边超了 500 行）。**不传 props**，跟其它子组件一样各自
- * `useVideoPlayerCtx()` 解构——所以各模块返回的键名不能重复（见 useVideoPlayerController）。
- *
- * 版式参照腾讯视频移动端：窄屏时进度条**内联在按钮行里**，宽屏才 `order-first + w-full`
- * 让它独占上面一行（同一个 progressBar ref，靠 order 换位）。
+ * 版式照安卓客户端：时间分列进度条两侧；窄屏整条内联在按钮行里，
+ * 宽屏/全屏时进度那组 `order-first + w-full` 独占上面一行（同一个 progressBar ref，靠 order 换位）。
  */
 import { onClickOutside } from '@vueuse/core'
 
@@ -227,23 +237,33 @@ const {
   progressPercent, bufferedPercent, seekPreviewTime, seekPreviewPercent, hoverTime, hoverPercent,
   playlist, hasPrev, hasNext, isSwitching, prewarmNextNow,
   volumeIcon, supportsPiP, showSpeedMenu, controlsVisible,
+  showEpisodes, showSettings, showLines,
+  playlistLines, playlistSource, isSwitchingLine,
   togglePlay, startSeek, updateHoverTime, setVolume, toggleMute, setPlaybackRate, rateOptions,
   toggleFullscreen, togglePiP, keepControlsAlive, playPrev, playNext,
-  // 清晰度：与页面信息条、全屏顶栏共用同一份计算（useVideoEvents.videoRes）
   videoRes,
 } = useVideoPlayerCtx()
 
-// 倍速菜单点击外部关闭
 onClickOutside(speedMenuRef, () => { showSpeedMenu.value = false })
 
+const lineName = computed(() =>
+  playlistLines.value[playlistSource.value?.line ?? -1]?.name || playlistSource.value?.lineName || '')
+// 「L4」= 第 4 条线路。名字往往是「超清2」这种长串，控制栏上放不下
+const lineTag = computed(() => {
+  const i = playlistSource.value?.line
+  return typeof i === 'number' && i >= 0 && playlistLines.value.length > 1 ? `L${i + 1}` : ''
+})
+
+/** 三个浮层互斥：两块都摊在画面右侧，同时开就是叠在一起 */
+const openPanel = (which: 'episodes' | 'settings' | 'lines') => {
+  showEpisodes.value = which === 'episodes' && !showEpisodes.value
+  showSettings.value = which === 'settings' && !showSettings.value
+  showLines.value = which === 'lines' && !showLines.value
+}
+
 /**
- * 打开倍速菜单时把当前档位滚到视野中间。
- *
- * 八个档位一屏放不下（画面只有 200 多 px 高时更挤），而常用的高倍速正好在列表尾部——
- * 不定位的话每次打开都停在 0.5x，用户得先滑一段才看得见自己选的是哪个。
- *
- * 用 scrollTop 手算而不是 `scrollIntoView({ block: 'center' })`：后者会顺带滚动**外层**的
- * 滚动容器（页面/全屏层），表现是菜单一开画面自己往上跳一下。
+ * 打开倍速菜单时把当前档位滚到视野中间。用 scrollTop 手算而不是
+ * `scrollIntoView({ block: 'center' })`——后者会顺带滚动**外层**容器，表现是菜单一开画面自己往上跳。
  */
 const speedMenuList = ref<HTMLElement | null>(null)
 watch(showSpeedMenu, async (open) => {
@@ -255,14 +275,12 @@ watch(showSpeedMenu, async (open) => {
   box.scrollTop = item.offsetTop - (box.clientHeight - item.offsetHeight) / 2
 })
 
-// 窄屏（手机竖屏）：控制栏塞不下这么多图标，画中画这类低频项直接不渲染。
-// 判定收在 useNarrowScreen 里（Stage 也要用同一个断点，各写一份必然漂移）
+// 窄屏（手机竖屏）：画中画这类低频项直接不渲染。断点收在 useNarrowScreen 里（Stage 也要用同一个）
 const isNarrow = useNarrowScreen()
 </script>
 
 <style scoped>
-/* 控制栏：起落带一点缓动过冲，比线性 ease 显得「托」得住。
-   scoped 样式必须跟着元素走——留在父组件里罩不到子组件内部，等于淡入淡出全是硬切 */
+/* scoped 样式必须跟着元素走——留在父组件里罩不到子组件内部，等于淡入淡出全是硬切 */
 .slide-up-enter-active { transition: opacity .25s ease, transform .32s cubic-bezier(.22, 1.4, .36, 1); }
 .slide-up-leave-active { transition: opacity .2s ease, transform .2s ease-in; }
 .slide-up-enter-from,
@@ -270,4 +288,13 @@ const isNarrow = useNarrowScreen()
 
 .fade-enter-active, .fade-leave-active { transition: opacity .15s ease; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  background: #fff;
+  border-radius: 50%;
+  cursor: pointer;
+}
 </style>

@@ -15,11 +15,19 @@ export interface HlsConfigInput {
   fLoader: any
   /** 自定义清单加载器（命中探测下载过的原文即时返回） */
   pLoader: any
+  /**
+   * 硬件解码开关。**浏览器压根不提供「关掉硬解」的 API**（那是 Chrome 启动参数级别的事），
+   * 所以关掉它能做的唯一一件有用的事是**只挑 H.264 / SDR 的档**：真正会让弱解码器
+   * 音画不同步、拖不动进度的就是 HEVC 与 HDR 那几档，而这两样正好是可以在选档时避开的。
+   */
+  hwDecode: boolean
 }
 
 export function buildHlsConfig(input: HlsConfigInput): Record<string, any> {
   const { tuning: hlsConfigValue, startPos } = input
   return {
+    // 关掉硬解 = 只要 avc1 + SDR 的档（见 HlsConfigInput.hwDecode）
+    ...(input.hwDecode ? {} : { videoPreference: { videoCodec: 'avc1', allowedVideoRanges: ['SDR'] } }),
     // MSE 缓冲要「小而健康」——append 太多（几百 MB）会触发浏览器 MSE 配额/驱逐，
     // 产生缓冲空洞导致明明缓冲很多却卡在原地。真正的大量预读放在 JS 预取缓存里
     //（容量 = maxBufferSizeMB），hls.js 只在 MSE 里留 ~30s，随播随取。

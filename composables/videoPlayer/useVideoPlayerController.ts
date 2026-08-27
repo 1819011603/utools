@@ -111,6 +111,9 @@ export function useVideoPlayerController() {
         turboRate: media.turboRate.value,
         skipIntro: media.skipIntro.value,
         skipOutro: media.skipOutro.value,
+        fitMode: media.fitMode.value,
+        hwDecode: media.hwDecode.value,
+        boostRate: media.boostRatePref.value,
         requestOrigin: conn.requestOrigin.value,
         requestReferer: conn.requestReferer.value,
         manifestOnly: conn.manifestOnly.value,
@@ -138,6 +141,9 @@ export function useVideoPlayerController() {
     media.turboRate.value = s.turboRate ?? false
     media.skipIntro.value = s.skipIntro ?? 0
     media.skipOutro.value = s.skipOutro ?? 0
+    media.fitMode.value = s.fitMode ?? 'default'
+    media.hwDecode.value = s.hwDecode ?? true
+    media.boostRatePref.value = s.boostRate ?? 2
     conn.useProxy.value = s.useProxy ?? false
     conn.requestOrigin.value = s.requestOrigin ?? ''
     conn.requestReferer.value = s.requestReferer ?? ''

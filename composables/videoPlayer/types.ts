@@ -115,6 +115,9 @@ export const FACTORY_HLS_TUNING: HlsTuning = {
   backBufferLength: 30,
 }
 
+/** 画面尺寸。`default` = 等比 contain，其余都是牺牲比例去铺满 */
+export type VideoFitMode = 'default' | 'cover' | 'fill' | '16-9' | '4-3'
+
 /** localStorage `video-player-state` 的载荷 */
 export interface SavedState {
   videoUrlInput: string
@@ -130,6 +133,10 @@ export interface SavedState {
   turboRate?: boolean
   skipIntro: number
   skipOutro: number
+  /** 画面尺寸 / 硬件解码 / 长按加速倍数。都可选，老状态里没有 */
+  fitMode?: VideoFitMode
+  hwDecode?: boolean
+  boostRate?: number
   // 引擎当前生效的连接配置。存下来只为刷新后首屏能立刻显示上次的结论，
   // 真正的取值仍由 applyStrategy 每次加载时重新决定（探测/规则/阶梯）。
   requestOrigin: string

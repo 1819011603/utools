@@ -12,8 +12,11 @@
   -->
   <div class="min-h-screen overflow-x-clip bg-gradient-to-b from-rose-50/70 via-white to-violet-50/60
               dark:from-[#1a1520] dark:via-[#141119] dark:to-[#16121d]">
-    <!-- /video-search 自己有一套「站点按钮 + 结果」的紧凑版式，顶部品牌栏在这一页纯属占地方
-         （屏幕就那么高，多留一行给它，海报网格就得少露半行）——这一页单独不出这层 header -->
+    <!--
+      /video-search 与 /video-player 不出这层 header：
+      前者有自己一套紧凑版式（多留一行给品牌栏，海报网格就得少露半行）；
+      后者要让画面**直接置顶**（品牌栏在看片时纯属占地方，返回入口做进了画面顶栏）。
+    -->
     <header
       v-if="showHeader"
       class="sticky top-0 z-40 bg-white/70 dark:bg-[#171320]/70 backdrop-blur-xl
@@ -111,7 +114,8 @@
       </div>
     </USlideover>
 
-    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <!-- 放映厅不留顶部内边距：画面要贴着视口顶边（Stage 自己会横向铺出容器） -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-8" :class="isPlayerPage ? 'pt-0' : 'pt-8'">
       <slot />
     </main>
 
@@ -145,7 +149,8 @@ interface Category {
 const route = useRoute()
 const mobileMenuOpen = ref(false)
 
-const showHeader = computed(() => route.path !== '/video-search')
+const isPlayerPage = computed(() => route.path === '/video-player')
+const showHeader = computed(() => route.path !== '/video-search' && !isPlayerPage.value)
 
 /*
  * 云同步挂在**布局**上而不是某个页面上：清单会在 /video-player、/video-parse、

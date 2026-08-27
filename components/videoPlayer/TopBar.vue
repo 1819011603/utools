@@ -3,56 +3,48 @@
     <div
       v-show="controlsVisible"
       data-no-gesture
-      class="absolute top-0 left-0 right-0 z-[5] bg-gradient-to-b from-black/80 to-transparent px-3 pt-3 pb-10
-             flex items-center gap-2 text-white"
+      class="absolute top-0 left-0 right-0 z-[5] bg-gradient-to-b from-black/85 to-transparent
+             px-2 pt-2 pb-8 sm:px-3 sm:pt-2.5 sm:pb-10 flex items-center gap-1.5 text-white"
       @pointerdown="keepControlsAlive"
       @pointerup="keepControlsAlive"
     >
-      <!-- 全屏里没有浏览器的返回键，退出全屏得有个显眼的入口（横屏握持时右上角够不着） -->
+      <!--
+        返回键**常显**。这一页不出站点的品牌栏（画面要置顶），它是唯一的出口；
+        全屏里则是退出全屏（横屏握持时右上角够不着，而全屏内没有浏览器的返回键）。
+      -->
       <button
-        v-if="isFullscreen"
-        class="p-2 rounded-lg hover:bg-white/15 active:scale-90 transition-all shrink-0"
-        title="退出全屏"
-        @click="toggleFullscreen"
+        class="p-1.5 rounded-lg hover:bg-white/15 active:scale-90 transition-all shrink-0"
+        :title="isFullscreen ? '退出全屏' : '返回'"
+        @click="goBack"
       >
-        <UIcon name="i-heroicons-arrow-left" class="w-6 h-6" />
+        <UIcon name="i-heroicons-arrow-left" class="w-5 h-5 sm:w-6 sm:h-6" />
       </button>
 
       <div class="min-w-0 flex-1">
-        <div class="font-semibold truncate drop-shadow">{{ playlistTitle || '放映厅' }}</div>
-        <div class="text-xs text-white/70 truncate">
+        <div class="text-sm sm:text-[15px] font-semibold truncate drop-shadow">
+          {{ playlistTitle || '放映厅' }}
+          <span v-if="videoRes" class="ml-1 text-xs font-normal text-white/55">| {{ videoRes }}</span>
+        </div>
+        <div v-if="currentVideoName" class="text-[11px] text-white/60 truncate">
           <span v-if="playlist.length > 1">{{ currentVideoName }} · 第 {{ currentIndex + 1 }}/{{ playlist.length }} 集</span>
           <span v-else>{{ currentVideoName }}</span>
         </div>
       </div>
 
       <!--
-        速度 + 时间 + 电量，**只在全屏出**：小窗时系统状态栏就在上面、页面上那行信息条也有一枚速度，
-        再画一份纯属重复。位置放在「选集」左边而不是最右——右上角是拇指最难够到的地方，
-        那儿该留给要点的东西
+        速度 + 时间 + 电量**只在全屏出**：小窗时系统状态栏就在上面、页面上那行信息条也有一枚速度。
+        摆在收藏左边而不是最右——右上角是拇指最难够到的地方，那儿该留给要点的东西。
       -->
-      <div v-if="isFullscreen" class="flex items-center gap-2 shrink-0 text-white/85 tabular-nums">
-        <!-- 清晰度：与页面上那行信息条同一个值（见 useVideoEvents.videoRes），全屏时那行看不见，
-             这里补一份。优先显示解码实测的真实像素，清单声明的值不总是准 -->
-        <span v-if="videoRes" class="text-xs font-medium drop-shadow">{{ videoRes }}</span>
-        <!--
-          聚合下载速度摆在时间/电量**左边**：全屏时页面上那行信息条整个看不见，
-          而「现在到底下得动下不动」恰恰是看片当下最想知道的一件事（卡的时候尤其）。
-          只显示 KB/s / MB/s。**为 0 也照样渲染成「0 KB/s」**：缓存到量停取时聚合本来就是 0，
-          让它消失反而更难读——数字一会儿在一会儿不在，时钟和电池还得跟着左右挪。
-        -->
+      <div v-if="isFullscreen" class="flex items-center gap-2 shrink-0 text-white/80 tabular-nums">
+        <!-- 为 0 也照样渲染成「0 KB/s」：缓存到量停取时聚合本来就是 0，让它消失反而更难读 -->
         <span
           v-if="isHls"
           class="text-xs font-medium drop-shadow"
-          :class="dualChannel ? 'text-emerald-300/90' : 'text-white/70'"
+          :class="dualChannel ? 'text-emerald-300/90' : 'text-white/65'"
           :title="`聚合下载速度 ≈ 单连接 ${formatSpeed(strategy.perConnKBps)} × ${strategy.targetConn} 并发`"
         >{{ formatSpeed(aggregateKBps) }}</span>
-        <!--
-          整片 MP4 的下载速度，与 HLS 那枚同一个位置。
-          **要摆成「实测 / 需要」**：单看一个速度读不出问题，只有跟「码率 × 倍速」对着看
-          才知道是不是物理上喂不动（3x 要 3 倍码率的持续供给）。喂不动标红。
-          全屏时页面上那行信息条整个看不见，而这恰恰是卡的时候最想知道的一件事。
-        -->
+        <!-- 整片 MP4 要摆成「实测 / 需要」：单看一个速度读不出问题，只有跟「码率 × 倍速」对着看
+             才知道是不是物理上喂不动。喂不动标红 -->
         <span
           v-else-if="mp4AvgMbps > 0"
           class="text-xs font-medium drop-shadow"
@@ -61,9 +53,8 @@
             + `（码率 ${mp4AvgMbps} Mbps × ${playbackRate}）`
             + (mp4Feedable ? '' : ' —— 喂不动，降低倍速或换线路')"
         >{{ formatSpeed(mp4Kbps) }} / {{ formatSpeed(mp4NeedKBps) }}</span>
-        <span class="text-sm font-medium drop-shadow">{{ clock }}</span>
-        <!-- 电量画成一枚小电池而不是写个数字：形状本身就传达「还剩多少」，扫一眼不用读数。
-             拿不到电量的浏览器（Safari/Firefox）整块不渲染 -->
+        <span class="text-[13px] font-medium drop-shadow">{{ clock }}</span>
+        <!-- 电量画成一枚小电池：形状本身就传达「还剩多少」，扫一眼不用读数。拿不到的浏览器整块不渲染 -->
         <span v-if="batteryLevel !== null" class="flex items-center gap-1">
           <span class="flex items-center">
             <span class="relative w-6 h-3 rounded-[3px] ring-1 ring-white/60 p-[1.5px] flex items-center">
@@ -76,33 +67,20 @@
             </span>
             <span class="w-[2px] h-1.5 rounded-r-[1px] bg-white/60" />
           </span>
-          <span class="text-xs">{{ batteryLevel }}%</span>
+          <span class="text-[11px]">{{ batteryLevel }}%</span>
         </span>
       </div>
 
-      <!--
-        收藏。摆在画面里而不是只放页面上：全屏时页面整个看不见，而「这部好看，留一下」
-        恰恰是看着看着才冒出来的念头。**认不出是哪部剧就不出**（手工贴地址播的列表收了也找不回来）
-      -->
+      <!-- 收藏摆在画面里：全屏时页面整个看不见，而「这部好看，留一下」恰恰是看着看着才冒出来的念头。
+           **认不出是哪部剧就不出**（手工贴地址播的列表收了也找不回来） -->
       <button
         v-if="canFavorite"
-        class="p-2 rounded-lg shrink-0 transition-all active:scale-90"
-        :class="isFavorited ? 'text-rose-400 hover:bg-white/15' : 'text-white hover:bg-white/15'"
+        class="p-1.5 rounded-lg shrink-0 transition-all active:scale-90 hover:bg-white/15"
+        :class="isFavorited ? 'text-rose-400' : 'text-white'"
         :title="isFavorited ? '取消收藏' : '收藏这部剧'"
         @click="toggleFavorite"
       >
         <UIcon :name="isFavorited ? 'i-heroicons-heart-solid' : 'i-heroicons-heart'" class="w-5 h-5" />
-      </button>
-
-      <button
-        v-if="playlist.length > 1"
-        class="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium shrink-0 transition-all active:scale-95"
-        :class="showEpisodes ? 'bg-violet-500/80' : 'bg-white/10 hover:bg-white/20'"
-        title="选集"
-        @click="showEpisodes = !showEpisodes"
-      >
-        <UIcon name="i-heroicons-queue-list" class="w-5 h-5" />
-        <span class="hidden sm:inline">选集</span>
       </button>
     </div>
   </Transition>
@@ -110,23 +88,27 @@
 
 <script setup lang="ts">
 /**
- * 画面顶部的信息条，与底部控制栏**同进同出**（共用 `controlsVisible`）。
- *
- * 全屏时页面上的标题栏整个看不见，「在看什么、第几集」就此消失；
- * 而这恰恰是切集前最需要确认的两件事，所以它必须画在画面里。
+ * 画面顶部信息条，与底部控制栏**同进同出**（共用 `controlsVisible`）。
+ * 「选集」已挪去控制栏右侧（安卓端也在那一行），这里只留返回、片名、状态和收藏。
  */
 const {
   playlistTitle, currentVideoName, playlist, currentIndex,
-  showEpisodes, isFullscreen, controlsVisible,
-  toggleFullscreen, keepControlsAlive,
-  // 收藏：三处按钮共用同一份状态（见 useVideoFavorite）
+  isFullscreen, controlsVisible, toggleFullscreen, keepControlsAlive,
   canFavorite, isFavorited, toggleFavorite,
-  // 全屏顶栏那枚速度（时间/电量左边）：HLS 用聚合速度，整片 MP4 用「实测 / 需要」
   isHls, aggregateKBps, strategy, dualChannel,
   mp4AvgMbps, mp4Kbps, playbackRate,
-  // 清晰度：与页面信息条共用同一份计算（useVideoEvents.videoRes）
   videoRes,
 } = useVideoPlayerCtx()
+
+const router = useRouter()
+
+/** 全屏里是「退出全屏」，小窗里是「离开这一页」——这一页没有站点的品牌栏，它是唯一的出口 */
+const goBack = () => {
+  if (isFullscreen.value) { void toggleFullscreen(); return }
+  // `window.` 不能省：本组件作用域里有别的同名东西时会被遮蔽（CLAUDE.md 里踩过一次）
+  if (window.history.length > 1) router.back()
+  else void navigateTo('/')
+}
 
 // 维持**当前倍速**需要多少 KB/s。倍速是乘上去的：3x 要 3 倍码率的持续供给
 const mp4NeedKBps = computed(() => (mp4AvgMbps.value * 1e6 / 8 / 1024) * playbackRate.value)
@@ -134,7 +116,6 @@ const mp4NeedKBps = computed(() => (mp4AvgMbps.value * 1e6 / 8 / 1024) * playbac
 const mp4Feedable = computed(() => !mp4Kbps.value || mp4Kbps.value >= mp4NeedKBps.value)
 
 // 时钟/电量**不进 ctx**：它只服务这一个组件，进 ctx 就得跟别的模块抢键名
-// （「各模块返回的键名不能重复」那条约束），而它跟播放逻辑没有半点关系
 const { clock, batteryLevel, charging } = useDeviceStatus(isFullscreen)
 </script>
 

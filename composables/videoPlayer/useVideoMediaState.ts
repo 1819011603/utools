@@ -4,7 +4,7 @@
  * 单独成模块是为了打断依赖环——引擎、交互控制、连接策略、持久化四个模块都要读写这批 ref，
  * 若把它们塞进其中任一模块，其余三个就得反向依赖它。
  */
-import type { HlsTuning } from './types'
+import type { HlsTuning, VideoFitMode } from './types'
 import { DEFAULT_HLS_TUNING } from './types'
 
 export function useVideoMediaState() {
@@ -40,30 +40,40 @@ export function useVideoMediaState() {
 
   // ── 界面开关 ──
   const isFullscreen = ref(false)
-  // 默认**收起**：刚进来时画面上只该有中央播放键和锁定键。
-  // 原来默认展开、且暂停时强制展开，起播前顶部信息条 + 整条控制栏 + 中央大播放键全堆在一起，
-  // 手机上那块 200px 高的画面被塞得看不出主次（实测截图确认）
   const showControls = ref(false)
   const showPlayIcon = ref(false)
   const showSpeedMenu = ref(false)
-  // 播放器内嵌的选集抽屉。全屏时页面下方那份列表够不着，只能做进画面里
   const showEpisodes = ref(false)
-  const showAdvancedProxy = ref(false)  // 展开手动连接设置（默认隐藏，全自动）
+  /** 画面内的右侧设置抽屉（版式参照安卓客户端的「播放设置」） */
+  const showSettings = ref(false)
+  /** 画面内的换源面板（线路表来自最近一次解析） */
+  const showLines = ref(false)
+  const showAdvancedProxy = ref(false)
   const autoFullscreen = ref(true)
-  // 「自动全屏」的挂起意图：手机浏览器要求用户激活才准进全屏，页面加载后自动调必被拒。
-  // 拒了就挂在这里，等用户第一次碰播放器时兑现（见 useVideoUiControls.consumeAutoFullscreen）
+  // 手机浏览器要求用户激活才准进全屏，页面加载后自动调必被拒 → 挂起，等用户碰画面再兑现
   const pendingAutoFullscreen = ref(false)
-  // 自动播放被浏览器拦下后改用静音起播（静音播放任何时候都允许）。
-  // 置位期间界面上要挂一条「点一下恢复声音」，用户下一次触碰即解除
+  // 自动播放被拦下后改用静音起播，用户下一次触碰即解除
   const autoMuted = ref(false)
-  // 锁定屏幕：屏蔽手势、控制栏与快捷键（横屏握持时误触太容易）。
-  // 放在裸状态里而不是手势模块内，是因为快捷键在 controls 里，而 controls 是手势层的**下游**——
-  // 反过来 import 就成环了。
+  // 锁定屏幕。放裸状态里是因为快捷键在 controls 里，而 controls 是手势层的**下游**，反向 import 成环
   const isLocked = ref(false)
-  const autoBestRate = ref(true)        // 自动最佳倍速：在 [1, 所选倍速] 内按带宽自动取值
-  // 超快倍速：倍速菜单里追加 3.5~5x（见 display.ts 的 TURBO_PLAYBACK_RATES）。
-  // 默认关——那几档要几倍码率的持续供给，且 4x 往上浏览器直接静音，不该是所有人的默认体验
+  /** 锁定态下点一下画面让解锁键露几秒。与 isLocked 同理放这儿：controls 也要能把它压下去 */
+  const showLockBtn = ref(false)
+  const autoBestRate = ref(true)
   const turboRate = ref(false)
+
+  // ── 画面与解码 ──
+  /** 画面尺寸：默认（等比）/ 填充 / 拉伸 / 强制 16:9 / 强制 4:3 */
+  const fitMode = ref<VideoFitMode>('default')
+  /**
+   * 硬件解码。**浏览器不提供关掉硬解的开关**（那是 Chrome 启动参数级别的事），
+   * 所以关掉它的实际含义是「只挑 H.264 / SDR 的档」——真正会让弱解码器音画不同步、
+   * 拖不动进度的是 HEVC 和 HDR 那几档。默认开。
+   */
+  const hwDecode = ref(true)
+  /** 长按加速的倍数（安卓客户端里也是可调的） */
+  const boostRatePref = ref(2)
+  /** 画面亮度（CSS filter，改不了背光但暗环境够用）。竖滑手势与设置面板共用 */
+  const brightness = ref(1)
 
   // ── 进度条 ──
   const progressPercent = computed(() => duration.value ? (currentTime.value / duration.value) * 100 : 0)
@@ -117,8 +127,9 @@ export function useVideoMediaState() {
     videoUrl, videoUrlInput, isVideoLoaded, isHls, errorMessage, isLoading, isBuffering, isResolvingUrl, resolveStage,
     videoEl, playerContainer, progressBar, speedMenuRef,
     isPlaying, currentTime, duration, volume, isMuted, playbackRate, desiredRate, videoKey,
-    isFullscreen, showControls, showPlayIcon, showSpeedMenu, showEpisodes,
-    showAdvancedProxy, autoFullscreen, pendingAutoFullscreen, autoMuted, autoBestRate, turboRate, isLocked,
+    isFullscreen, showControls, showPlayIcon, showSpeedMenu, showEpisodes, showSettings, showLines,
+    showAdvancedProxy, autoFullscreen, pendingAutoFullscreen, autoMuted, autoBestRate, turboRate,
+    isLocked, showLockBtn, fitMode, hwDecode, boostRatePref, brightness,
     progressPercent, bufferedPercent, seekPreviewTime, seekPreviewPercent, isSeeking, hoverTime, hoverPercent,
     skipIntro, skipOutro, hasSkippedIntro, savedProgress, isRestoringFromSaved,
     hlsConfig, hlsStats, playbackDiag, decodedRes,

@@ -581,6 +581,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
       fLoader: createHlsFragLoader() as any,
       // 清单加载器必须包在 hls.js 默认 loader 之上（miss 时要走它原来的那套重试/超时）
       pLoader: createHlsPlaylistLoader((HlsLib as any).DefaultConfig.loader) as any,
+      hwDecode: media.hwDecode.value,
     }))
 
     /**

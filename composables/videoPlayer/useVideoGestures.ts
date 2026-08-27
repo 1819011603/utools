@@ -40,13 +40,12 @@ type DragMode = null | 'seek' | 'volume' | 'light'
 
 export function useVideoGestures(deps: VideoGesturesDeps) {
   const { media, controls, autoTune } = deps
-  // isLocked 在裸状态里（快捷键那边也要读它，见 useVideoMediaState 的注释）
-  const { videoEl, duration, volume, isMuted, showControls, isPlaying, isFullscreen, isLocked } = media
+  // isLocked / showLockBtn / brightness 都在裸状态里（controls 与设置面板也要读写）
+  const {
+    videoEl, duration, volume, isMuted, showControls, isPlaying, isFullscreen,
+    isLocked, showLockBtn, brightness,
+  } = media
 
-  /** 锁定态下唯一还认的交互：点一下让解锁按钮露 3 秒 */
-  const showLockBtn = ref(false)
-  /** 画面亮度（纯前端 CSS filter，改不了背光，但暗环境下够用） */
-  const brightness = ref(1)
   /** 中央 HUD：拖拽过程中的实时读数 */
   const gestureHud = ref<{ kind: HudKind; text: string; percent?: number; delta?: string } | null>(null)
   /** 双击 ±5s 的左右水波纹反馈（key 自增以重放动画；secs 连点累加，见 flashSide） */
@@ -155,11 +154,19 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
   const onPointerDown = (e: PointerEvent) => {
     if (fromControls(e)) return
     if (e.pointerType === 'mouse' && e.button !== 0) return
-    if (isLocked.value) { revealLockBtn(); return }
+    if (isLocked.value) {
+      revealLockBtn()
+      // 锁定态下系统可能已经把全屏退掉了（切应用/来电）：这一下就是用户激活，把全屏要回来。
+      // 少了这句，锁定 + 非全屏就成了死角 —— 手势全 return，全屏再也回不去
+      controls.consumeAutoFullscreen()
+      return
+    }
     // 这一下就是「用户激活」：自动全屏被浏览器拒过的话趁现在补上（安卓上必然走这条路）。
-    // **鼠标不参与**：桌面单击 = 播放/暂停，顺手把人拽进全屏是纯粹的惊吓（Windows 上踩到）。
-    // 这里能拿到 pointerType，比查 media query 更准
-    if (e.pointerType !== 'mouse') controls.consumeAutoFullscreen()
+    // **鼠标只兑现 `restore` 那一种**（刚刚就在全屏、切了个应用回来）：桌面单击 = 播放/暂停，
+    // 被「加载后自动全屏」那个设置顺手拽进全屏是纯粹的惊吓（Windows 上踩到），
+    // 但把他自己开过的全屏还回去是应该的 —— 而桌面上「窗口重新获得焦点」不算用户激活，
+    // 不靠这一下就永远还不回去
+    controls.consumeAutoFullscreen(e.pointerType === 'mouse')
     controls.restoreSound()   // 静音兜底起播过的话，这一下把声音还回来
 
     activePointer = e.pointerId
@@ -302,6 +309,8 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
     if (singleTapTimer) clearTimeout(singleTapTimer)
     singleTapTimer = setTimeout(() => {
       singleTapTimer = null
+      // 画面上摊着浮层时，这一下的意思是「把它关掉」
+      if (controls.closeOverlays()) return
       // 小窗（非全屏）：中间三分之一单击 = 播放/暂停，并顺手唤出控制栏
       //（一个动作两件事，不用先点一下出控制栏再去够播放键）；左右三分之一只唤控制栏。
       // 「单击只显控制栏」那条规矩是给全屏看片准备的——那时误触暂停最烦人，而且有双击中间可用。
@@ -329,7 +338,11 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
   const onClick = (e: MouseEvent) => {
     if (mouseIgnored(e) || e.detail > 1) return   // detail>1 是双击的第二下
     if (clickTimer) clearTimeout(clickTimer)
-    clickTimer = setTimeout(() => { clickTimer = null; controls.togglePlay() }, DOUBLE_TAP_MS)
+    clickTimer = setTimeout(() => {
+      clickTimer = null
+      if (controls.closeOverlays()) return   // 摊着浮层时这一下是「关掉它」，不是暂停
+      controls.togglePlay()
+    }, DOUBLE_TAP_MS)
   }
 
   const onDblClick = (e: MouseEvent) => {
@@ -361,10 +374,10 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
     autoTune.setBoost(false)
   }
 
-  // isLocked 来自 media，controller 已经平铺过一份，这里不再重复导出（键名会撞）
+  // isLocked / showLockBtn / brightness 来自 media，controller 已经平铺过一份，这里不重复导出（键名会撞）
   return {
-    showLockBtn, toggleLock, revealLockBtn,
-    brightness, gestureHud, seekFlash, touchAction, controlsVisible,
+    toggleLock, revealLockBtn,
+    gestureHud, seekFlash, touchAction, controlsVisible,
     onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onMouseMove, onClick, onDblClick,
     disposeGestures,
   }

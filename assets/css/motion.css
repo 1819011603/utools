@@ -54,3 +54,14 @@
   }
   .wf-fade-up { opacity: 1; transform: none }
 }
+
+/*
+ * 隐藏滚动条（滚动照旧）。放全局是因为它已经被四个播放器组件用到，而
+ * scoped 样式带 [data-v-xxx] 属性选择器、**罩不到别的组件** —— 每个用到的组件
+ * 都得自己抄一份，抄漏一处就是「Windows 上倍速菜单里杵着一条带箭头的粗灰槽、
+ * 还把右边一列字挤没了」（macOS 上滚动条是浮层且不占宽，所以只有 Windows 发作）。
+ *
+ * 用在黑画面上的浮层里：那条灰槽在深色背景上最扎眼，且它不吃 backdrop-blur。
+ */
+.no-sb { scrollbar-width: none; -ms-overflow-style: none; }
+.no-sb::-webkit-scrollbar { display: none; }

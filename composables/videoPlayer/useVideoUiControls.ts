@@ -24,6 +24,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   const {
     videoEl, playerContainer, progressBar, isPlaying, isVideoLoaded, duration,
     volume, isMuted, desiredRate, autoBestRate, turboRate, autoFullscreen, isFullscreen, showControls, showPlayIcon, showSpeedMenu,
+    showEpisodes, showSettings, showLines, showLockBtn, isLocked,
     pendingAutoFullscreen, autoMuted,
     seekPreviewTime, seekPreviewPercent, isSeeking, hoverTime, hoverPercent, preloadStrategy,
   } = media
@@ -206,31 +207,60 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   const isTouchPrimary = (): boolean =>
     typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches === true
 
+  /** 竖屏（手机握持的常态）。全屏在竖屏下只是把 16:9 钉在屏幕正中，上下黑边比不全屏还大 */
+  const isPortrait = (): boolean =>
+    typeof window !== 'undefined' && window.innerHeight > window.innerWidth
+
   /**
-   * 兑现「加载后自动全屏」。
+   * 挂起的全屏意图是哪一种。
    *
-   * 手机浏览器要求**用户激活**才准进全屏，页面加载完自动调必被拒——安卓上这个开关从来没生效过，
-   * 而失败只被 console.log 吞掉，从界面上完全看不出。现在拒了就把意图挂着（pendingAutoFullscreen），
-   * 用户第一次碰播放器（点中央播放键、单击画面）时补上。
+   * `restore`（切走应用回来，把他刚刚的全屏还给他）与 `setting`（「加载后自动全屏」那个开关）
+   * 必须分开：后者在桌面上被拒就得**就地作废**（否则会一直挂着，等用户某次单击画面时突然全屏），
+   * 而前者恰恰要留着——桌面上「窗口重新获得焦点」不算用户激活，`requestFullscreen` 必被拒，
+   * 就地作废等于 Windows 上切回来永远回不到全屏。
+   */
+  let pendingIsRestore = false
+
+  /**
+   * 兑现自动全屏。手机浏览器要求**用户激活**才准进全屏，页面加载完自动调必被拒 →
+   * 拒了就把意图挂着，等用户碰画面时补上。
    */
   const enterAutoFullscreen = async () => {
-    if (!playerContainer.value || document.fullscreenElement) { pendingAutoFullscreen.value = false; return }
+    if (!playerContainer.value || document.fullscreenElement) {
+      pendingAutoFullscreen.value = false
+      pendingIsRestore = false
+      return
+    }
+    /*
+     * **触摸端竖屏不自动全屏**，意图留着等转成横屏再兑现。补兑现唯一的时机是「用户碰画面」，
+     * 而竖屏下最常见的那一碰就是点中间播放 → 「点一下播放」必然把人拽进上下全是黑边的竖屏全屏。
+     * 但 `restore` 例外：那是把他自己开过的全屏还回去，比例问题他已经认了。
+     */
+    if (isTouchPrimary() && isPortrait() && !pendingIsRestore) return
     try {
       await playerContainer.value.requestFullscreen()
       isFullscreen.value = true
       pendingAutoFullscreen.value = false
+      pendingIsRestore = false
       await lockLandscape()
     } catch {
-      // 没有用户激活。触摸端留着意图等下一次碰画面补兑现；
-      // **桌面端就地作废**——否则它会一直挂着，等用户某次单击画面时突然全屏（踩过）
-      if (!isTouchPrimary()) pendingAutoFullscreen.value = false
+      // 没有用户激活。留着意图等下一次交互补兑现；只有「设置」那一种在桌面上就地作废
+      if (!isTouchPrimary() && !pendingIsRestore) pendingAutoFullscreen.value = false
     }
   }
 
   watch(pendingAutoFullscreen, (v) => { if (v) void enterAutoFullscreen() })
 
-  /** 任何一次用户交互都可以调；没有挂起意图时是空操作 */
-  const consumeAutoFullscreen = () => { if (pendingAutoFullscreen.value) void enterAutoFullscreen() }
+  /**
+   * 任何一次用户交互都可以调；没有挂起意图时是空操作。
+   * `restoreOnly` 给鼠标用：桌面单击画面 = 播放/暂停，不该顺带被「设置」那种意图拽进全屏，
+   * 但「刚刚就在全屏、切了个应用回来」这一种还回去是应该的。
+   */
+  const consumeAutoFullscreen = (restoreOnly = false) => {
+    if (!pendingAutoFullscreen.value) return
+    if (restoreOnly && !pendingIsRestore) return
+    void enterAutoFullscreen()
+  }
 
   const toggleFullscreen = async () => {
     if (!playerContainer.value) return
@@ -261,32 +291,86 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     }
   }
 
+  // ── 切走应用 / 切回来 ──
+
+  /**
+   * 「页面在后台」= 标签页被藏起来 **或** 窗口失去焦点。
+   *
+   * **不能只看 `document.hidden`**：Windows 上 alt-tab 到别的应用、或者点一下另一个窗口，
+   * 标签页仍然是「可见」的（`visibilityState === 'visible'`），`visibilitychange` 一声不响。
+   * 只听它的话，「锁定态切应用 → 暂停 / 保住锁定 / 回来接着播」这一整套在 **Windows 上
+   * 从来不会触发**，而这正是用户报的那个「切换应用全局播放没有保存」。
+   * 手机上两个信号都会来（切应用一定会 hidden），多监听一个只是幂等地早触发一次。
+   */
+  const isBackgrounded = (): boolean => document.hidden || !document.hasFocus()
+
+  let backgrounded = false
+  let wasFullscreenBeforeHide = false
+  let lockedAutoPaused = false
+
+  /**
+   * 切走。三件事：记住全屏状态（回来要还给他）、**锁定态下主动暂停**、把进度落库
+   *（这一走完全可能就直接关标签页了，那时 `beforeunload` 未必来得及）。
+   */
+  const onBackground = () => {
+    if (backgrounded) return          // blur 与 visibilitychange 常常一起来，只认第一发
+    backgrounded = true
+    wasFullscreenBeforeHide = isFullscreen.value
+    if (isLocked.value && isPlaying.value && videoEl.value) {
+      lockedAutoPaused = true
+      videoEl.value.pause()
+    }
+    playlist.saveCurrentProgress()
+  }
+
+  /**
+   * 回来。把全屏要回去（系统/浏览器可能已经替他退了），锁定态则**自动接着播**，
+   * 且这一刻什么都不弹 —— 锁定态的语义就是「画面上别出东西」，
+   * 弹出控制栏/解锁键等于每次切回来都要再点一下才干净。
+   */
+  const onForeground = () => {
+    if (!backgrounded) return
+    backgrounded = false
+    if (wasFullscreenBeforeHide && !document.fullscreenElement) {
+      pendingIsRestore = true
+      pendingAutoFullscreen.value = true
+    }
+    wasFullscreenBeforeHide = false
+    if (!lockedAutoPaused) return
+    lockedAutoPaused = false
+    showControls.value = false
+    showSpeedMenu.value = false
+    showEpisodes.value = false
+    showSettings.value = false
+    showLines.value = false
+    showLockBtn.value = false
+    videoEl.value?.play().catch(() => { /* 被策略拦下就等用户点一下 */ })
+  }
+
+  const handleVisibility = () => {
+    if (document.hidden) onBackground()
+    else if (document.hasFocus()) onForeground()
+  }
+  const handleWindowBlur = () => onBackground()
+  const handleWindowFocus = () => { if (!document.hidden) onForeground() }
+
   // 用户按 Esc / 系统手势退出全屏时不会走 toggleFullscreen，横屏锁要在这里解
   const handleFullscreenChange = () => {
     isFullscreen.value = !!document.fullscreenElement
     if (isFullscreen.value) return
-    // 退出全屏就解锁：锁定是「全屏握持防误触」，回到小窗它只剩坏处——
-    // 手势层全 return、控制栏恒隐、快捷键也停，画面上只剩一枚解锁键（踩过：来电退出全屏后点什么都没反应）
-    media.isLocked.value = false
     try { screen.orientation?.unlock?.() } catch { /* 桌面没有这能力 */ }
-    // 页面在后台时退出的全屏不是用户的意思（安卓切应用/来电会替他退），
-    // 那种要留着意图，回前台时替他要回来（见 handleVisibility）
-    if (!document.hidden) pendingAutoFullscreen.value = false
-  }
-
-  /**
-   * 安卓上切到别的应用再回来，系统常常已经把全屏退掉了。用户的本意显然是「继续全屏看」，
-   * 所以记住切走那一刻的全屏状态，回来时替他要回去。
-   *
-   * `requestFullscreen` 要用户激活，「页面重新可见」不算，所以多半当场被拒——
-   * 拒了就把意图挂着（pendingAutoFullscreen），用户下一次碰画面时补上，
-   * 这套挂起-补兑现的机制自动全屏那边已经在用了。
-   */
-  let wasFullscreenBeforeHide = false
-  const handleVisibility = () => {
-    if (document.hidden) { wasFullscreenBeforeHide = isFullscreen.value; return }
-    if (wasFullscreenBeforeHide && !document.fullscreenElement) pendingAutoFullscreen.value = true
-    wasFullscreenBeforeHide = false
+    /*
+     * **页面在后台时退出的全屏不是用户的意思**（安卓切应用/来电、Windows 上切窗口都会替他退）：
+     * 锁定状态要原样留着、意图也留着，回前台再要回来。
+     * 判据必须是 `isBackgrounded()` 而不是 `document.hidden` —— 后者在 Windows 上恒为 false，
+     * 于是「alt-tab 导致的退出全屏」被当成用户自己退的 → 当场解锁 + 作废意图，锁定就此丢了。
+     * 反过来，用户自己退出全屏就一定要解锁：锁定是「全屏握持防误触」，回到小窗它只剩坏处。
+     */
+    if (isBackgrounded()) return
+    isLocked.value = false
+    showLockBtn.value = false
+    pendingAutoFullscreen.value = false
+    pendingIsRestore = false
   }
 
   // ── 控制栏显隐 ──
@@ -295,19 +379,42 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   // 3 秒不够手指移过去点倍速/下载（还要先看清图标在哪），实测经常点到一半就收了
   const CONTROLS_HIDE_MS = 5000
 
+  // 倍速菜单开着时的宽限次数。菜单是控制栏的子元素，收控制栏会把摊开的菜单一起带走
+  // ——「点开倍速还没选就没了」。但**只能让一次路，不能无限顺延**：原来是无条件递归，
+  // 于是点开菜单又不选（很常见：看一眼当前是几倍速就回去看片）时控制栏和菜单一起
+  // 永远杵在画面上，只能特地去点一下别处才收
+  let speedMenuGrace = 0
+
   const hideControlsDelayed = () => {
     if (controlsTimer) clearTimeout(controlsTimer)
     controlsTimer = setTimeout(() => {
-      // 倍速菜单是控制栏的子元素，收控制栏会把摊开的菜单一起带走——
-      // 表现就是「点开倍速还没选就没了」。开着就顺延，等它关了再收
-      if (showSpeedMenu.value) { hideControlsDelayed(); return }
+      // 设置抽屉/换源面板是**独立浮层**（不在控制栏里），开着时控制栏照旧收
+      if (showSpeedMenu.value && speedMenuGrace > 0) { speedMenuGrace--; hideControlsDelayed(); return }
+      showSpeedMenu.value = false  // 宽限用完就连菜单一起收，否则下次唤出控制栏它还摊在那儿
       showControls.value = false   // 暂停时也收：暂停态自有中央播放键，控制栏杵着只是挡画面
     }, CONTROLS_HIDE_MS)
   }
 
+  // 每次打开菜单重新给一次宽限（选完档位关掉再打开，理应又有完整的时间去挑）
+  watch(showSpeedMenu, open => { if (open) speedMenuGrace = 1 })
+
   const handleMouseMove = () => {
     showControls.value = true
     hideControlsDelayed()
+  }
+
+  /**
+   * 关掉画面上摊开的那些浮层（选集 / 设置 / 换源 / 倍速）。
+   * 返回「有没有真的关掉什么」——点画面时优先关它们，而不是去切控制栏：
+   * 设置和换源两块都只铺右侧 70%，露出来的那条画面正是用户想点掉它们的地方。
+   */
+  const closeOverlays = (): boolean => {
+    if (!showEpisodes.value && !showSettings.value && !showLines.value && !showSpeedMenu.value) return false
+    showEpisodes.value = false
+    showSettings.value = false
+    showLines.value = false
+    showSpeedMenu.value = false
+    return true
   }
 
   /** 在控制栏上有任何动作就重新计时（触摸端唯一的续命途径） */
@@ -385,11 +492,16 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     document.addEventListener('keydown', handleKeydown)
     document.addEventListener('fullscreenchange', handleFullscreenChange)
     document.addEventListener('visibilitychange', handleVisibility)
+    // blur/focus 是桌面上唯一能察觉「切到别的应用」的信号（见 isBackgrounded）
+    window.addEventListener('blur', handleWindowBlur)
+    window.addEventListener('focus', handleWindowFocus)
   }
   const unbindGlobalKeys = () => {
     document.removeEventListener('keydown', handleKeydown)
     document.removeEventListener('fullscreenchange', handleFullscreenChange)
     document.removeEventListener('visibilitychange', handleVisibility)
+    window.removeEventListener('blur', handleWindowBlur)
+    window.removeEventListener('focus', handleWindowFocus)
     if (controlsTimer) clearTimeout(controlsTimer)
     if (playIconTimer) clearTimeout(playIconTimer)
   }
@@ -399,6 +511,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     togglePlay, skip, startSeek, updateSeekPreview, updateHoverTime,
     setVolume, toggleMute, setPlaybackRate, rateOptions,
     toggleFullscreen, togglePiP, handleMouseMove, hideControlsDelayed, keepControlsAlive, consumeAutoFullscreen, restoreSound,
+    closeOverlays,
     applyPreload, bindGlobalKeys, unbindGlobalKeys,
   }
 }
