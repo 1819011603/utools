@@ -493,10 +493,13 @@ export function useVideoEvents(deps: VideoEventsDeps) {
    */
   const onPause = () => {
     isPlaying.value = false
-    // 暂停就解锁：锁定防的是「看着的时候误触」，画面都停了就没什么可防的了。
-    // 而锁定态下画面上只有一枚解锁键，来电/拔耳机这类系统级暂停之后，
-    // 用户回来面对的是一个点什么都没反应的播放器
-    media.isLocked.value = false
+    /*
+     * **暂停不解锁**。这里原来是无条件 `isLocked = false`（理由是「画面停了就没什么可防的」），
+     * 但 `pause` 事件的来路远不止用户点暂停：抗卡会主动 pause 去攒秒数、卡死自救会动播放头、
+     * 而**切走应用时我们自己就会 pause**（锁定态要保住进度）—— 于是「锁上 → 切个应用 →
+     * 回来锁没了」，用户点名报过。
+     * 逃生口不靠这一句：锁定态下解锁键在任何尺寸下都渲染，点一下画面就露出来（见 Stage.vue）。
+     */
     if (!isBuffering.value) engine.forceRecomposite()
   }
 
