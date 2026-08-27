@@ -527,7 +527,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     togglePlay, skip, startSeek, updateSeekPreview, updateHoverTime,
     setVolume, toggleMute, setPlaybackRate, rateOptions,
     toggleFullscreen, togglePiP, handleMouseMove, hideControlsDelayed, keepControlsAlive, consumeAutoFullscreen, restoreSound,
-    closeOverlays,
+    closeOverlays, openOverlay,
     applyPreload, bindGlobalKeys, unbindGlobalKeys,
   }
 }
