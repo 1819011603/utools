@@ -380,9 +380,16 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
     autoTune.setBoost(false)
   }
 
+  /**
+   * 「刚刚有过触摸」。触摸抬手后浏览器会补发一整套兼容鼠标事件，与真实鼠标长得一模一样，
+   * 只能按时间窗口滤。窗口取 1.2s：安卓的长按 `contextmenu` 在按下 500ms 后才来，
+   * 而它要判的是「这一下的源头是手指还是鼠标」。
+   */
+  const recentTouch = () => performance.now() - lastTouchAt < 1200
+
   // isLocked / showLockBtn / brightness 来自 media，controller 已经平铺过一份，这里不重复导出（键名会撞）
   return {
-    toggleLock, revealLockBtn,
+    toggleLock, revealLockBtn, recentTouch,
     gestureHud, seekFlash, touchAction, controlsVisible,
     onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onMouseMove, onClick, onDblClick,
     disposeGestures,

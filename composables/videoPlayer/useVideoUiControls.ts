@@ -422,6 +422,17 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     return true
   }
 
+  /**
+   * 打开画面里的某一块浮层（选集 / 设置 / 换源），**三块互斥** —— 设置和换源都摊在右侧，
+   * 同时开就是叠在一起。收在这里是因为竖屏时选集和齿轮的入口在顶栏、宽屏时在控制栏，
+   * 两个组件各写一份必然漂移。
+   */
+  const openOverlay = (which: 'episodes' | 'settings' | 'lines') => {
+    showEpisodes.value = which === 'episodes' && !showEpisodes.value
+    showSettings.value = which === 'settings' && !showSettings.value
+    showLines.value = which === 'lines' && !showLines.value
+  }
+
   /** 在控制栏上有任何动作就重新计时（触摸端唯一的续命途径） */
   const keepControlsAlive = () => {
     consumeAutoFullscreen()

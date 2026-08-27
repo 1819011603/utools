@@ -22,10 +22,13 @@
           <UIcon :name="isPlaying ? 'i-heroicons-pause-solid' : 'i-heroicons-play-solid'" class="w-6 h-6 sm:w-7 sm:h-7" />
         </button>
 
-        <!-- 窄屏也必须有「上一集」，且切集期间只换转圈图标、**绝不 `:disabled`**
-             （两条都是为了不让那一下落到手势层上变成「点切集结果全屏了」） -->
+        <!--
+          「上一集」在手机竖屏里不出（用户点名）。桌面和全屏照旧留着。
+          切集期间只换转圈图标、**绝不 `:disabled`** —— disabled 控件不派发鼠标事件，
+          那一下会落到手势层上变成「点切集结果全屏了」。
+        -->
         <button
-          v-if="playlist.length > 1"
+          v-if="playlist.length > 1 && !compact"
           class="order-1 p-1 sm:p-1.5 rounded-lg text-white transition-all shrink-0"
           :class="hasPrev ? 'hover:bg-white/15 active:scale-90' : 'opacity-40 cursor-not-allowed'"
           title="上一集（P）"
@@ -115,26 +118,24 @@
           </span>
         </div>
 
-        <!-- 右侧一组：宽屏靠 ml-auto 推到最右（进度条独占上一行后这行要自己撑开） -->
+        <!--
+          右侧一组：宽屏靠 ml-auto 推到最右（进度条独占上一行后这行要自己撑开）。
+          **手机竖屏（`compact`）只留倍速 · 画中画 · 全屏**：换源/选集/齿轮全挪去画面顶栏
+          （安卓客户端竖屏也是齿轮在顶上）。全屏那套一个都不动。
+        -->
         <div class="order-4 flex items-center gap-0.5 sm:gap-2 shrink-0 sm:ml-auto">
-          <!-- 换源：线路表来自解析，只有真的有第二条线路才出。全屏时页面上那些入口全看不见 -->
           <button
-            v-if="playlistLines.length > 1"
-            class="hidden sm:flex items-center gap-1 px-2 py-1.5 rounded-lg text-white text-sm
+            v-if="playlistLines.length > 1 && !compact"
+            class="flex items-center gap-1 px-2 py-1.5 rounded-lg text-white text-sm
                    hover:bg-white/15 active:scale-95 transition-all whitespace-nowrap"
             :class="{ 'bg-white/15': showLines }"
-            title="换线路（留在这一集、接着当前进度）"
-            @click="openPanel('lines')"
+            :title="lineName ? `当前线路：${lineName} —— 点击换线路（留在这一集、接着当前进度）`
+              : '换线路（留在这一集、接着当前进度）'"
+            @click="openOverlay('lines')"
           >
             <UIcon v-if="isSwitchingLine" name="i-heroicons-arrow-path" class="w-4 h-4 animate-spin" />
             换源
           </button>
-          <!-- 当前线路：安卓端就是这么一枚「L4」，占地小、又一眼看得出在哪条线上 -->
-          <span
-            v-if="lineTag"
-            class="px-1 text-xs font-medium text-white/60 tabular-nums whitespace-nowrap"
-            :title="`当前线路：${lineName}`"
-          >{{ lineTag }}</span>
 
           <span v-if="videoRes" class="hidden sm:inline px-1 text-xs font-medium text-white/60 whitespace-nowrap">
             {{ videoRes }}
@@ -174,23 +175,24 @@
             </Transition>
           </div>
 
-          <!-- 选集：从顶栏挪到这儿（安卓端也在这一行）。全屏里换集是最高频的动作 -->
+          <!-- 选集：全屏里换集是最高频的动作。手机竖屏时它在顶栏 -->
           <button
-            v-if="playlist.length > 1"
+            v-if="playlist.length > 1 && !compact"
             class="flex items-center gap-1 px-1.5 sm:px-2 py-1.5 rounded-lg text-white text-xs sm:text-sm
                    transition-all active:scale-95 whitespace-nowrap"
             :class="showEpisodes ? 'bg-rose-500/80' : 'hover:bg-white/15'"
             title="选集"
-            @click="openPanel('episodes')"
+            @click="openOverlay('episodes')"
           >
             <UIcon name="i-heroicons-queue-list" class="w-5 h-5 sm:hidden" />
             <span class="hidden sm:inline">选集</span>
           </button>
 
           <button
+            v-if="!compact"
             class="p-1 sm:p-1.5 rounded-lg text-white hover:bg-white/15 transition-all"
             title="播放设置"
-            @click="openPanel('settings')"
+            @click="openOverlay('settings')"
           >
             <UIcon
               name="i-heroicons-cog-6-tooth" class="w-5 h-5 sm:w-6 sm:h-6 transition-transform"
@@ -248,13 +250,9 @@ const {
 
 onClickOutside(speedMenuRef, () => { showSpeedMenu.value = false })
 
+// 当前线路名只进「换源」按钮的 tooltip：控制栏上不再单独摆一枚「L4」徽标（用户点名去掉）
 const lineName = computed(() =>
   playlistLines.value[playlistSource.value?.line ?? -1]?.name || playlistSource.value?.lineName || '')
-// 「L4」= 第 4 条线路。名字往往是「超清2」这种长串，控制栏上放不下
-const lineTag = computed(() => {
-  const i = playlistSource.value?.line
-  return typeof i === 'number' && i >= 0 && playlistLines.value.length > 1 ? `L${i + 1}` : ''
-})
 
 /** 三个浮层互斥：两块都摊在画面右侧，同时开就是叠在一起 */
 const openPanel = (which: 'episodes' | 'settings' | 'lines') => {

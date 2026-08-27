@@ -29,7 +29,7 @@
       @pointercancel="onPointerCancel"
       @click="onClick"
       @dblclick="onDblClick"
-      @contextmenu="openContextMenu"
+      @contextmenu="onPlayerContextMenu"
     >
       <!--
         **不加 `crossorigin`**：HLS 走 MSE（src 是 blob，这属性对它毫无意义），而整片 MP4 直连时
@@ -296,8 +296,21 @@ const {
   onTimeUpdate, onLoadedMetadata, onDurationChange, onProgress, onLoadedData, onVideoEnded, onWaiting, onCanPlay,
   onCanPlayThrough, onSeeking, onSeeked, onPlaying, onPause, onVolumeChange, onVideoError,
   onVideoResize,
-  openContextMenu,
+  openContextMenu, recentTouch,
 } = useVideoPlayerCtx()
+
+/**
+ * 右键菜单只给鼠标。
+ *
+ * **安卓上长按会派发 `contextmenu`**（长按落在 `<video>` 上，Chrome 弹的是媒体右键菜单：
+ * 下载/画中画那一套），而那一下的本意是**长按加速**。不拦的话两件事一起发生：
+ * 菜单盖在画面上，随之而来的 `pointercancel` 又把刚起来的加速掐掉。
+ * `preventDefault` 同时也压掉了原生菜单和长按选字。
+ */
+const onPlayerContextMenu = (e: MouseEvent) => {
+  if (recentTouch()) { e.preventDefault(); return }
+  openContextMenu(e)
+}
 
 /**
  * 画面尺寸（设置抽屉里那一排）。
@@ -330,6 +343,12 @@ const pausedIdle = computed(() =>
 </script>
 
 <style scoped>
+/* iOS 上长按 <video> 会弹系统 callout（「存储视频/拷贝」），同样要让位给长按加速。
+   安卓那边靠 contextmenu 的 preventDefault 拦（见 onPlayerContextMenu） */
+video {
+  -webkit-touch-callout: none;
+}
+
 /* 通用弹入：中央图标、HUD、锁定键共用 */
 .pop-enter-active { transition: opacity .16s ease, transform .28s cubic-bezier(.2, 1.5, .4, 1); }
 .pop-leave-active { transition: opacity .35s ease, transform .35s ease-out; }
