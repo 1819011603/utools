@@ -140,15 +140,3 @@ export function hasNextPage(html: string, rule: SearchRule, page: number): boole
   return Number.isFinite(n) && n > page
 }
 
-/**
- * 认出 Cloudflare 的人机校验。
- *
- * 判据优先看响应头 `cf-mitigated: challenge`（明确、不受页面文案影响），
- * 退而求其次看那句 `Just a moment` + 挑战脚本域名。**不能只按状态码判**：
- * 403 也可能是源站自己的防盗链或封 IP，说成「人机校验」会把用户引到错的方向。
- */
-export function isCloudflareChallenge(status: number, body: string, headers?: Headers): boolean {
-  if (headers?.get('cf-mitigated') === 'challenge') return true
-  if (status !== 403 && status !== 503) return false
-  return body.includes('challenges.cloudflare.com') || body.includes('Just a moment')
-}

@@ -247,6 +247,28 @@ export function createHtmlParser(rule: ParseRule): SiteParser {
       const source = probeSource(html, rule, player.prefix)
       const currentVideoUrl = source.url
 
+      // ── 单片站点：一个播放页就是一部片，页面上压根没有线路表也没有选集表 ──
+      // 这类规则那三条正则都不填，parseLines 于是给出空表。但下游全是按「线路 → 选集」
+      // 组织的（前端的 playableCount / playAll / 可达性检测都从 currentLine 取），
+      // 空表的表现是「解析成功、地址也抠到了，播放按钮却是灰的」。所以在这补一条只有
+      // 一集的线路，让单片站点走与影视站完全相同的那条路，前端一行都不用改。
+      //
+      // 判据用 `!rule.lineRe` 而不是 `!lines.length`：影视站的选集正则写歪了同样会得到
+      // 空表，那是必须报出来的「页面结构不匹配」，绝不能悄悄降级成「一集的单片」——
+      // 那样用户看到的是「整季只解析出 1 集」，比明确报错难查得多。
+      if (!rule.lineRe && (currentVideoUrl || source.embedUrl)) {
+        lines.push({
+          name: '默认',
+          active: true,
+          episodes: [{
+            title: '正片',
+            pageUrl: ctx.pageUrl,
+            videoUrl: currentVideoUrl,
+            embedUrl: source.embedUrl,
+          }],
+        })
+      }
+
       if (!currentVideoUrl && !source.embedUrl && !lines.length) {
         throw createError({ statusCode: 502, statusMessage: '页面结构不匹配，规则需要更新' })
       }

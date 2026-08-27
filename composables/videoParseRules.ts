@@ -55,6 +55,11 @@ export interface ParseRule {
    *   1 = class 上的修饰串（含 active 即当前线路）
    *   2 = 线路名        3 = 线路副标题（可选）
    * 顺序必须与 episodeGroupRe 匹配出的分组顺序一一对应。
+   *
+   * **留空 = 单片站点**（一个播放页就是一部片，页面上没有线路表也没有选集表，
+   * 实测 jable）。这时 htmlRule 会拿 `sourceRe` 抠到的那一条地址补出「一条线路 ×
+   * 一集」，下游按影视站那条路照常走。留空是**显式声明**，不是「正则写歪了」：
+   * 影视站的选集正则匹配不到时仍会报「页面结构不匹配」，不会降级成单片。
    */
   lineRe?: string
 
@@ -294,6 +299,31 @@ export const BUILTIN_PARSE_RULES: ParseRule[] = [
       re: 'data-pars="(https?:[^"]*)"',
     },
     // 实测 26 条线路、最多 71 集
+    lazy: true,
+  },
+  {
+    id: 'jable',
+    name: 'Jable (jable)',
+    // 站点换过域名后缀，用正则兜住
+    pattern: '/jable\\d*\\.(tv|com|net)/',
+    homepage: 'https://jable.tv/',
+    // **单片站点**：一个播放页一部片，页面上没有线路表也没有选集表 → lineRe /
+    // episodeGroupRe / episodeRe 一条都不填，htmlRule 会补出「一条线路 × 一集」。
+    // 地址是明文的 hlsUrl，就写在播放页的内联脚本里，不需要解码
+    sourceRe: "var\\s+hlsUrl\\s*=\\s*'([^']+)'",
+    // title 是「番号 + 一长句剧情 + 演员 - Jable.TV | … | …」，兜底那条只削得掉最后一段
+    titleRe: '<title>([^<]*?)\\s*-\\s*Jable\\.TV',
+    // 这对头**必须写死，不能靠「播放页 origin 兜底」**：视频挂在毫不相干的 CDN
+    // （akuma-*.mushroomtrack.com）上，而那边的 CORS 是**一张只有 https://jable.tv
+    // 的白名单** —— 实测换任何别的 Origin、或者压根不带 Origin，一个
+    // `Access-Control-Allow-Origin` 头都不回。也就是说**浏览器直连必被 CORS 挡**
+    // （可达性探测会自己发现并降级到代理，不必配置），而站点有镜像域名，
+    // 白名单认的恒是 `jable.tv` 这一个字面量，兜底值在镜像域名上就是错的
+    origin: 'https://jable.tv',
+    referer: 'https://jable.tv/',
+    // 地址带签名和到期时间戳（`/hls/<签名>/<到期>/…`），存下来下次就是死链。
+    // 开 lazy 让列表里只存播放页地址占位、播的时候现取 —— 只有一集也照样受益：
+    // 从「播放历史 / 收藏」点回来时拿到的是新签的地址，而不是一条过期链接
     lazy: true,
   },
 ]
