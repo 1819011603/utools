@@ -440,18 +440,6 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
 - **kpkuang**：地址在 `data-play`（**随机前缀 + base64** → `base64-scan`）。**防盗链域名每条线路一份**
   （写在 `data-pars` 上）→ **绝不能按 host 缓存**。26 条线路里 4 条给的是第三方播放页 → `sourceMediaOnly: true`
   （**这类做不到**：地址由第三方在浏览器里用混淆 JS 现算）
-- **jable（单片站点，第一个没有线路也没有选集的站）**：地址是明文 `var hlsUrl = '…'`，规则只要
-  `sourceRe` + `titleRe`；**三条选集正则一条都不填 = 显式声明「单片」**，`htmlRule` 会补出「一条线路 × 一集」
-  （前端的 `playableCount`/`playAll`/可达性检测全从 `currentLine` 取，`lines` 空着的表现是
-  **「解析成功、地址也抠到了，播放按钮却是灰的」**）。三条实测结论：
-  ① **CDN 的 CORS 是一张只有 `https://jable.tv` 的白名单**（换任何别的 Origin、或压根不带，
-  一个 `ACAO` 头都不回）→ **浏览器直连必被 CORS 挡，只能走代理**，且这对头**必须写死**：
-  站点有镜像域名，白名单认的恒是 `jable.tv` 这个字面量，「播放页 origin 兜底」在镜像上就是错的；
-  ② 地址带签名和到期时间戳（`/hls/<签名>/<到期>/…`）→ **必须开 `lazy`**，列表里存播放页占位、播时现取；
-  ③ **`/videos/` 挂着 Cloudflare 人机校验，而它是按出口 IP 信誉分现算的**——低频时冷启动那一发被挑战、
-  紧接着几发全过（`siteFetch` 的 `CF_RETRIES` 就是为它加的），但**探狠了整个出口 IP 会被打死**，
-  之后连 curl 都恒 403。**这是本项目第一个「本地也不一定通」的站**，而线上更差：
-  从 Workers 打 CF 客户是最难的那一档（见「踩过的坑」里那条），四个信号只有请求头在手上
 - **内嵌播放器的「反内嵌」自检提示都提 Sandbox，别当成防盗链或正则问题**：EV 线探的是 `document.domain` 在沙箱里必抛，
   **没有 token 可解**（`allow-document-domain` 不是合法 token，加了现象一模一样——别再往那个方向试），
   唯一出路是整个摘掉属性 →「限制广告」开关（**默认关**，iframe 的 `:key` **必须带上它**，sandbox 是文档创建时定死的）。

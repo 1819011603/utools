@@ -18,8 +18,8 @@ import type { SiteSearchResult } from '../../composables/videoSearchRules'
 import { buildSearchUrl, findSearchRule } from '../../composables/videoSearchRules'
 import { cdndefendChallenge } from '../parsers/challenges/cdndefend'
 import { dropCookie, readCookie, saveCookie } from '../parsers/cookieStore'
-import { extractJsonItems, extractSearchItems, extractTotal, hasNextPage } from '../parsers/searchRule'
-import { absolutize, hostOf, isCloudflareChallenge } from '../parsers/utils'
+import { extractJsonItems, extractSearchItems, extractTotal, hasNextPage, isCloudflareChallenge } from '../parsers/searchRule'
+import { absolutize, hostOf } from '../parsers/utils'
 import { fetchSitePage } from '../utils/siteFetch'
 
 // ── 搜索令牌缓存（按 host）──
