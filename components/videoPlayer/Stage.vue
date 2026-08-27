@@ -14,7 +14,10 @@
       ref="playerContainer"
       class="relative bg-black overflow-hidden group flex items-center justify-center select-none sm:rounded-xl"
       :class="[
-        { 'cursor-none': isPlaying && !showControls },
+        // 隐藏鼠标**只在全屏里**做：窗口模式下画面只占页面的一块，指针在那块上凭空消失
+        // 只会让人以为浏览器卡了。而且**只在画面上什么都没出的时候**藏 ——
+        // 锁定态下解锁键露出来时指针必须跟着回来，否则那枚键看得见却点不准
+        { 'cursor-none': isFullscreen && isPlaying && !showControls && !showLockBtn },
         isFullscreen ? 'fixed inset-0 z-50 rounded-none' : '',
       ]"
       :style="{ touchAction }"

@@ -360,15 +360,20 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     if (isFullscreen.value) return
     try { screen.orientation?.unlock?.() } catch { /* 桌面没有这能力 */ }
     /*
-     * **页面在后台时退出的全屏不是用户的意思**（安卓切应用/来电、Windows 上切窗口都会替他退）：
-     * 锁定状态要原样留着、意图也留着，回前台再要回来。
-     * 判据必须是 `isBackgrounded()` 而不是 `document.hidden` —— 后者在 Windows 上恒为 false，
-     * 于是「alt-tab 导致的退出全屏」被当成用户自己退的 → 当场解锁 + 作废意图，锁定就此丢了。
-     * 反过来，用户自己退出全屏就一定要解锁：锁定是「全屏握持防误触」，回到小窗它只剩坏处。
+     * **锁定状态一律不因为退出全屏而解除**。
+     *
+     * 这里原来按「是不是在后台」去猜这一发是谁退的（系统替他退 → 留着锁，用户自己退 → 解锁），
+     * 但那个判断在 Windows 上不可靠：`fullscreenchange` 常常**在窗口重新获得焦点之后**才派发，
+     * 那时 `hasFocus()` 已经是 true → 判成「用户自己退的」→ 锁当场没了。
+     * 猜不准就不猜。逃生口不依赖这里：锁定态下解锁键在任何尺寸下都渲染，点一下画面就露出来。
+     * 顺便把全屏挂起，下一次点画面替他要回去（仍是锁定态）。
      */
-    if (isBackgrounded()) return
-    isLocked.value = false
-    showLockBtn.value = false
+    if (isLocked.value) {
+      pendingIsRestore = true
+      pendingAutoFullscreen.value = true
+      return
+    }
+    if (isBackgrounded()) return   // 系统替他退的，意图留着回前台再要回来
     pendingAutoFullscreen.value = false
     pendingIsRestore = false
   }

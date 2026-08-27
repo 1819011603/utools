@@ -130,7 +130,13 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
    */
   const onMouseMove = () => {
     if (performance.now() - lastTouchAt < 900) return
-    if (isLocked.value) return
+    /*
+     * **锁定态下鼠标一动就把解锁键露出来。**
+     * 控制栏照旧不出（锁的就是它），但解锁键是画面上唯一的出口 —— 而全屏里指针本身是隐藏的，
+     * 只认点击的话用户得盲着在黑画面上乱点才找得到它（用户原话「我要解锁啊」）。
+     * `revealLockBtn` 自带 3 秒倒计时且每次调用都重新计时，所以一直动就一直亮着。
+     */
+    if (isLocked.value) { revealLockBtn(); return }
     controls.handleMouseMove()
   }
 

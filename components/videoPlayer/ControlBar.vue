@@ -5,14 +5,16 @@
       data-no-gesture
       class="absolute z-10 bottom-0 left-0 right-0 pointer-events-none
              bg-gradient-to-t from-black/90 via-black/45 to-transparent
-             px-2.5 pb-2 pt-8 sm:px-5 sm:pb-3.5 sm:pt-14"
+             px-2.5 pb-1.5 pt-8 sm:px-5 sm:pb-2 sm:pt-14"
       @click.stop
       @pointerdown="keepControlsAlive"
       @pointerup="keepControlsAlive"
     >
       <!-- `pointer-events-auto` 只给这一行：外层那圈渐变在小窗里有几十 px 高，
            让它吃事件的话画面中间的双击全被它接走（表现是「小窗点不动」） -->
-      <div class="pointer-events-auto flex items-center gap-1 flex-nowrap sm:gap-2 sm:flex-wrap">
+      <!-- 换行时的行间距要单独压小（`gap-2` 是两轴都吃的，8px 的行距会把进度条顶高一截） -->
+      <div class="pointer-events-auto flex items-center gap-1 flex-nowrap
+                  sm:gap-x-2 sm:gap-y-0.5 sm:flex-wrap">
         <button
           class="order-1 p-1 sm:p-1.5 rounded-lg text-white hover:bg-white/15 active:scale-90 transition-all shrink-0"
           @click="togglePlay"
@@ -68,7 +70,7 @@
         <!-- 进度那一组：时间 | 条 | 总时长。窄屏内联占中间空档，宽屏独占上面一行 -->
         <div
           class="order-3 flex-1 min-w-0 flex items-center gap-2 sm:gap-3
-                 sm:order-first sm:w-full sm:flex-none sm:mb-1"
+                 sm:order-first sm:w-full sm:flex-none"
         >
           <span class="shrink-0 text-white text-[11px] sm:text-[13px] font-mono tabular-nums">
             {{ formatTime(currentTime) }}
