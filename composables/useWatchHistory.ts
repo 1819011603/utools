@@ -43,6 +43,12 @@ export interface WatchRecord {
    */
   time?: number
   duration?: number
+  /**
+   * 最后看这部剧的时刻。列表按它排序、超量按它淘汰，**云同步也按它判「谁看得晚」**
+   * （见 cloudSyncSpec 的 `video-watch`）。由 `recordWatch` 统一盖，调用方不传
+   * ——所以各处的入参都是 `Omit<WatchRecord, 'at'>`。
+   */
+  at: number
 }
 
 // 云同步的记事本（删一部剧要记墓碑，否则另一台设备会把它推回来）
