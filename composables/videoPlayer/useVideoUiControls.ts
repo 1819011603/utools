@@ -397,6 +397,49 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   }
 
   /**
+   * **锁定态的全屏看门狗。**
+   *
+   * 前面那一套（记「切走前是不是全屏」、判「这一发退全屏是谁干的」、掐「刚回前台」的窗口）
+   * 全是在**猜时序**，而安卓上退全屏那一发到底落在切走前、后台里、还是回前台之后，
+   * 跟机型、跟视频有没有在后台继续播都有关系 —— 猜错一次就是「切回来变窄屏」。
+   *
+   * 锁定态给了一个不用猜的判据：**锁屏本身就是「我在横屏看片、别动画面」的明确表态**，
+   * 所以这个状态下压根不该存在窄屏或竖屏，发现了就一直要回来。于是这里不问是谁退的、
+   * 什么时候退的，只看当下对不对：掉出全屏 → 意图挂着 + 每 2s 试一发 + 守着他下一次触摸；
+   * 还在全屏但方向锁被系统释放了（后台播放时最常见，见 onForeground）→ 补锁横屏。
+   *
+   * **只给触摸端**：桌面上没有「系统替你退全屏」这回事，一直抢反而是打扰。
+   * 被拒是静默的（`enterAutoFullscreen` 自己 catch），成本只有一个 Promise。
+   */
+  let lockFsTimer: ReturnType<typeof setInterval> | null = null
+  let lastLockFsTry = 0
+  const lockFsTick = () => {
+    if (!isLocked.value || backgrounded) return   // 后台里要全屏没有意义，回前台那一拍再说
+    if (document.fullscreenElement) {
+      if (isPortrait()) void lockLandscape()
+      return
+    }
+    pendingIsRestore = true
+    pendingAutoFullscreen.value = true
+    bindRestoreTap()
+    const now = performance.now()
+    if (now - lastLockFsTry < 2000) return   // 试的频率压一压：多数会被拒，没必要每秒来一发
+    lastLockFsTry = now
+    void enterAutoFullscreen()
+  }
+  const stopLockFsWatch = () => {
+    if (!lockFsTimer) return
+    clearInterval(lockFsTimer)
+    lockFsTimer = null
+  }
+  watch(isLocked, (on) => {
+    stopLockFsWatch()
+    if (!on || !isTouchPrimary()) return
+    lastLockFsTry = 0
+    lockFsTimer = setInterval(lockFsTick, 1000)
+  })
+
+  /**
    * 切走。三件事：记住全屏状态（回来要还给他）、**锁定态下主动暂停**、把进度落库
    *（这一走完全可能就直接关标签页了，那时 `beforeunload` 未必来得及）。
    */
@@ -655,6 +698,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     restoreShots.forEach(clearTimeout)
     restoreShots = []
     clearBgPlayShots()
+    stopLockFsWatch()
     if (controlsTimer) clearTimeout(controlsTimer)
     if (playIconTimer) clearTimeout(playIconTimer)
   }
