@@ -131,6 +131,8 @@ export interface SavedState {
   autoBestRate: boolean
   /** 超快倍速（3.5~5x）是否解锁。可选：老状态里没有这个键，读的时候按 false 兜 */
   turboRate?: boolean
+  /** 后台播放：切走应用不暂停。同上可选，按 false 兜 */
+  bgPlay?: boolean
   skipIntro: number
   skipOutro: number
   /** 画面尺寸 / 硬件解码 / 长按加速倍数。都可选，老状态里没有 */

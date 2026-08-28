@@ -60,6 +60,12 @@ export function useVideoMediaState() {
   const showLockBtn = ref(false)
   const autoBestRate = ref(true)
   const turboRate = ref(false)
+  /**
+   * 后台播放：切到别的应用/标签页时不主动暂停，还要把浏览器替我们按下的那一发抢回来。
+   *
+   * 默认关。开着必然更费电更费流量（画面停了但分片照下），而多数人切走就是不想看了。
+   */
+  const bgPlay = ref(false)
 
   // ── 画面与解码 ──
   /** 画面尺寸：默认（等比）/ 填充 / 拉伸 / 强制 16:9 / 强制 4:3 */
@@ -128,7 +134,7 @@ export function useVideoMediaState() {
     videoEl, playerContainer, progressBar, speedMenuRef,
     isPlaying, currentTime, duration, volume, isMuted, playbackRate, desiredRate, videoKey,
     isFullscreen, showControls, showPlayIcon, showSpeedMenu, showEpisodes, showSettings, showLines,
-    showAdvancedProxy, autoFullscreen, pendingAutoFullscreen, autoMuted, autoBestRate, turboRate,
+    showAdvancedProxy, autoFullscreen, pendingAutoFullscreen, autoMuted, autoBestRate, turboRate, bgPlay,
     isLocked, showLockBtn, fitMode, hwDecode, boostRatePref, brightness,
     progressPercent, bufferedPercent, seekPreviewTime, seekPreviewPercent, isSeeking, hoverTime, hoverPercent,
     skipIntro, skipOutro, hasSkippedIntro, savedProgress, isRestoringFromSaved,

@@ -109,6 +109,7 @@ export function useVideoPlayerController() {
         autoFullscreen: media.autoFullscreen.value,
         autoBestRate: media.autoBestRate.value,
         turboRate: media.turboRate.value,
+        bgPlay: media.bgPlay.value,
         skipIntro: media.skipIntro.value,
         skipOutro: media.skipOutro.value,
         fitMode: media.fitMode.value,
@@ -139,6 +140,7 @@ export function useVideoPlayerController() {
     media.autoFullscreen.value = s.autoFullscreen ?? true
     media.autoBestRate.value = s.autoBestRate ?? true
     media.turboRate.value = s.turboRate ?? false
+    media.bgPlay.value = s.bgPlay ?? false
     media.skipIntro.value = s.skipIntro ?? 0
     media.skipOutro.value = s.skipOutro ?? 0
     media.fitMode.value = s.fitMode ?? 'default'

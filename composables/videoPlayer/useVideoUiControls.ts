@@ -25,7 +25,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     videoEl, playerContainer, progressBar, isPlaying, isVideoLoaded, duration,
     volume, isMuted, desiredRate, autoBestRate, turboRate, autoFullscreen, isFullscreen, showControls, showPlayIcon, showSpeedMenu,
     showEpisodes, showSettings, showLines, showLockBtn, isLocked,
-    pendingAutoFullscreen, autoMuted,
+    pendingAutoFullscreen, autoMuted, bgPlay,
     seekPreviewTime, seekPreviewPercent, isSeeking, hoverTime, hoverPercent, preloadStrategy,
   } = media
 
@@ -349,6 +349,24 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   let foregroundAt = 0
   const JUST_FOREGROUND_MS = 2000
 
+  /** 后台播放：切走之后补打的那几发 `play()`（见 onBackground） */
+  let bgPlayShots: ReturnType<typeof setTimeout>[] = []
+  const clearBgPlayShots = () => { bgPlayShots.forEach(clearTimeout); bgPlayShots = [] }
+  const scheduleBgPlayShots = () => {
+    if (!isPlaying.value) return          // 他本来就是暂停着切走的，别替他开播
+    clearBgPlayShots()
+    /*
+     * 判据只能是「切走那一刻在播」这个快照，**不能是 `isPlaying`**：浏览器那一发暂停会派发
+     * `pause` 事件，`isPlaying` 当场变 false —— 拿它当条件等于永远抢不回来。
+     * 代价是这 2 秒内从通知栏/媒体键按的暂停也会被抢一次，但窗口就这么长，之后一概不管。
+     */
+    bgPlayShots = [120, 400, 900, 2000].map(ms => setTimeout(() => {
+      const v = videoEl.value
+      if (!backgrounded || !bgPlay.value || !v || !v.paused) return   // 回前台了就不归这儿管
+      v.play().catch(() => { /* 系统不让就算了，别跟它掰手腕 */ })
+    }, ms))
+  }
+
   /**
    * 挂起「把他刚刚那个全屏还回去」的意图，并尽力当场兑现。
    *
@@ -377,11 +395,19 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     backgrounded = true
     // `||=`：系统可能**先**退全屏再让页面 hidden，那一发已经把它记成 true 了，别在这儿抹掉
     wasFullscreenBeforeHide = wasFullscreenBeforeHide || isFullscreen.value
-    if (isLocked.value && isPlaying.value && videoEl.value) {
+    if (isLocked.value && isPlaying.value && videoEl.value && !bgPlay.value) {
       lockedAutoPaused = true
       videoEl.value.pause()
     }
     playlist.saveCurrentProgress()
+    /*
+     * **开了后台播放就得把浏览器按下的那一发抢回来。** 「我们不主动暂停」只做了一半：
+     * 安卓 Chrome 在标签页转入后台时会自己把 `<video>` 停掉（省电策略，跟自动播放策略是两回事），
+     * 我们一个事件都收不到就已经停了。所以隔几百毫秒复查几次，停了就 `play()` 回去。
+     * 补几发而不是一发：那个策略不是同一时刻生效的，机型/版本之间差好几百毫秒。
+     * 一直失败也不硬撑（见 bgPlayShots 的次数），否则会跟系统来回掰手腕。
+     */
+    if (bgPlay.value) scheduleBgPlayShots()
   }
 
   /**
@@ -393,6 +419,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     if (!backgrounded) return
     backgrounded = false
     foregroundAt = performance.now()
+    clearBgPlayShots()
     /*
      * 还在全屏里就先不动手：安卓那一发退出全屏常常晚于这里，由 `handleFullscreenChange`
      * 的 `JUST_FOREGROUND_MS` 窗口接住。这里抢着 armRestore 只会白试几发。
@@ -609,6 +636,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     unbindRestoreTap()
     restoreShots.forEach(clearTimeout)
     restoreShots = []
+    clearBgPlayShots()
     if (controlsTimer) clearTimeout(controlsTimer)
     if (playIconTimer) clearTimeout(playIconTimer)
   }

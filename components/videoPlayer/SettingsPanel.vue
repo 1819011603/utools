@@ -108,6 +108,15 @@
             </button>
           </div>
 
+          <div class="flex items-center gap-2" title="切到别的应用/标签页时不暂停，接着放声音">
+            <span class="flex-1">后台播放</span>
+            <button :class="swClass(bgPlay)" @click="bgPlay = !bgPlay; saveState()">
+              <span :class="knobClass(bgPlay)" />
+            </button>
+          </div>
+          <!-- 手机系统仍可能强行停掉（尤其息屏），不写这句只会被当成开关坏了；顺带提一句代价 -->
+          <p v-if="bgPlay" class="text-[11px] text-white/45 -mt-1.5">画面停了也照旧下片，费电费流量；部分手机息屏后仍会被系统暂停</p>
+
           <div class="flex items-center gap-2" :title="`在 1x ~ ${autoRateCap}x 内按带宽取值，流畅提速、卡了降回`">
             <span class="flex-1">自动最佳倍速 <span class="text-white/40">≤{{ autoRateCap }}x</span></span>
             <button :class="swClass(autoBestRate)" @click="autoBestRate = !autoBestRate; saveState()">
@@ -154,7 +163,7 @@ import type { VideoFitMode } from '~/composables/videoPlayer/types'
 const {
   showSettings, volume, brightness, fitMode, videoEl, isHls, mediaInfo,
   skipIntro, skipOutro, boostRatePref, hwDecode,
-  autoFullscreen, autoBestRate, autoRateCap, turboRate, saveState,
+  autoFullscreen, autoBestRate, autoRateCap, turboRate, bgPlay, saveState,
   showLabel, hasShowPrefs, forgetShowPrefs,
   saveCurrentProgress, loadVideo,
 } = useVideoPlayerCtx()
