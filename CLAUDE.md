@@ -290,7 +290,19 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
   → 判成「用户自己退的」→ 锁当场没了。猜不准就不猜。
   逃生口不依赖任何自动解锁：锁定态下解锁键在**任何尺寸**下都渲染，点一下画面就露出来
 - **切走再回来要把全屏要回去**（安卓系统常退掉，Windows 上切窗口也会），会被拒 → 挂起-补兑现。
-  锁定态下丢了全屏也一样挂起，下一次点画面替他要回去（**仍是锁定态**）
+  锁定态下丢了全屏也一样挂起，下一次点画面替他要回去（**仍是锁定态**）。
+  **「回前台」的判据不能是 `!hidden && hasFocus()`**：安卓上 `visibilitychange` 派发那一刻
+  `hasFocus()` 常常还是 false，而移动端切回应用**未必补发 window `focus`** → 两条路都不成立 →
+  `onForeground` 一次都不跑 = 「全屏锁定切个应用回来变小窗」（且是概率性的，跟全屏 API 拒不拒无关）。
+  **可见即回前台**，桌面那半靠 `blur`/`focus` 兜。
+  **系统那一发退出全屏跟切走/切回来没有固定先后**，两个方向都要接：早于 `onBackground` 的
+  用 `wasFullscreenBeforeHide ||=` 记住（直接赋 `isFullscreen.value` 会把它抹成 false），
+  晚于 `onForeground` 的用「刚回前台 2s」窗口（`foregroundAt`）当成系统退的。
+  于是「谁退的」不能再靠 `isBackgrounded()` 猜 —— **只有 `toggleFullscreen` 里打的
+  `userExitedFs` 标记才算用户自己退的**（Esc / 安卓返回手势落在「前台且不在窗口内」那条，照旧作废意图）
+- **挂起 restore 意图时必须显式 `bindRestoreTap()`，不能指望 `watch(pendingAutoFullscreen)` 的副作用**：
+  那个 ref 已经是 `true` 时 watch 根本不触发 → 没人去守下一次触摸 → 卡在「锁定 + 小窗」。
+  三件事收在 `armRestore()` 一处：补几发 `requestFullscreen` + 绑 tap + 标成 `restore`
 - **挂起的全屏意图要分 `restore` 和 `setting` 两种**（`pendingIsRestore`）：
   `setting`（「加载后自动全屏」）在桌面上被拒必须**就地作废**，否则会一直挂着、
   等用户某次单击画面时突然全屏；而 `restore`（把他刚刚的全屏还给他）**必须留着** ——

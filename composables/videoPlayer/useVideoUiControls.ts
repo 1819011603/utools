@@ -293,7 +293,9 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   const toggleFullscreen = async () => {
     if (!playerContainer.value) return
     if (document.fullscreenElement) {
-      await document.exitFullscreen().catch(() => {})
+      userExitedFs = true          // 这一发是他自己按的，别再要回来（见 handleFullscreenChange）
+      // 退不成功就把标记撤回去，否则它会一直挂着，把之后某一发系统退全屏冒充成「用户自己退的」
+      await document.exitFullscreen().catch(() => { userExitedFs = false })
       try { screen.orientation?.unlock?.() } catch { /* 同上 */ }
       isFullscreen.value = false
       return
@@ -335,8 +337,36 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   let backgrounded = false
   let wasFullscreenBeforeHide = false
   let lockedAutoPaused = false
-  /** 回前台后补打的那几发 requestFullscreen（见 onForeground） */
+  /** 回前台后补打的那几发 requestFullscreen（见 armRestore） */
   let restoreShots: ReturnType<typeof setTimeout>[] = []
+  /** 用户自己点了「退出全屏」。只有这一种退出不该被要回来 */
+  let userExitedFs = false
+  /**
+   * 刚回到前台的时刻。安卓上系统那一发退出全屏**常常晚于 `visibilitychange`**，
+   * 于是 `fullscreenchange` 派发时 `isBackgrounded()` 已经是 false → 被判成「用户自己退的」→
+   * 意图当场作废 → 切回来停在小窗。这个窗口就是拿来兜住那一发的。
+   */
+  let foregroundAt = 0
+  const JUST_FOREGROUND_MS = 2000
+
+  /**
+   * 挂起「把他刚刚那个全屏还回去」的意图，并尽力当场兑现。
+   *
+   * 三件事一起做，缺一不可：① 补几发 `requestFullscreen` —— 安卓上回前台这一发多半当场被拒
+   *（没有用户激活），但拒不拒跟时机有关，有些机型在恢复后头一两百毫秒里是放行的，白试没有代价；
+   * ② **显式** `bindRestoreTap()` 守他的下一次触摸 —— 不能指望 `watch(pendingAutoFullscreen)`
+   * 的副作用，那个 ref 已经是 `true` 时 watch 根本不触发，于是没人去绑，卡在「锁定 + 小窗」；
+   * ③ 意图标成 `restore` 而不是 `setting`（后者在桌面上被拒会就地作废）。
+   */
+  const armRestore = () => {
+    pendingIsRestore = true
+    pendingAutoFullscreen.value = true
+    bindRestoreTap()
+    restoreShots.forEach(clearTimeout)
+    restoreShots = [0, 160, 500, 1200].map(ms => setTimeout(() => {
+      if (pendingIsRestore) void enterAutoFullscreen()
+    }, ms))
+  }
 
   /**
    * 切走。三件事：记住全屏状态（回来要还给他）、**锁定态下主动暂停**、把进度落库
@@ -345,7 +375,8 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   const onBackground = () => {
     if (backgrounded) return          // blur 与 visibilitychange 常常一起来，只认第一发
     backgrounded = true
-    wasFullscreenBeforeHide = isFullscreen.value
+    // `||=`：系统可能**先**退全屏再让页面 hidden，那一发已经把它记成 true 了，别在这儿抹掉
+    wasFullscreenBeforeHide = wasFullscreenBeforeHide || isFullscreen.value
     if (isLocked.value && isPlaying.value && videoEl.value) {
       lockedAutoPaused = true
       videoEl.value.pause()
@@ -361,20 +392,12 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   const onForeground = () => {
     if (!backgrounded) return
     backgrounded = false
-    if (wasFullscreenBeforeHide && !document.fullscreenElement) {
-      pendingIsRestore = true
-      pendingAutoFullscreen.value = true
-      /*
-       * **补几枪。** 安卓上「回到前台」这一发 requestFullscreen 多半当场被拒（没有用户激活），
-       * 但拒不拒跟时机有关：有些机型/版本在恢复后的头一两百毫秒里是放行的。
-       * 被拒是静默的，白试几次没有代价，而试中了用户就不用自己再点一下。
-       * 一直失败也不要紧 —— `bindRestoreTap` 已经在守他的下一次触摸。
-       */
-      restoreShots.forEach(clearTimeout)
-      restoreShots = [160, 500, 1200].map(ms => setTimeout(() => {
-        if (pendingIsRestore) void enterAutoFullscreen()
-      }, ms))
-    }
+    foregroundAt = performance.now()
+    /*
+     * 还在全屏里就先不动手：安卓那一发退出全屏常常晚于这里，由 `handleFullscreenChange`
+     * 的 `JUST_FOREGROUND_MS` 窗口接住。这里抢着 armRestore 只会白试几发。
+     */
+    if (wasFullscreenBeforeHide && !document.fullscreenElement) armRestore()
     wasFullscreenBeforeHide = false
     if (!lockedAutoPaused) return
     lockedAutoPaused = false
@@ -387,9 +410,16 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     videoEl.value?.play().catch(() => { /* 被策略拦下就等用户点一下 */ })
   }
 
+  /*
+   * **标签页重新可见 = 回前台，不再附加 `hasFocus()` 这个条件。**
+   * 安卓上 `visibilitychange` 派发那一刻 `document.hasFocus()` 常常还是 false，而移动端浏览器
+   * 切回应用时**未必补发 window `focus`** → 两条路都不成立 → `onForeground` 一次都不跑，
+   * 全屏再也要不回来。这正是「有概率变回小窗」的主因（丢的是那一半信号，不是全屏 API 拒了）。
+   * 反过来「可见但没焦点」在桌面上顶多是早触发一拍，onForeground 本身是幂等的。
+   */
   const handleVisibility = () => {
     if (document.hidden) onBackground()
-    else if (document.hasFocus()) onForeground()
+    else onForeground()
   }
   const handleWindowBlur = () => onBackground()
   const handleWindowFocus = () => { if (!document.hidden) onForeground() }
@@ -408,12 +438,30 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
      * 猜不准就不猜。逃生口不依赖这里：锁定态下解锁键在任何尺寸下都渲染，点一下画面就露出来。
      * 顺便把全屏挂起，下一次点画面替他要回去（仍是锁定态）。
      */
+    const byUser = userExitedFs
+    userExitedFs = false
     if (isLocked.value) {
-      pendingIsRestore = true
-      pendingAutoFullscreen.value = true
+      armRestore()
       return
     }
-    if (isBackgrounded()) return   // 系统替他退的，意图留着回前台再要回来
+    if (byUser) {                  // 点了「退出全屏」那颗按钮，别拗着他
+      wasFullscreenBeforeHide = false
+      pendingAutoFullscreen.value = false
+      pendingIsRestore = false
+      return
+    }
+    if (isBackgrounded()) {
+      // 系统替他退的。记下来（这一发可能**早于** onBackground，那时 isFullscreen 已是 false，
+      // 光靠 onBackground 去读就成了「切走时不是全屏」）→ 回前台由 onForeground 要回来
+      wasFullscreenBeforeHide = true
+      return
+    }
+    // 刚回前台那一两秒里的退出同样是系统干的（安卓上它就是晚于 visibilitychange 派发）
+    if (performance.now() - foregroundAt < JUST_FOREGROUND_MS) {
+      armRestore()
+      return
+    }
+    wasFullscreenBeforeHide = false   // Esc / 安卓返回手势，他自己在前台退的
     pendingAutoFullscreen.value = false
     pendingIsRestore = false
   }
