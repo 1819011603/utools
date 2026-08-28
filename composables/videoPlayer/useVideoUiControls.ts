@@ -222,23 +222,26 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   let pendingIsRestore = false
 
   /**
-   * 挂起 `restore` 意图期间，在 **document** 上守一发一次性的 pointerdown。
+   * 挂起 `restore` 意图期间，在 **document** 上守着 pointerdown。
    *
    * 安卓切回来时全屏已经被系统退掉了，而「窗口重新获得焦点」不算用户激活 →
    * `requestFullscreen()` 必被拒，只能等他碰一下。**但他碰的地方常常不在播放器上**：
    * 退出全屏后整页都露出来了，手指第一下多半落在别处（尤其锁定态，画面上什么都没有）。
    * 只在容器上等的话那一下白费，于是卡在「锁定 + 小窗」（用户点名报过）。
    * **只给触摸端**：桌面上任何一次点页面都突然全屏太惊吓，那边靠点画面那条路就够了。
+   *
+   * **不能用 `once`。** 兑现是异步的（`requestFullscreen` 返回 Promise），被拒之后重新绑要等到
+   * 下一个 microtask，用户在那之前又点一下就白点了；而「点了没反应、再点还是没反应」正是
+   * 这套东西最难查的表现。改成一直守着，**只有真的进了全屏才解绑**（见 enterAutoFullscreen）。
    */
   let restoreTapBound = false
   const onAnyTapRestore = () => {
-    restoreTapBound = false
     if (pendingIsRestore) void enterAutoFullscreen()
   }
   const bindRestoreTap = () => {
     if (restoreTapBound || !isTouchPrimary()) return
     restoreTapBound = true
-    document.addEventListener('pointerdown', onAnyTapRestore, { capture: true, once: true })
+    document.addEventListener('pointerdown', onAnyTapRestore, true)
   }
   const unbindRestoreTap = () => {
     if (!restoreTapBound) return
@@ -347,7 +350,14 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
    * 意图当场作废 → 切回来停在小窗。这个窗口就是拿来兜住那一发的。
    */
   let foregroundAt = 0
-  const JUST_FOREGROUND_MS = 2000
+  /*
+   * **开了后台播放之后这个窗口必须给得很宽。** 关着的时候视频在后台是停的，安卓当场就把全屏退了
+   *（那一发落在后台，`isBackgrounded()` 接得住）；开着的时候视频没停、全屏能一直挂到回前台，
+   * 于是退全屏那一发**晚于** `visibilitychange` 落下来，晚多少完全看机型 —— 2 秒接不住，
+   * 就落进「前台退的 = 他自己退的」→ 意图作废 → 停在窄屏。
+   * 代价是切回来这 6 秒内用返回手势退全屏会被拽回去一次，比「全屏自己没了」轻。
+   */
+  const JUST_FOREGROUND_MS = 6000
 
   /** 后台播放：切走之后补打的那几发 `play()`（见 onBackground） */
   let bgPlayShots: ReturnType<typeof setTimeout>[] = []
@@ -423,8 +433,14 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     /*
      * 还在全屏里就先不动手：安卓那一发退出全屏常常晚于这里，由 `handleFullscreenChange`
      * 的 `JUST_FOREGROUND_MS` 窗口接住。这里抢着 armRestore 只会白试几发。
+     *
+     * **但横屏锁必须自己补一发。** 安卓切走应用时会释放 orientation lock，而它只在
+     * `requestFullscreen` 兑现之后跟着调 —— 开了后台播放时视频没停、全屏压根没被退掉，
+     * 于是那条路走不到，回来就是「还在全屏、但锁没了」→ 手机竖着拿当场变竖屏全屏
+     *（上下两条黑边比不全屏还大）。这正是「关着后台播放一切正常、开了就变竖屏」的原因。
      */
-    if (wasFullscreenBeforeHide && !document.fullscreenElement) armRestore()
+    if (document.fullscreenElement) void lockLandscape()
+    else if (wasFullscreenBeforeHide) armRestore()
     wasFullscreenBeforeHide = false
     if (!lockedAutoPaused) return
     lockedAutoPaused = false
@@ -475,6 +491,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
       wasFullscreenBeforeHide = false
       pendingAutoFullscreen.value = false
       pendingIsRestore = false
+      unbindRestoreTap()           // 监听器不再是 once 的，清意图的地方都得自己摘
       return
     }
     if (isBackgrounded()) {
@@ -491,6 +508,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     wasFullscreenBeforeHide = false   // Esc / 安卓返回手势，他自己在前台退的
     pendingAutoFullscreen.value = false
     pendingIsRestore = false
+    unbindRestoreTap()
   }
 
   // ── 控制栏显隐 ──
