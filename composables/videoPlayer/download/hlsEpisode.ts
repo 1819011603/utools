@@ -1,0 +1,278 @@
+/**
+ * 下载一集 HLS：解析清单 → 并发拉分片 → AES-128 解密 → **按顺序**写进文件。
+ *
+ * 解析和解密全部复用 `useM3u8`（`getM3u8DownloadPlan` / `decryptHlsSegment` 就是为这件事写的），
+ * 这里只管「怎么把字节稳稳地取回来、按什么节奏取」。
+ *
+ * 内部实现模块，走显式相对 import，不进 `imports.dirs`。
+ */
+import { isOffline, waitForNet } from '../engine/netWatch'
+import type { FileSink } from './fileSink'
+import type { HlsSegment } from '../useM3u8'
+
+export interface EpisodeDeps {
+  /** 防盗链候选值（任务创建时的快照，见 downloadQueue 里的说明） */
+  origin: string
+  referer: string
+  /** 正在播的这一集已经下过的分片，白捡。拿不到就返回 null */
+  getSegBuf: (url: string) => ArrayBuffer | null
+  /** 这一拍允许几条并发（每片开工前问一次，所以让路能立刻生效） */
+  concurrency: () => number
+  /** 返回非空字符串表示「先停一下」（濒卡 / 用户按了暂停），内容只用于展示 */
+  holdReason: () => string
+  onProgress: (p: { segDone: number; segTotal: number; bytes: number }) => void
+  signal: AbortSignal
+}
+
+/** 单片重试次数与退避。离网期间的失败不算在内（见下面 fetchOne） */
+const RETRY_BACKOFF = [300, 900, 2700]
+/** 整集连续失败这么多片就放弃：偶发失败靠重试兜，连着倒下就是源站/地址的问题 */
+const MAX_CONSECUTIVE_FAIL = 6
+/** 允许跳过的分片数上限（跳掉的那几秒画面会直接跨过去，所以要如实报出来） */
+const MAX_SKIP = 3
+/** 攒够几片就按均值预估总量（Blob 兜底要靠它提前劝退） */
+const ESTIMATE_AFTER = 3
+/** 开满几条 worker。同 host 只有 6 条连接，开更多只是互相抢 */
+const MAX_WORKERS = 6
+
+/** 三条取字节的通道。直连排第一：它不花我们的服务器流量，而多数分片 CDN 本来就不校验防盗链 */
+type Lane = 'direct' | 'headers' | 'noref'
+const LANE_ORDER: Lane[] = ['direct', 'headers', 'noref']
+
+const laneUrl = (lane: Lane, url: string, origin: string, referer: string): string => {
+  if (url.includes('/api/proxy?')) return url
+  if (lane === 'direct') return url
+  const params = new URLSearchParams({ url })
+  if (lane === 'noref') params.set('noref', '1')
+  else {
+    if (origin) params.set('origin', origin)
+    if (referer) params.set('referer', referer)
+    // 一个头都没有的「headers 通道」跟 noref 是同一发请求，直接跳过（由调用方过滤）
+  }
+  return '/api/proxy?' + params.toString()
+}
+
+export interface EpisodeResult {
+  /** 有 fMP4 初始化段就出 .mp4，否则 .ts */
+  ext: 'ts' | 'mp4'
+  bytes: number
+  /** 取不回来、直接跨过去的片数（>0 时任务行上要说一句） */
+  skipped: number
+}
+
+/**
+ * 下载一集。抛错即失败（错误文案直接给用户看），`signal` 取消时抛 `DOMException: AbortError`。
+ *
+ * 落盘器由调用方**按解析出来的扩展名**现造（`makeSink`）：文件名里带 `.ts` / `.mp4`，
+ * 而是哪一种要等清单解析完才知道，先造好就只能事后改名（流式写盘那边改不了）。
+ * 造出来之后**由本函数负责 `abort()`**（含清掉写了一半的文件）。
+ */
+export const downloadHlsEpisode = async (
+  m3u8Url: string, makeSink: (ext: 'ts' | 'mp4') => Promise<FileSink>, deps: EpisodeDeps,
+): Promise<EpisodeResult> => {
+  const { origin, referer, signal } = deps
+
+  /**
+   * 交给 `useM3u8` 的取址器：**一律走代理 + `noseg=1`**。
+   *
+   * 两件事同时要成立：清单必须能跨域读到（所以走代理），而清单里的分片地址必须保持**裸 CDN 地址**
+   * （所以 `noseg=1`）—— 否则服务端会把每一行都改写成 `/api/proxy?...`，
+   * 下面那套「先直连、不行再换通道」压根就没有直连可试，整集流量全从我们的 Worker 过一遍。
+   * 密钥同理保持裸地址，由 `fetchHlsKey` 自己套代理（它就是用这个函数）。
+   */
+  const proxyForManifest = (url: string): string => {
+    if (url.includes('/api/proxy?')) return url
+    const params = new URLSearchParams({ url, noseg: '1' })
+    if (origin) params.set('origin', origin)
+    if (referer) params.set('referer', referer)
+    if (!origin && !referer) params.set('noref', '1')   // 没有候选头时 noseg 需要 noref 才生效
+    return '/api/proxy?' + params.toString()
+  }
+
+  const m3u8 = useM3u8(proxyForManifest)
+  m3u8.clearKeyCache()
+
+  const plan = await m3u8.getM3u8DownloadPlan(m3u8Url, signal)
+  /*
+   * **音视频分轨的线路直接拒掉。**
+   *
+   * 两条流各自完整、但拼不到一个文件里（要真的 mux 一遍）。下一个只有画面没声音的文件
+   * 比明说不支持糟得多——用户会以为下载功能坏了，而实际上换条线路就好。
+   */
+  if (plan.audioSegments.length > 0) {
+    throw new Error('这条线路音视频分轨（需要转码合并），暂不支持下载 —— 换条线路再试')
+  }
+  const segments = plan.videoSegments
+  if (!segments.length) throw new Error('清单里没有解析出分片')
+
+  // fMP4 的初始化段由 extractMediaSegmentsWithMeta 塞在最前面。判据宽松没关系：
+  // 扩展名认错只影响双击时用哪个播放器打开，字节本身是一样的
+  const ext: 'ts' | 'mp4' = /\.(mp4|m4s)(\?|$)/i.test(segments[0]!.url) ? 'mp4' : 'ts'
+  const sink = await makeSink(ext)
+
+  // ── 取一片字节（含通道降级与重试）──
+
+  /** 哪条通道成过就一直用它：一集几百片，每片都从直连重试一轮等于把失败乘以片数 */
+  let stickyLane: Lane | null = null
+
+  const lanesToTry = (): Lane[] => {
+    const usable = LANE_ORDER.filter(l => l !== 'headers' || origin || referer)
+    if (!stickyLane) return usable
+    return [stickyLane, ...usable.filter(l => l !== stickyLane)]
+  }
+
+  const fetchOne = async (seg: HlsSegment): Promise<ArrayBuffer> => {
+    // 白捡：正在播的这一集，播放路径已经把这些分片下过了。缓存键是播放那条路拼出的完整 URL，
+    // 所以三种形态都问一遍；命中不了就照常下，不做花活
+    for (const lane of LANE_ORDER) {
+      const hit = deps.getSegBuf(laneUrl(lane, seg.url, origin, referer))
+      if (hit) return hit
+    }
+
+    let lastErr: any
+    for (let attempt = 0; attempt <= RETRY_BACKOFF.length; attempt++) {
+      /*
+       * **离网期间一律不计失败次数**（同 CLAUDE.md 那条「每一个失败额度都必须是连续失败」）：
+       * 断网 20 秒能把三次重试和整集的连续失败额度一起烧光，而那跟源站没有半点关系，
+       * 症状是「网络早恢复了，下载却已经失败了」。
+       */
+      if (isOffline()) {
+        await new Promise<void>(r => waitForNet(() => r()))
+        attempt--
+        continue
+      }
+      for (const lane of lanesToTry()) {
+        try {
+          const res = await fetch(laneUrl(lane, seg.url, origin, referer), {
+            signal, referrerPolicy: 'no-referrer',
+          })
+          if (!res.ok) { lastErr = new Error(`分片 ${res.status}`); continue }
+          const buf = await res.arrayBuffer()
+          if (!buf.byteLength) { lastErr = new Error('分片是空的'); continue }
+          stickyLane = lane
+          return buf
+        } catch (e: any) {
+          if (signal.aborted) throw e
+          lastErr = e
+        }
+      }
+      // 整轮通道都没成 → 这条通道结论也不算准了，下一轮从头试
+      stickyLane = null
+      if (attempt < RETRY_BACKOFF.length) {
+        await new Promise(r => setTimeout(r, RETRY_BACKOFF[attempt]))
+      }
+    }
+    throw lastErr ?? new Error('分片取不回来')
+  }
+
+  // ── 并发拉 + 顺序写 ──
+
+  /*
+   * 乱序窗口只允许比写入位置超前几片：**内存占用因此恒等于「并发数 × 分片大小」**。
+   * 不封窗口的话，第 1 片卡住而后面几百片全下完了，就等于把整集攒在了内存里
+   * ——那正是流式写盘想避开的事。
+   */
+  const done = new Map<number, ArrayBuffer>()
+  let writeCursor = 0
+  let nextToFetch = 0
+  let bytes = 0
+  let consecutiveFail = 0
+  let skipped = 0
+  let failure: any = null
+  let estimated = false
+
+  const doFlush = async () => {
+    while (done.has(writeCursor)) {
+      const buf = done.get(writeCursor)!
+      done.delete(writeCursor)
+      if (buf.byteLength) await sink.write(buf)
+      writeCursor++
+      deps.onProgress({ segDone: writeCursor, segTotal: segments.length, bytes })
+    }
+  }
+  /*
+   * 写入必须**串起来**：几条 worker 同时交货就会同时进 flush，而
+   * `FileSystemWritableFileStream` 被两处同时 write 会直接抛「locked」，
+   * Blob 那边则会把片序写乱（拼出来的文件能播前几分钟，之后花屏 —— 极难归因）。
+   * 写失败（磁盘满 / 超了 Blob 上限）一律记进 failure，别让链子保持 rejected 状态，
+   * 否则后面每一次 flush 都立刻拒，会被 worker 的 catch 误记成「分片失败」。
+   */
+  let flushChain: Promise<void> = Promise.resolve()
+  const flush = () => {
+    flushChain = flushChain.then(doFlush).catch(e => { failure = failure || e })
+    return flushChain
+  }
+
+  /**
+   * 并发数是**动态**的（濒卡要收、用户勾了全速要放），所以固定开满 `MAX_WORKERS` 条，
+   * 每条自己看「我这条还该不该干活」。按当下的并发数重开 worker 会把在途请求全丢掉。
+   */
+  const worker = async (myIndex: number) => {
+    while (!failure && !signal.aborted) {
+      // 三种停一停：并发收窄到我这条之外、濒卡让路、窗口满了等写入追上来。
+      // 都停在这儿而不是继续发请求 —— 让路的全部意义就是不占那 6 条连接
+      const idle = () => myIndex >= deps.concurrency() || !!deps.holdReason()
+      while (idle() && !signal.aborted && !failure) await new Promise(r => setTimeout(r, 700))
+      if (failure || signal.aborted) return
+
+      if (nextToFetch - writeCursor >= deps.concurrency() + 2) {
+        await new Promise(r => setTimeout(r, 120))
+        continue
+      }
+      const i = nextToFetch++
+      if (i >= segments.length) return
+
+      try {
+        const raw = await fetchOne(segments[i]!)
+        const data = await m3u8.decryptHlsSegment(raw, segments[i]!, signal)
+        bytes += data.byteLength
+        consecutiveFail = 0
+        done.set(i, data)
+
+        // 预估总量：Blob 兜底要在这儿劝退，而不是等它下到 80% 再崩
+        if (!estimated && writeCursor + done.size >= ESTIMATE_AFTER) {
+          estimated = true
+          const projected = (bytes / (writeCursor + done.size)) * segments.length
+          const reject = sink.checkProjected(projected)
+          if (reject) { failure = new Error(reject); return }
+        }
+        await flush()
+      } catch (e: any) {
+        if (signal.aborted) return
+        if (++consecutiveFail >= MAX_CONSECUTIVE_FAIL) {
+          failure = new Error(`连续 ${MAX_CONSECUTIVE_FAIL} 片取不回来：${e?.message || e}`)
+          return
+        }
+        /*
+         * 单片彻底失败（三次重试 × 三条通道都没成）：**记一笔跳过，别让整集陪葬**。
+         * 一集八百片，为其中一片把二十分钟的下载判死太狠；但也不能默默跳
+         * ——跳掉的那几秒画面会直接跨过去，所以跳过数要如实报到任务行上。
+         * 超过 MAX_SKIP 就说明不是偶发，整集失败。
+         */
+        if (++skipped > MAX_SKIP) {
+          failure = new Error(`有 ${skipped} 片取不回来（超过容忍上限），换条线路再试`)
+          return
+        }
+        done.set(i, new ArrayBuffer(0))
+        console.warn(`分片 ${i} 取不回来，跳过（累计跳过 ${skipped}）:`, e?.message || e)
+        await flush()
+      }
+    }
+  }
+
+  try {
+    await Promise.all(Array.from({ length: MAX_WORKERS }, (_, i) => worker(i)))
+    if (signal.aborted) throw new DOMException('已取消', 'AbortError')
+    await flush()
+    if (failure) throw failure
+    if (writeCursor < segments.length) throw new Error(`只写进 ${writeCursor}/${segments.length} 片`)
+    await sink.close()
+  } catch (e) {
+    // 写了一半的文件必须清掉：留着就是「下过了但播不了」，比没下更糟
+    await sink.abort().catch(() => {})
+    throw e
+  } finally {
+    m3u8.clearKeyCache()
+  }
+  return { ext, bytes, skipped }
+}

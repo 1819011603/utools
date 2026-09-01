@@ -34,6 +34,14 @@ export function formatTime(seconds: number): string {
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
 }
 
+/** 字节 → 可读体积（下载任务行上的「已下多少」）。同 formatSpeed 用 1024 进制 */
+export function formatBytes(bytes: number): string {
+  if (!isFinite(bytes) || bytes <= 0) return '0 MB'
+  const mb = bytes / 1024 / 1024
+  if (mb < 1024) return `${mb.toFixed(mb >= 100 ? 0 : 1)} MB`
+  return `${(mb / 1024).toFixed(2)} GB`
+}
+
 /**
  * 「超快倍速」开关打开后**追加**的档位（3x 以上）。默认不给，因为它有两条真实代价：
  *   · 带宽按倍数吃——3x 就要 3 倍码率的持续供给，5x 上大部分源根本喂不动，

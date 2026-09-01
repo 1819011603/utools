@@ -96,6 +96,26 @@
         <UIcon name="i-heroicons-queue-list" class="w-5 h-5" />
       </button>
 
+      <!--
+        下载摆在收藏**左边**：最右那格留给收藏（位置不动，肌肉记忆），而下载是同一类
+        「看着看着冒出来的念头」，理应挨着它。抽屉关掉下载也照跑 → 有任务在飞时叠一枚计数徽标，
+        否则用户没有任何途径知道还在下（除了再点开一次）。
+      -->
+      <button
+        v-if="canDownload"
+        class="relative p-1.5 rounded-lg shrink-0 transition-all active:scale-90"
+        :class="showDownloads ? 'bg-rose-500/80' : 'hover:bg-white/15'"
+        title="下载"
+        @click="openOverlay('downloads')"
+      >
+        <UIcon name="i-heroicons-arrow-down-tray" class="w-5 h-5" />
+        <span
+          v-if="dlPending > 0"
+          class="absolute -top-0.5 -right-0.5 min-w-[15px] h-[15px] px-[3px] rounded-full
+                 bg-violet-500 text-[10px] font-semibold leading-[15px] tabular-nums"
+        >{{ dlPending }}</span>
+      </button>
+
       <!-- 收藏摆在画面里：全屏时页面整个看不见，而「这部好看，留一下」恰恰是看着看着才冒出来的念头。
            **认不出是哪部剧就不出**（手工贴地址播的列表收了也找不回来） -->
       <button
@@ -120,6 +140,7 @@ const {
   playlistTitle, currentVideoName, playlist, currentIndex,
   isFullscreen, controlsVisible, toggleFullscreen, keepControlsAlive,
   canFavorite, isFavorited, toggleFavorite,
+  canDownload, dlPending, showDownloads,
   // 手机竖屏时齿轮/选集在顶栏（见模板里的 compact）
   showSettings, showEpisodes, openOverlay,
   isHls, aggregateKBps, strategy, dualChannel,

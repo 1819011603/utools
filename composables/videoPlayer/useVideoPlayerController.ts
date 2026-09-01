@@ -76,6 +76,10 @@ export function useVideoPlayerController() {
   const prewarm = useVideoPrewarm({ media, handoff, conn, engine, playlist })
   engine.registerTickHook(prewarm.prewarmTick)
 
+  // 下载：真正的队列是模块级单例（离开这一页也接着跑），这里装的只是薄壳。
+  // 排在 engine/playlist 之后——它要问引擎「缓冲健不健康」、问 playlist 取按需地址
+  const download = useVideoDownload({ media, handoff, engine, conn, playlist })
+
   const events = useVideoEvents({ media, engine, conn, playlist })
   const controls = useVideoUiControls({ media, autoTune, playlist })
   // 手势层建在控制层之上：它把「一次指针交互」翻译成控制层已有的动作
@@ -264,6 +268,7 @@ export function useVideoPlayerController() {
     ...engine,
     ...autoTune,
     ...prewarm,
+    ...download,
     ...controls,
     ...gestures,
     ...contextMenu,

@@ -214,6 +214,7 @@
       <VideoPlayerEpisodeOverlay />
       <VideoPlayerSettingsPanel />
       <VideoPlayerLineOverlay />
+      <VideoPlayerDownloadOverlay />
 
       <!-- 右键菜单 + 它开出来的媒体信息面板（挂在容器内：容器就是全屏元素） -->
       <VideoPlayerContextMenu />
