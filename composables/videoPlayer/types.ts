@@ -139,6 +139,8 @@ export interface SavedState {
   fitMode?: VideoFitMode
   hwDecode?: boolean
   boostRate?: number
+  /** 下载输出 MP4（重封装）还是 .ts（原样拼）。默认 MP4：.ts 只有 VLC/mpv 那几个认 */
+  dlMp4?: boolean
   // 引擎当前生效的连接配置。存下来只为刷新后首屏能立刻显示上次的结论，
   // 真正的取值仍由 applyStrategy 每次加载时重新决定（探测/规则/阶梯）。
   requestOrigin: string

@@ -76,7 +76,8 @@
       "mcp__chrome-devtools__list_console_messages",
       "Bash(lsof -ti:3001)",
       "Bash(xargs kill)",
-      "Bash(HTTPS_PROXY=http://127.0.0.1:7897 MEDIA_NO_PROXY=1 npx nuxt dev --port 3001)"
+      "Bash(HTTPS_PROXY=http://127.0.0.1:7897 MEDIA_NO_PROXY=1 npx nuxt dev --port 3001)",
+      "Bash(/Users/gaotu/githubDir/utools/node_modules/.bin/esbuild /Users/gaotu/githubDir/utools/composables/videoPlayer/download/tsToMp4.ts --format=esm --outfile=tsToMp4.mjs --log-level=error)"
     ],
     "ask": [
       "Bash(rm *)",

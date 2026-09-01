@@ -27,6 +27,12 @@ export interface FileSink {
   abort: () => Promise<void>
   /** 预估总量超上限时提前劝退（返回原因），流式那版恒为空 */
   checkProjected: (projectedBytes: number) => string
+  /**
+   * **就地覆盖文件开头那一段**（长度必须与原来完全相同），在 `close()` 之前调。
+   * 只为一件事：MP4 的时长要等下完才知道，而它写在文件最前面的 `moov` 里
+   * （见 `tsToMp4.patchFmp4Duration`）。
+   */
+  patchStart: (data: ArrayBuffer) => Promise<void>
 }
 
 /** 这个浏览器能不能流式写盘。UI 据此决定要不要提醒体积上限 */
@@ -55,8 +61,9 @@ export const safeFileName = (name: string): string =>
 const createDiskSink = async (dirHandle: any, fileName: string): Promise<FileSink> => {
   const fh = await dirHandle.getFileHandle(fileName, { create: true })
   const writable = await fh.createWritable()
+  let written = 0
   return {
-    write: async chunk => { await writable.write(chunk) },
+    write: async chunk => { await writable.write(chunk); written += chunk.byteLength },
     close: async () => { await writable.close() },
     abort: async () => {
       // 先关掉句柄再删：Windows 上文件还开着时 removeEntry 会失败，
@@ -65,6 +72,12 @@ const createDiskSink = async (dirHandle: any, fileName: string): Promise<FileSin
       try { await dirHandle.removeEntry(fileName) } catch { /* 删不掉就留着，比抛错好 */ }
     },
     checkProjected: () => '',
+    // 定位写：写完之后**光标要拨回末尾**，否则接着写会从被覆盖的位置继续（把 moov 后面全糊掉）。
+    // 眼下只在 close 前调一次，但别把这条依赖留给下一个人踩
+    patchStart: async data => {
+      await writable.write({ type: 'write', position: 0, data })
+      await writable.write({ type: 'seek', position: written })
+    },
   }
 }
 
@@ -98,6 +111,12 @@ const createBlobSink = (fileName: string): FileSink => {
     },
     abort: async () => { parts = null },
     checkProjected: projected => (projected > BLOB_MAX_BYTES ? overLimit(projected) : ''),
+    // 还没拼成 Blob，直接换掉第一块（remux 那条路第一次 write 写的正是 init 段）
+    patchStart: async data => {
+      if (!parts?.length) return
+      if (parts[0]!.byteLength !== data.byteLength) return   // 长度不一致就别动，宁可时长不准
+      parts[0] = data
+    },
   }
 }
 

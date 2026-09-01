@@ -7,6 +7,7 @@
  * 内部实现模块，走显式相对 import，不进 `imports.dirs`。
  */
 import { isOffline, waitForNet } from '../engine/netWatch'
+import { createTsRemuxer, patchFmp4Duration, type TsRemuxer } from './tsToMp4'
 import type { FileSink } from './fileSink'
 import type { HlsSegment } from '../useM3u8'
 
@@ -20,6 +21,8 @@ export interface EpisodeDeps {
   concurrency: () => number
   /** 返回非空字符串表示「先停一下」（濒卡 / 用户按了暂停），内容只用于展示 */
   holdReason: () => string
+  /** 要不要把 TS 重封装成 MP4（用户设置；已经是 fMP4 的源无需也不会走这条） */
+  wantMp4: boolean
   onProgress: (p: { segDone: number; segTotal: number; bytes: number }) => void
   signal: AbortSignal
 }
@@ -130,8 +133,13 @@ export const downloadHlsEpisode = async (
   if (!segments.length) throw new Error('清单里没有解析出分片')
 
   // fMP4 的初始化段由 extractMediaSegmentsWithMeta 塞在最前面。判据宽松没关系：
-  // 扩展名认错只影响双击时用哪个播放器打开，字节本身是一样的
-  const ext: 'ts' | 'mp4' = /\.(mp4|m4s)(\?|$)/i.test(segments[0]!.url) ? 'mp4' : 'ts'
+  // 认错只影响要不要多走一层 remux，字节本身是一样的
+  const sourceIsMp4 = /\.(mp4|m4s)(\?|$)/i.test(segments[0]!.url)
+  /** 源是 TS 且用户要 MP4 → 多走一层重封装（不重编码）。源本来就是 fMP4 就直接写 */
+  const remuxing = !sourceIsMp4 && deps.wantMp4
+  const ext: 'ts' | 'mp4' = sourceIsMp4 || remuxing ? 'mp4' : 'ts'
+  // 重依赖动态 import，且**赶在建文件之前**：mux.js 要是加载不上，别先在磁盘上留个空文件
+  const remuxer: TsRemuxer | null = remuxing ? await createTsRemuxer() : null
   const sink = await makeSink(ext)
 
   // ── 取一片字节（含通道降级与重试）──
@@ -212,12 +220,28 @@ export const downloadHlsEpisode = async (
   let failure: any = null
   let estimated = false
   let strippedOnce = false   // 伪装头只报一次，别在控制台刷 590 行
+  let initSeg: ArrayBuffer | null = null   // remux 出来的 `ftyp+moov`，收工时要回头补时长
 
   const doFlush = async () => {
     while (done.has(writeCursor)) {
       const buf = done.get(writeCursor)!
       done.delete(writeCursor)
-      if (buf.byteLength) await sink.write(buf)
+      if (buf.byteLength) {
+        /*
+         * **重封装只能放在这条串行的写入链上**：mux.js 的 Transmuxer 是有状态的、
+         * 靠喂进去的顺序维持时间线。放到并行的 worker 里就是「第 7 片先于第 3 片进去」，
+         * 出来的文件时间戳全乱（能播、但进度乱跳）。
+         */
+        if (remuxer) {
+          for (const part of remuxer.push(buf)) {
+            // 第一块就是 `ftyp+moov`（init 段）。留一份：收工时要拿它把时长补回去
+            if (!initSeg) initSeg = part
+            await sink.write(part)
+          }
+        } else {
+          await sink.write(buf)
+        }
+      }
       writeCursor++
       deps.onProgress({ segDone: writeCursor, segTotal: segments.length, bytes })
     }
@@ -265,8 +289,9 @@ export const downloadHlsEpisode = async (
       try {
         const raw = await fetchOne(segments[i]!)
         const plain = await m3u8.decryptHlsSegment(raw, segments[i]!, signal)
-        // 伪装壳只可能出现在 TS 上（fMP4 那条压根没有同步字节可找），所以按扩展名分流
-        const data = ext === 'ts' ? stripToTsSync(plain) : plain
+        // 伪装壳只可能出现在 TS 上（fMP4 那条压根没有同步字节可找），所以判据是**源**的格式，
+        // 不是输出的扩展名 —— 要 remux 成 MP4 时源仍然是 TS，那层壳照样得先剥掉
+        const data = sourceIsMp4 ? plain : stripToTsSync(plain)
         if (data.byteLength !== plain.byteLength && !strippedOnce) {
           strippedOnce = true
           console.log(`分片带 ${plain.byteLength - data.byteLength} 字节伪装头（如 PNG），已剥掉再写入`)
@@ -312,6 +337,18 @@ export const downloadHlsEpisode = async (
     await flush()
     if (failure) throw failure
     if (writeCursor < segments.length) throw new Error(`只写进 ${writeCursor}/${segments.length} 片`)
+    // 每片都 flush 过，正常这里拿不到东西；留着是为了不依赖 mux.js 的内部攒包时机
+    if (remuxer) for (const part of remuxer.finish()) await sink.write(part)
+    /*
+     * **回头把 MP4 的时长补上**：mux.js 写的是「未知」（0xFFFFFFFF），QuickTime 会照着它
+     * 把 52 分钟的片子显示成 27 小时（ffmpeg/VLC 自己会扫，所以只验 ffprobe 看不出来）。
+     * 时长只能从清单的 EXTINF 总和来 —— 文件是边下边写的，没人回头去数帧。
+     */
+    if (remuxer && initSeg) {
+      const total = segments.reduce((a, s) => a + (s.duration || 0), 0)
+      if (total > 0) await sink.patchStart(patchFmp4Duration(initSeg, total))
+      else console.warn('清单里没有 EXTINF 时长，MP4 的时长字段只能留成「未知」')
+    }
     await sink.close()
   } catch (e) {
     // 写了一半的文件必须清掉：留着就是「下过了但播不了」，比没下更糟

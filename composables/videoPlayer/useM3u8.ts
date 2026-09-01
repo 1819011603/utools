@@ -6,6 +6,9 @@ export interface HlsSegment {
   sn: number             // 媒体序列号，用于推导 AES IV
   keyUri?: string        // 密钥地址（undefined = 未加密）
   keyIv?: Uint8Array | null  // 显式 IV（null = 用 sn 推导）
+  // EXTINF 秒数。下载时要靠它们的总和把 MP4 的 moov 时长补上（见 download/tsToMp4）——
+  // 那个数只能从清单来：文件是边下边写的，写到最后也没人回头去数帧
+  duration?: number
 }
 
 /**
@@ -121,6 +124,7 @@ export function useM3u8(getProxyUrl: (url: string) => string) {
         sn,
         keyUri: isEncrypted && seg.key?.uri ? resolveUrl(baseUrl, seg.key.uri) : undefined,
         keyIv: isEncrypted ? keyIv : null,
+        duration: typeof seg.duration === 'number' ? seg.duration : undefined,
       })
     }
     return result

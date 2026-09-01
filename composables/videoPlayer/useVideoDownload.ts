@@ -25,6 +25,8 @@ export interface VideoDownloadDeps {
   engine: VideoEngine
   conn: VideoConnStrategy
   playlist: VideoPlaylistCtl
+  /** 输出格式这类设置要落 localStorage（`video-player-state`） */
+  onDirty: () => void
 }
 
 export function useVideoDownload(deps: VideoDownloadDeps) {
@@ -32,6 +34,17 @@ export function useVideoDownload(deps: VideoDownloadDeps) {
 
   /** 全速下载：默认关。开着就不再给播放让路（用户明确要「先下完再说」时才该勾） */
   const dlFullSpeed = ref(false)
+
+  /**
+   * 输出 MP4（重封装）还是 `.ts`（原样拼）。**默认 MP4**：`.ts` 只有 VLC / mpv / PotPlayer 认，
+   * QuickTime、Windows「电影和电视」、手机相册、微信、浏览器一概打不开，而下完之后
+   * 「传手机上看 / 发给别人」正是主要用途。
+   *
+   * 留这个开关是因为 MP4 多一层 mux.js：源里贴片和正片编码参数不一样时那一层有翻车的可能，
+   * 而 `.ts` 是字节原样落盘、最不会出事的那条路（出问题时的退路）。
+   */
+  const dlMp4 = ref(true)
+  watch(dlMp4, () => deps.onDirty())
 
   /**
    * 「这一集是 HLS 还是整片 MP4」。
@@ -92,6 +105,7 @@ export function useVideoDownload(deps: VideoDownloadDeps) {
     getSegBuf: engine.getSegBuf,
     concurrency: dlConcurrency,
     holdReason: dlHoldReason,
+    wantMp4: () => dlMp4.value,
   })
 
   const dlTasks = queue.tasks
@@ -143,7 +157,7 @@ export function useVideoDownload(deps: VideoDownloadDeps) {
   }
 
   return {
-    canDownload, dlIsMp4, dlTasks, dlRunning, dlPending, dlStreaming, dlFullSpeed,
+    canDownload, dlIsMp4, dlTasks, dlRunning, dlPending, dlStreaming, dlFullSpeed, dlMp4,
     startDownload, mp4DownloadHref,
     cancelDownload: queue.cancel,
     clearFinishedDownloads: queue.clearFinished,

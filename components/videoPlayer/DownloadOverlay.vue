@@ -10,7 +10,8 @@
       <div class="flex items-center gap-2 px-4 pt-3 pb-1.5 shrink-0">
         <span class="font-semibold">下载</span>
         <span class="text-[11px] text-white/50 truncate">
-          {{ dlIsMp4 ? '整片 MP4：交给浏览器下载' : (dlStreaming ? '边下边写盘，输出 .ts' : '内存下载，单集上限 3GB') }}
+          {{ dlIsMp4 ? '整片 MP4：交给浏览器下载'
+            : (dlStreaming ? `边下边写盘，输出 ${dlMp4 ? '.mp4' : '.ts'}` : '内存下载，单集上限 3GB') }}
         </span>
         <button
           class="ml-auto p-2 rounded-lg hover:bg-white/10 active:scale-90 transition-all shrink-0"
@@ -102,6 +103,21 @@
             <button class="text-white/60 hover:text-white transition-colors" @click="pickAll">全选</button>
             <button class="text-white/60 hover:text-white transition-colors" @click="picked = []">清空</button>
             <button class="text-white/60 hover:text-white transition-colors" @click="pickCurrent">只选当前集</button>
+            <!--
+              格式两档摆成一对按钮而不是下拉：只有两个值，而且要让「.ts 是退路」这件事直接看得见。
+              .mp4 多一层重封装（mux.js），贴片和正片编码参数不同的源上有翻车可能 → 出事就切回 .ts
+            -->
+            <span class="ml-auto flex items-center rounded-md overflow-hidden ring-1 ring-white/15">
+              <button
+                v-for="opt in [{ v: true, t: '.mp4' }, { v: false, t: '.ts' }]" :key="opt.t"
+                class="px-2 py-0.5 transition-colors"
+                :class="dlMp4 === opt.v ? 'bg-white/20 text-white' : 'text-white/45 hover:text-white/80'"
+                :title="opt.v
+                  ? '重封装成 MP4（不重编码、画质无损）：手机、微信、QuickTime、浏览器都能直接播'
+                  : '原样拼成 .ts：最不会出错，但只有 VLC / mpv / PotPlayer 认'"
+                @click="dlMp4 = opt.v"
+              >{{ opt.t }}</button>
+            </span>
           </div>
           <div class="grid grid-cols-5 sm:grid-cols-7 md:grid-cols-9 lg:grid-cols-10 gap-1">
             <button
@@ -129,7 +145,13 @@
       <!-- 底部一行：说明 + 开始。说明必须写清楚，否则「下载功能坏了」是唯一的解读 -->
       <div v-if="!dlIsMp4" class="shrink-0 px-3 pt-2 pb-3 border-t border-white/10 flex items-center gap-3">
         <div class="text-[11px] text-white/45 leading-snug min-w-0">
-          输出 <span class="text-white/70">.ts</span>（VLC / mpv / PotPlayer 直接能播）。
+          <template v-if="dlMp4">
+            输出 <span class="text-white/70">.mp4</span>（重封装，不重编码、画质无损；手机、微信、QuickTime 都能直接播）。
+          </template>
+          <template v-else>
+            输出 <span class="text-white/70">.ts</span> —— 字节原样落盘、最不会出错，但
+            <span class="text-white/70">只有</span> VLC / mpv / PotPlayer 认。
+          </template>
           <template v-if="!dlStreaming">
             这个浏览器不支持流式写盘（只有桌面版 Chrome/Edge 支持），整集先攒在内存里、单集上限 3GB，手机上大文件很可能失败。
           </template>
@@ -162,7 +184,7 @@ import type { DlTask, DlState } from '~/composables/videoPlayer/download/downloa
 
 const {
   showDownloads, playlist, currentIndex, getVideoName,
-  dlIsMp4, dlTasks, dlPending, dlStreaming, dlFullSpeed,
+  dlIsMp4, dlTasks, dlPending, dlStreaming, dlFullSpeed, dlMp4,
   startDownload, mp4DownloadHref, cancelDownload, clearFinishedDownloads,
   isPlaying, strategy,
 } = useVideoPlayerCtx()

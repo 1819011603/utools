@@ -44,6 +44,8 @@ export interface QueueRuntime {
   getSegBuf: (url: string) => ArrayBuffer | null
   concurrency: () => number
   holdReason: () => string
+  /** 输出 MP4（重封装）还是 .ts。**开跑那一刻读一次**，中途改设置不影响在飞的任务 */
+  wantMp4: () => boolean
 }
 
 /**
@@ -161,6 +163,7 @@ const runOne = async (task: DlTask) => {
       getSegBuf: rt.getSegBuf,
       concurrency: rt.concurrency,
       holdReason: rt.holdReason,
+      wantMp4: rt.wantMp4(),
       onProgress,
       signal: ctrl.signal,
     })

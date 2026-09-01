@@ -78,7 +78,10 @@ export function useVideoPlayerController() {
 
   // 下载：真正的队列是模块级单例（离开这一页也接着跑），这里装的只是薄壳。
   // 排在 engine/playlist 之后——它要问引擎「缓冲健不健康」、问 playlist 取按需地址
-  const download = useVideoDownload({ media, handoff, engine, conn, playlist })
+  const download = useVideoDownload({
+    media, handoff, engine, conn, playlist,
+    onDirty: () => saveState(),
+  })
 
   const events = useVideoEvents({ media, engine, conn, playlist })
   const controls = useVideoUiControls({ media, autoTune, playlist })
@@ -119,6 +122,7 @@ export function useVideoPlayerController() {
         fitMode: media.fitMode.value,
         hwDecode: media.hwDecode.value,
         boostRate: media.boostRatePref.value,
+        dlMp4: download.dlMp4.value,
         requestOrigin: conn.requestOrigin.value,
         requestReferer: conn.requestReferer.value,
         manifestOnly: conn.manifestOnly.value,
@@ -150,6 +154,7 @@ export function useVideoPlayerController() {
     media.fitMode.value = s.fitMode ?? 'default'
     media.hwDecode.value = s.hwDecode ?? true
     media.boostRatePref.value = s.boostRate ?? 2
+    download.dlMp4.value = s.dlMp4 ?? true
     conn.useProxy.value = s.useProxy ?? false
     conn.requestOrigin.value = s.requestOrigin ?? ''
     conn.requestReferer.value = s.requestReferer ?? ''
