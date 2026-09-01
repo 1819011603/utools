@@ -24,7 +24,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   const {
     videoEl, playerContainer, progressBar, isPlaying, isVideoLoaded, duration,
     volume, isMuted, desiredRate, autoBestRate, turboRate, autoFullscreen, isFullscreen, showControls, showPlayIcon, showSpeedMenu,
-    showEpisodes, showSettings, showLines, showLockBtn, isLocked,
+    showEpisodes, showSettings, showLines, showDownloads, showLockBtn, isLocked,
     pendingAutoFullscreen, autoMuted, bgPlay,
     seekPreviewTime, seekPreviewPercent, isSeeking, hoverTime, hoverPercent, preloadStrategy,
   } = media
@@ -492,6 +492,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
     showEpisodes.value = false
     showSettings.value = false
     showLines.value = false
+    showDownloads.value = false
     showLockBtn.value = false
     videoEl.value?.play().catch(() => { /* 被策略拦下就等用户点一下 */ })
   }
@@ -585,28 +586,31 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   }
 
   /**
-   * 关掉画面上摊开的那些浮层（选集 / 设置 / 换源 / 倍速）。
+   * 关掉画面上摊开的那些浮层（选集 / 设置 / 换源 / 下载 / 倍速）。
    * 返回「有没有真的关掉什么」——点画面时优先关它们，而不是去切控制栏：
    * 设置和换源两块都只铺右侧 70%，露出来的那条画面正是用户想点掉它们的地方。
    */
   const closeOverlays = (): boolean => {
-    if (!showEpisodes.value && !showSettings.value && !showLines.value && !showSpeedMenu.value) return false
+    if (!showEpisodes.value && !showSettings.value && !showLines.value
+      && !showDownloads.value && !showSpeedMenu.value) return false
     showEpisodes.value = false
     showSettings.value = false
     showLines.value = false
+    showDownloads.value = false
     showSpeedMenu.value = false
     return true
   }
 
   /**
-   * 打开画面里的某一块浮层（选集 / 设置 / 换源），**三块互斥** —— 设置和换源都摊在右侧，
-   * 同时开就是叠在一起。收在这里是因为竖屏时选集和齿轮的入口在顶栏、宽屏时在控制栏，
-   * 两个组件各写一份必然漂移。
+   * 打开画面里的某一块浮层（选集 / 设置 / 换源 / 下载），**四块互斥** —— 设置和换源都摊在右侧、
+   * 选集和下载都从底部铺开，同时开就是叠在一起。收在这里是因为竖屏时选集和齿轮的入口在顶栏、
+   * 宽屏时在控制栏，两个组件各写一份必然漂移。
    */
-  const openOverlay = (which: 'episodes' | 'settings' | 'lines') => {
+  const openOverlay = (which: 'episodes' | 'settings' | 'lines' | 'downloads') => {
     showEpisodes.value = which === 'episodes' && !showEpisodes.value
     showSettings.value = which === 'settings' && !showSettings.value
     showLines.value = which === 'lines' && !showLines.value
+    showDownloads.value = which === 'downloads' && !showDownloads.value
   }
 
   /** 在控制栏上有任何动作就重新计时（触摸端唯一的续命途径） */

@@ -10,6 +10,7 @@
  *   referer 注入的 Referer 头（可选，noref=1 时忽略）
  *   noref=1 伪装下载器：不发送 Origin/Referer
  *   noseg=1 m3u8 内的分片 URL 不改写（让分片直连 CDN）
+ *   dl=1    回 Content-Disposition: attachment（配 name=文件名），把整片 MP4 交给浏览器原生下载器
  *
  * 实现细节：
  *   - 不静态 import 任何 node:* 或 Node 专属包，避免 CF 构建/运行报错
@@ -240,11 +241,47 @@ export default defineEventHandler(async (event) => {
     setResponseHeader(event, 'Cache-Control', 'no-store')
   }
   setResponseHeader(event, 'Access-Control-Allow-Origin', '*')
+
+  /*
+   * ── dl=1：让浏览器**下载**而不是播放（只服务整片 MP4）──
+   *
+   * HLS 用不上这条（下到的只是几 KB 的清单文本，得前端自己拉分片拼），
+   * 但整片 MP4 走这条比前端自己下强得多：断点续传、后台下载、关标签页也继续、零内存占用。
+   * 之所以非要绕这一层而不是直接 `<a download>`：`download` 属性对**跨源** URL 会被浏览器
+   * 静默忽略（变成导航，在标签页里直接播起来），而这些源多半还要 Referer，导航过去常 403。
+   * 经过这里就成了同源响应，属性才生效。
+   */
+  if (query.dl === '1') {
+    const name = safeFilename((query.name as string) || '', targetUrl)
+    // filename 只放 ASCII 兜底，中文剧名走 filename*（RFC 5987）——
+    // 头部字段不能带非 ASCII 字节，直接塞中文会被网关截断或整条丢掉
+    setResponseHeader(
+      event, 'Content-Disposition',
+      `attachment; filename="download.mp4"; filename*=UTF-8''${encodeURIComponent(name)}`,
+    )
+  }
+
   setResponseStatus(event, response.status)
 
   // h3 v1+ 支持直接返回 Web ReadableStream，Node 和 CF 都 OK
   return response.body
 })
+
+/**
+ * 下载文件名：剥掉路径分隔符与控制字符（前端已经 sanitize 过一遍，服务端不能信它），
+ * 拿不到就从 URL 的最后一段退化出一个。
+ */
+function safeFilename(name: string, targetUrl: string): string {
+  const clean = (s: string) => s.replace(/[\\/:*?"<>|\r\n\t]/g, '_').replace(/^\.+/, '').trim().slice(0, 120)
+  const picked = clean(name)
+  if (picked) return picked
+  try {
+    const last = decodeURIComponent(new URL(targetUrl).pathname.split('/').pop() || '')
+    return clean(last) || 'video.mp4'
+  } catch {
+    return 'video.mp4'
+  }
+}
 
 // ── 防盗链头探测 ──────────────────────────────────────────────
 //

@@ -48,6 +48,8 @@ export function useVideoMediaState() {
   const showSettings = ref(false)
   /** 画面内的换源面板（线路表来自最近一次解析） */
   const showLines = ref(false)
+  /** 画面内的下载抽屉（任务队列 + 选集勾选） */
+  const showDownloads = ref(false)
   const showAdvancedProxy = ref(false)
   const autoFullscreen = ref(true)
   // 手机浏览器要求用户激活才准进全屏，页面加载后自动调必被拒 → 挂起，等用户碰画面再兑现
@@ -133,7 +135,7 @@ export function useVideoMediaState() {
     videoUrl, videoUrlInput, isVideoLoaded, isHls, errorMessage, isLoading, isBuffering, isResolvingUrl, resolveStage,
     videoEl, playerContainer, progressBar, speedMenuRef,
     isPlaying, currentTime, duration, volume, isMuted, playbackRate, desiredRate, videoKey,
-    isFullscreen, showControls, showPlayIcon, showSpeedMenu, showEpisodes, showSettings, showLines,
+    isFullscreen, showControls, showPlayIcon, showSpeedMenu, showEpisodes, showSettings, showLines, showDownloads,
     showAdvancedProxy, autoFullscreen, pendingAutoFullscreen, autoMuted, autoBestRate, turboRate, bgPlay,
     isLocked, showLockBtn, fitMode, hwDecode, boostRatePref, brightness,
     progressPercent, bufferedPercent, seekPreviewTime, seekPreviewPercent, isSeeking, hoverTime, hoverPercent,
