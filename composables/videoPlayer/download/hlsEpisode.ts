@@ -35,6 +35,30 @@ const ESTIMATE_AFTER = 3
 /** 开满几条 worker。同 host 只有 6 条连接，开更多只是互相抢 */
 const MAX_WORKERS = 6
 
+const TS_PACKET = 188
+
+/**
+ * **把分片开头那段伪装字节剥掉**，让写进文件的第一个字节就是 TS 同步字节 0x47。
+ *
+ * 实测 4kvm 那条线路（`file.icve.com.cn`）把每一片都伪装成 PNG：**73 字节 PNG 头 + 完整 TS 流**
+ * （`(总长 - 73) % 188 === 0`）。播放时看不出来 —— hls.js 的 TS 解复用自己会扫同步点；
+ * 但下载是**首尾相接拼成一个文件**，不剥的话 590 片就有 590 段 73 字节的垃圾散在里面，
+ * ffprobe / VLC 要么报错要么花屏，而症状会被当成「解密错了」（最难查的那一类）。
+ *
+ * 三条纪律：判据要**连续三个包**（单个 0x47 太容易撞上）；窗口封在 64KB 内
+ * （再往后就不是「一层壳」而是别的格式了）；**找不到就原样交出去** —— 猜不准就别改字节。
+ */
+const stripToTsSync = (buf: ArrayBuffer): ArrayBuffer => {
+  const u8 = new Uint8Array(buf)
+  if (u8.length < TS_PACKET * 3) return buf
+  if (u8[0] === 0x47 && u8[TS_PACKET] === 0x47 && u8[TS_PACKET * 2] === 0x47) return buf
+  const limit = Math.min(u8.length - TS_PACKET * 3, 64 * 1024)
+  for (let i = 1; i < limit; i++) {
+    if (u8[i] === 0x47 && u8[i + TS_PACKET] === 0x47 && u8[i + TS_PACKET * 2] === 0x47) return buf.slice(i)
+  }
+  return buf
+}
+
 /** 三条取字节的通道。直连排第一：它不花我们的服务器流量，而多数分片 CDN 本来就不校验防盗链 */
 type Lane = 'direct' | 'headers' | 'noref'
 const LANE_ORDER: Lane[] = ['direct', 'headers', 'noref']
@@ -149,6 +173,13 @@ export const downloadHlsEpisode = async (
           if (!res.ok) { lastErr = new Error(`分片 ${res.status}`); continue }
           const buf = await res.arrayBuffer()
           if (!buf.byteLength) { lastErr = new Error('分片是空的'); continue }
+          /*
+           * **200 + 一页 HTML 是真实存在的**：实测这个 CDN 对 URL 里多一个 `%0D` 就回
+           * 300 来字节的 `<!DOCTYPE HTML>`，状态码照旧 200。写进文件不会报任何错，
+           * 只会在播的时候花屏 —— 而那时已经查不到源头了。**直连通道尤其要自己把这刀落下**
+           *（走代理那条有服务端的诱饵图/下线检测兜着，直连没有）。
+           */
+          if (new Uint8Array(buf)[0] === 0x3c) { lastErr = new Error('拿回来的是网页不是分片'); continue }
           stickyLane = lane
           return buf
         } catch (e: any) {
@@ -180,6 +211,7 @@ export const downloadHlsEpisode = async (
   let skipped = 0
   let failure: any = null
   let estimated = false
+  let strippedOnce = false   // 伪装头只报一次，别在控制台刷 590 行
 
   const doFlush = async () => {
     while (done.has(writeCursor)) {
@@ -209,22 +241,36 @@ export const downloadHlsEpisode = async (
    */
   const worker = async (myIndex: number) => {
     while (!failure && !signal.aborted) {
-      // 三种停一停：并发收窄到我这条之外、濒卡让路、窗口满了等写入追上来。
-      // 都停在这儿而不是继续发请求 —— 让路的全部意义就是不占那 6 条连接
-      const idle = () => myIndex >= deps.concurrency() || !!deps.holdReason()
-      while (idle() && !signal.aborted && !failure) await new Promise(r => setTimeout(r, 700))
-      if (failure || signal.aborted) return
+      /*
+       * **「片都发完了」这一条必须排在所有等待之前。**
+       * 否则被收窄掉的那几条 worker（`myIndex >= concurrency()`）会在让路的循环里
+       * 一直转下去 —— 它们永远走不到下面那句 `i >= segments.length`，于是 `Promise.all`
+       * 永远不 resolve：**分片全下完了，任务却停在 590/590 不落定**。
+       */
+      if (nextToFetch >= segments.length) return
 
+      // 两种停一停：并发收窄到我这条之外 / 濒卡让路。停在这儿而不是继续发请求
+      // —— 让路的全部意义就是不占那 6 条连接
+      if (myIndex >= deps.concurrency() || deps.holdReason()) {
+        await new Promise(r => setTimeout(r, 700))
+        continue
+      }
+      // 乱序窗口满了：等写入追上来（不然内存里会攒下整集）
       if (nextToFetch - writeCursor >= deps.concurrency() + 2) {
         await new Promise(r => setTimeout(r, 120))
         continue
       }
       const i = nextToFetch++
-      if (i >= segments.length) return
 
       try {
         const raw = await fetchOne(segments[i]!)
-        const data = await m3u8.decryptHlsSegment(raw, segments[i]!, signal)
+        const plain = await m3u8.decryptHlsSegment(raw, segments[i]!, signal)
+        // 伪装壳只可能出现在 TS 上（fMP4 那条压根没有同步字节可找），所以按扩展名分流
+        const data = ext === 'ts' ? stripToTsSync(plain) : plain
+        if (data.byteLength !== plain.byteLength && !strippedOnce) {
+          strippedOnce = true
+          console.log(`分片带 ${plain.byteLength - data.byteLength} 字节伪装头（如 PNG），已剥掉再写入`)
+        }
         bytes += data.byteLength
         consecutiveFail = 0
         done.set(i, data)
