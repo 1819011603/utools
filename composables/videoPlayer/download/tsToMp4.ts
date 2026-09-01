@@ -73,35 +73,90 @@ const toBuf = (u8: Uint8Array): ArrayBuffer =>
 
 /** 「时长未知」的哨兵值。mux.js 在 `mvhd`/`tkhd`/`mdhd` 里一律填这个 */
 const UNKNOWN_DURATION = 0xffffffff
+/** `mehd` v0 的整个大小：size(4) + type(4) + version/flags(4) + fragment_duration(4) */
+const MEHD_SIZE = 16
 
 /**
- * **把 `moov` 里的时长补上**（下完之后回头改文件开头那几百字节）。
+ * **把时长写进 `moov`**（在写 init 段那一刻就做，时长早就知道 —— 清单的 EXTINF 之和）。
  *
  * mux.js 面向 MSE，时长交给 MediaSource 去管，所以它在 `mvhd`/`tkhd`/`mdhd` 里一律写
- * `0xFFFFFFFF`（未知）。文件里留着这个值的后果**分播放器**：
- *   · ffmpeg / VLC / mpv 会自己扫一遍，读数正常 —— 所以只验 ffprobe 会以为没问题；
- *   · **QuickTime 直接信 `mvhd`**，实测把 42 秒的片子显示成 27 小时，进度条整条报废（踩过）。
+ * `0xFFFFFFFF`（未知），**而且不写 `mehd`**。留着这副样子的后果分三种播放器：
+ *   · ffmpeg / VLC / mpv 自己扫一遍，读数正常 —— **所以只验 ffprobe 完全看不出问题**；
+ *   · 只补 `mvhd` 的话，QuickTime 从「27 小时」变成「偏长 19%」（42s 报 50s）：
+ *     **按规范，有 `mvex` 就是分片 MP4，整片时长该由 `mehd` 说，`mvhd` 那个数不作准**
+ *     —— QuickTime 是对的，我们一开始补错了地方。
+ *   · 补上 `mehd` 之后它才准。
  * 而「能在 QuickTime / 手机上正常播」正是选 MP4 的全部理由，所以这一步不能省。
  *
- * 只改固定宽度的时长字段、不动任何 box 大小 → 补出来的字节数与原来**完全一致**，
- * 可以就地覆盖文件开头（见 `FileSink.patchStart`）。v1（64 位）的一概跳过：
- * mux.js 只写 v0，遇到别的形状宁可不改也别把 moov 改坏。
+ * `mehd` 缺的时候要**插进 `mvex` 最前面**（规范里它排在 `trex` 之前），于是 init 段会长 16 字节，
+ * 得跟着改 `mvex` 和 `moov` 两个 size。这对分片 MP4 是安全的：`trun` 里的 `data_offset`
+ * 是**相对 `moof` 起点**的，整段后移不影响任何偏移。
+ *
+ * v1（64 位）的时长字段一概跳过：mux.js 只写 v0，遇到别的形状宁可不改也别把 moov 改坏。
  */
 export const patchFmp4Duration = (init: ArrayBuffer, seconds: number): ArrayBuffer => {
   if (!(seconds > 0)) return init
-  const out = init.slice(0)
+
+  const src = new Uint8Array(init)
+  const typeOf = (u8: Uint8Array, i: number) =>
+    String.fromCharCode(u8[i + 4]!, u8[i + 5]!, u8[i + 6]!, u8[i + 7]!)
+
+  // ── 第一步：没有 mehd 就插一个（先占位，第二步再填数）──
+  let buf = src
+  {
+    const dv0 = new DataView(src.buffer, src.byteOffset, src.byteLength)
+    let moovAt = -1, moovSize = 0, mvexAt = -1, mvexSize = 0, hasMehd = false
+    for (let i = 0; i + 8 <= src.length;) {
+      const size = dv0.getUint32(i)
+      if (size < 8 || i + size > src.length) break
+      if (typeOf(src, i) === 'moov') { moovAt = i; moovSize = size; break }
+      i += size
+    }
+    if (moovAt >= 0) {
+      for (let i = moovAt + 8; i + 8 <= moovAt + moovSize;) {
+        const size = dv0.getUint32(i)
+        if (size < 8) break
+        if (typeOf(src, i) === 'mvex') { mvexAt = i; mvexSize = size; break }
+        i += size
+      }
+    }
+    if (mvexAt >= 0) {
+      for (let i = mvexAt + 8; i + 8 <= mvexAt + mvexSize;) {
+        const size = dv0.getUint32(i)
+        if (size < 8) break
+        if (typeOf(src, i) === 'mehd') { hasMehd = true; break }
+        i += size
+      }
+      if (!hasMehd) {
+        const at = mvexAt + 8
+        buf = new Uint8Array(src.length + MEHD_SIZE)
+        buf.set(src.subarray(0, at), 0)
+        const mehd = new DataView(buf.buffer, at, MEHD_SIZE)
+        mehd.setUint32(0, MEHD_SIZE)
+        buf[at + 4] = 0x6d; buf[at + 5] = 0x65; buf[at + 6] = 0x68; buf[at + 7] = 0x64   // 'mehd'
+        mehd.setUint32(8, 0)                        // version 0 + flags 0
+        mehd.setUint32(12, UNKNOWN_DURATION)        // 占位，下面统一填
+        buf.set(src.subarray(at), at + MEHD_SIZE)
+        const dv1 = new DataView(buf.buffer)
+        dv1.setUint32(moovAt, moovSize + MEHD_SIZE)
+        dv1.setUint32(mvexAt, mvexSize + MEHD_SIZE)
+      }
+    }
+  }
+
+  // ── 第二步：把所有「未知」时长字段填上真实值 ──
+  const out = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer
   const dv = new DataView(out)
   const u8 = new Uint8Array(out)
-  const typeAt = (i: number) => String.fromCharCode(u8[i + 4]!, u8[i + 5]!, u8[i + 6]!, u8[i + 7]!)
 
-  /** 时长字段与它的时基在 `mvhd`/`mdhd` 里同样是 (box+20, box+24)，`tkhd` 只有时长（用影片时基） */
+  /** 时长与时基在 `mvhd`/`mdhd` 里同为 (box+20, box+24)；`tkhd` 只有时长，用影片时基 */
   let movieTimescale = 0
   const walk = (start: number, end: number) => {
     let i = start
     while (i + 8 <= end) {
       const size = dv.getUint32(i)
       if (size < 8 || i + size > end) return
-      const type = typeAt(i)
+      const type = typeOf(u8, i)
       const version = u8[i + 8]
       if (type === 'mvhd' && version === 0) {
         movieTimescale = dv.getUint32(i + 20)
@@ -116,6 +171,7 @@ export const patchFmp4Duration = (init: ArrayBuffer, seconds: number): ArrayBuff
           dv.setUint32(i + 28, Math.round(seconds * movieTimescale))
         }
       } else if (type === 'mehd' && version === 0) {
+        // **这个才是分片 MP4 的正式时长**（QuickTime / AVFoundation 认的就是它）
         if (dv.getUint32(i + 12) === UNKNOWN_DURATION && movieTimescale) {
           dv.setUint32(i + 12, Math.round(seconds * movieTimescale))
         }

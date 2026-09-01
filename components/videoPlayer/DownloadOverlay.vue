@@ -87,6 +87,25 @@
 
         <!-- ③ HLS：勾选集数 -->
         <template v-else>
+          <!--
+            选文件夹这一步是最容易卡住人的地方：Chrome 有一张敏感目录黑名单（主目录本身、桌面、
+            文档、系统盘根目录…），选中就弹「无法打开此文件夹，因为其中含有系统文件」。
+            所以**点之前就把该选哪儿说清楚**，出事之后再把原因和出口摆出来。
+          -->
+          <div v-if="dlNotice" class="mx-1 rounded-lg bg-amber-400/15 px-2.5 py-2 text-[11px] text-amber-200 leading-snug">
+            {{ dlNotice }}
+            <button class="ml-1 underline hover:text-white transition-colors" @click="pickDownloadFolder">选文件夹</button>
+          </div>
+          <div v-else-if="dlStreaming" class="flex items-center gap-2 px-1 text-[11px] text-white/45">
+            <template v-if="dlDirName">
+              保存到「<span class="text-white/70">{{ dlDirName }}</span>」
+              <button class="underline hover:text-white transition-colors" @click="pickDownloadFolder">换一个</button>
+            </template>
+            <template v-else>
+              点「下载」后先选一个保存文件夹 —— 挑「下载」里的子文件夹；主目录、桌面这类 Chrome 不让用
+            </template>
+          </div>
+
           <div class="flex items-center gap-2 px-1">
             <span class="text-xs text-white/60">选集（已选 {{ picked.length }}）</span>
             <label class="ml-auto flex items-center gap-1.5 text-[11px] text-white/60 cursor-pointer select-none">

@@ -270,15 +270,37 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
 - **HLS 只能自己下**：`<a download>` 对 m3u8 只会下到那份几 KB 的清单文本，而 `download` 属性对**跨源**
   URL 会被**静默忽略**（变成导航，在标签页里直接播起来）。所以拉分片 + AES-128 解密 + 拼文件全在前端
   （`download/hlsEpisode.ts`，解析与解密**复用 `useM3u8` 里那套现成的** `getM3u8DownloadPlan` /
-  `decryptHlsSegment` —— 它们本来就是为下载写的，只是长期没人调）。输出 `.ts`，**不引 mux.js/ffmpeg.wasm**。
+  `decryptHlsSegment` —— 它们本来就是为下载写的，只是长期没人调）。
 - **整片 MP4 交给浏览器**：`/api/proxy?dl=1&name=` 回 `Content-Disposition: attachment`
   （中文名走 `filename*=UTF-8''`，头里不能带非 ASCII 字节）。断点续传、后台下、关标签页也继续、零内存占用。
   绕这一层的唯一理由就是上面那条「跨源 download 被忽略」——经过代理就成了同源响应。
+
+**默认输出 `.mp4`（重封装，不重编码），`.ts` 只作退路**（面板上一对小按钮，随 `video-player-state` 持久化）：
+拼出来的 `.ts` **只有 VLC / mpv / PotPlayer 认** —— QuickTime、Windows「电影和电视」、手机相册、微信、
+浏览器一概打不开，而「下完传手机 / 发给别人」正是下载的主要用途。`download/tsToMp4.ts` 用 mux.js
+把 TS remux 成 fMP4（H.264/AAC 字节原样搬容器，画质无损、几乎不吃 CPU）。留 `.ts` 那一档是因为多一层就多一个
+出错点（贴片和正片编码参数不同的源）。四条纪律：
+
+- **remux 只能放在那条串行的写入链上**：Transmuxer 有状态、靠喂进去的顺序维持时间线，
+  放进并行 worker 就是「第 7 片先于第 3 片进去」→ 文件能播但进度乱跳
+- **`initSegment` 只能写一次**：mux.js 每片都带上它（MSE 允许重复 append），而我们是往一个文件里
+  首尾相接地写 —— 重复写等于在视频中间插一堆 `ftyp+moov`
+- **下完必须回头把 `moov` 里的时长补上**（`patchFmp4Duration` + `FileSink.patchStart`）：
+  mux.js 面向 MSE，`mvhd`/`tkhd`/`mdhd` 一律填 `0xFFFFFFFF`（未知）。**ffmpeg/VLC/mpv 会自己扫一遍，
+  所以只验 ffprobe 完全看不出问题**；而 QuickTime 直接信 `mvhd` —— 实测把 42 秒的片子显示成 **27 小时**，
+  进度条整条报废。时长只能取**清单 EXTINF 之和**（实测 42.042 vs 真实时间线 42.048，够准；
+  文件是边下边写的，没人回头数帧）。只改固定宽度字段、**长度必须与原来完全一致**，才能就地覆盖文件开头；
+  流式那条写完要**把光标拨回末尾**。⚠️ 补完之后 **QuickTime 仍会偏长**（42s 报 50s）——
+  五个时长字段都验过是对的（ffprobe 读出来准确无误），那是它自己对 fMP4 的算法，别再往这个方向查
+- **mux.js 的 `import` 必须是字面量 specifier、且绝不能加 `@vite-ignore`**（那是给服务端 `node:*` 的写法）：
+  它是 CJS 包，要靠 Vite 预打包成 ESM；用变量 + ignore 会让这行原样留到运行时 → 浏览器解析裸包名直接失败。
+  构建后它是一个 **68KB 的独立懒加载 chunk**，只有真的下 MP4 时才拉
 
 **必须剥掉分片开头的伪装壳**（`stripToTsSync`）：实测 4kvm 那条线路的分片是
 **73 字节 PNG 头 + 完整 TS 流**（`(总长 - 73) % 188 === 0`）。播放时看不出来（hls.js 的 TS 解复用自己扫同步点），
 但下载是首尾相接拼一个文件 → 590 片就有 590 段垃圾散在里面，**ffprobe 直接把整个文件识别成 `png_pipe`
 （1×1 图片）**，而症状会被当成「解密错了」。判据要连续三个 188 字节包都是 `0x47`，窗口封 64KB，**找不到就别改字节**。
+**判据是「源是不是 TS」而不是输出的扩展名** —— 要 remux 成 MP4 时源仍然是 TS，那层壳照样得先剥。
 同理 **200 + 一页 HTML 是真实存在的**（URL 里多个 `%0D` 就回 300 字节的 `<!DOCTYPE`），
 首字节是 `<` 一律当失败 —— 走代理那条有服务端的诱饵图/下线检测兜着，**直连通道得自己把这刀落下**。
 

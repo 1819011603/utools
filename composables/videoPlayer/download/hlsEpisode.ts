@@ -141,6 +141,12 @@ export const downloadHlsEpisode = async (
   // 重依赖动态 import，且**赶在建文件之前**：mux.js 要是加载不上，别先在磁盘上留个空文件
   const remuxer: TsRemuxer | null = remuxing ? await createTsRemuxer() : null
   const sink = await makeSink(ext)
+  /**
+   * 整集时长，**只能从清单的 EXTINF 之和来**：文件是边下边写的，没人回头去数帧。
+   * 实测跟真实时间线差 6ms（42.042 vs 42.048），跟播放器读出的整集时长分毫不差。
+   */
+  const totalSecs = segments.reduce((a, s) => a + (s.duration || 0), 0)
+  if (remuxing && !totalSecs) console.warn('清单里没有 EXTINF 时长 → MP4 的时长字段只能留成「未知」')
 
   // ── 取一片字节（含通道降级与重试）──
 
@@ -220,7 +226,7 @@ export const downloadHlsEpisode = async (
   let failure: any = null
   let estimated = false
   let strippedOnce = false   // 伪装头只报一次，别在控制台刷 590 行
-  let initSeg: ArrayBuffer | null = null   // remux 出来的 `ftyp+moov`，收工时要回头补时长
+  let initWritten = false    // `ftyp+moov` 只有第一块，且只有它要补时长
 
   const doFlush = async () => {
     while (done.has(writeCursor)) {
@@ -234,9 +240,14 @@ export const downloadHlsEpisode = async (
          */
         if (remuxer) {
           for (const part of remuxer.push(buf)) {
-            // 第一块就是 `ftyp+moov`（init 段）。留一份：收工时要拿它把时长补回去
-            if (!initSeg) initSeg = part
-            await sink.write(part)
+            /*
+             * 第一块是 `ftyp+moov`（init 段）→ **就在这儿把时长写进去**。
+             * 时长早就知道（清单 EXTINF 之和），不必等下完再回头改文件开头 ——
+             * 而且补 `mehd` 会让这一段长 16 字节，定位覆盖那条路根本走不通。
+             */
+            const out = !initWritten ? patchFmp4Duration(part, totalSecs) : part
+            initWritten = true
+            await sink.write(out)
           }
         } else {
           await sink.write(buf)
@@ -339,16 +350,6 @@ export const downloadHlsEpisode = async (
     if (writeCursor < segments.length) throw new Error(`只写进 ${writeCursor}/${segments.length} 片`)
     // 每片都 flush 过，正常这里拿不到东西；留着是为了不依赖 mux.js 的内部攒包时机
     if (remuxer) for (const part of remuxer.finish()) await sink.write(part)
-    /*
-     * **回头把 MP4 的时长补上**：mux.js 写的是「未知」（0xFFFFFFFF），QuickTime 会照着它
-     * 把 52 分钟的片子显示成 27 小时（ffmpeg/VLC 自己会扫，所以只验 ffprobe 看不出来）。
-     * 时长只能从清单的 EXTINF 总和来 —— 文件是边下边写的，没人回头去数帧。
-     */
-    if (remuxer && initSeg) {
-      const total = segments.reduce((a, s) => a + (s.duration || 0), 0)
-      if (total > 0) await sink.patchStart(patchFmp4Duration(initSeg, total))
-      else console.warn('清单里没有 EXTINF 时长，MP4 的时长字段只能留成「未知」')
-    }
     await sink.close()
   } catch (e) {
     // 写了一半的文件必须清掉：留着就是「下过了但播不了」，比没下更糟

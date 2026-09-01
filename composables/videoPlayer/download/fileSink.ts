@@ -27,12 +27,6 @@ export interface FileSink {
   abort: () => Promise<void>
   /** 预估总量超上限时提前劝退（返回原因），流式那版恒为空 */
   checkProjected: (projectedBytes: number) => string
-  /**
-   * **就地覆盖文件开头那一段**（长度必须与原来完全相同），在 `close()` 之前调。
-   * 只为一件事：MP4 的时长要等下完才知道，而它写在文件最前面的 `moov` 里
-   * （见 `tsToMp4.patchFmp4Duration`）。
-   */
-  patchStart: (data: ArrayBuffer) => Promise<void>
 }
 
 /** 这个浏览器能不能流式写盘。UI 据此决定要不要提醒体积上限 */
@@ -40,17 +34,38 @@ export const supportsDiskSink = (): boolean =>
   typeof window !== 'undefined' && typeof (window as any).showDirectoryPicker === 'function'
 
 /**
- * 请一次目录授权，返回目录句柄；用户取消或不支持则返回 null（调用方退回 Blob）。
- * **必须在用户点击的同步调用栈里调**（弹窗要用户激活）。
+ * 请一次目录授权。**必须在用户点击的同步调用栈里调**（弹窗要用户激活）。
+ *
+ * 返回值要**区分「他不想选」和「选了但不成」**，不能一律当 null 悄悄退回内存下载 ——
+ * 内存那条有 3GB 上限、手机上还可能被系统杀掉，静默降级等于埋一颗雷。
+ *  · `{ handle }`     选好了
+ *  · `{ canceled }`   他自己点了取消
+ *  · `{ error }`      选了个 Chrome 不让用的目录，文案要能指路
  */
-export const pickDownloadDir = async (): Promise<any | null> => {
-  if (!supportsDiskSink()) return null
+export interface DirPickResult { handle?: any; canceled?: boolean; error?: string }
+
+export const pickDownloadDir = async (): Promise<DirPickResult> => {
+  if (!supportsDiskSink()) return { error: '' }   // 这个浏览器压根没有这能力，不算错
   try {
-    return await (window as any).showDirectoryPicker({ id: 'utools-video-dl', mode: 'readwrite' })
-  } catch {
-    return null   // 用户点了取消 —— 不是错误，退回 Blob 让他照样能下
+    const handle = await (window as any).showDirectoryPicker({ id: 'utools-video-dl', mode: 'readwrite' })
+    return { handle }
+  } catch (e: any) {
+    /*
+     * **`AbortError` 才是「他点了取消」**，其余都是真出了事，最常见的一种是
+     * 「无法打开此文件夹，因为其中含有系统文件」——Chrome 有一张敏感目录黑名单
+     * （用户主目录本身、桌面、文档、Library、系统盘根目录…），选中它们一律拒。
+     * 那个弹窗上有「另选一个文件夹」，点了会重开选择器、这个 promise 继续等；
+     * 只有点「取消」才走到这里，所以这时候要把「换个普通子目录」这句话说出来。
+     */
+    if (e?.name === 'AbortError') return { canceled: true }
+    return { error: (e?.message || '选择文件夹失败') }
   }
 }
+
+/** 「选了个不让用的目录」时给的指路文案。UI 两处都用它，别各写一份 */
+export const DIR_BLOCKED_HINT =
+  'Chrome 不允许把「主目录/桌面/文档/系统盘根目录」这类含系统文件的位置交给网页。'
+  + '在「下载」里新建一个子文件夹（比如 下载/放映厅）再选它。'
 
 /** 文件名：剥掉路径分隔符和 Windows 不收的那几个字符，太长的截断（有的站集名是一整句话） */
 export const safeFileName = (name: string): string =>
@@ -61,9 +76,8 @@ export const safeFileName = (name: string): string =>
 const createDiskSink = async (dirHandle: any, fileName: string): Promise<FileSink> => {
   const fh = await dirHandle.getFileHandle(fileName, { create: true })
   const writable = await fh.createWritable()
-  let written = 0
   return {
-    write: async chunk => { await writable.write(chunk); written += chunk.byteLength },
+    write: async chunk => { await writable.write(chunk) },
     close: async () => { await writable.close() },
     abort: async () => {
       // 先关掉句柄再删：Windows 上文件还开着时 removeEntry 会失败，
@@ -72,12 +86,6 @@ const createDiskSink = async (dirHandle: any, fileName: string): Promise<FileSin
       try { await dirHandle.removeEntry(fileName) } catch { /* 删不掉就留着，比抛错好 */ }
     },
     checkProjected: () => '',
-    // 定位写：写完之后**光标要拨回末尾**，否则接着写会从被覆盖的位置继续（把 moov 后面全糊掉）。
-    // 眼下只在 close 前调一次，但别把这条依赖留给下一个人踩
-    patchStart: async data => {
-      await writable.write({ type: 'write', position: 0, data })
-      await writable.write({ type: 'seek', position: written })
-    },
   }
 }
 
@@ -111,12 +119,6 @@ const createBlobSink = (fileName: string): FileSink => {
     },
     abort: async () => { parts = null },
     checkProjected: projected => (projected > BLOB_MAX_BYTES ? overLimit(projected) : ''),
-    // 还没拼成 Blob，直接换掉第一块（remux 那条路第一次 write 写的正是 init 段）
-    patchStart: async data => {
-      if (!parts?.length) return
-      if (parts[0]!.byteLength !== data.byteLength) return   // 长度不一致就别动，宁可时长不准
-      parts[0] = data
-    },
   }
 }
 

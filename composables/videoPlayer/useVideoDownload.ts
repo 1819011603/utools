@@ -17,7 +17,7 @@ import type { VideoEngine } from './useVideoEngine'
 import type { VideoConnStrategy } from './useVideoConnStrategy'
 import type { VideoPlaylistCtl } from './useVideoPlaylistCtl'
 import * as queue from './download/downloadQueue'
-import { pickDownloadDir, supportsDiskSink, safeFileName } from './download/fileSink'
+import { pickDownloadDir, supportsDiskSink, safeFileName, DIR_BLOCKED_HINT } from './download/fileSink'
 
 export interface VideoDownloadDeps {
   media: VideoMediaState
@@ -45,6 +45,11 @@ export function useVideoDownload(deps: VideoDownloadDeps) {
    */
   const dlMp4 = ref(true)
   watch(dlMp4, () => deps.onDirty())
+
+  /** 选文件夹这一步的结果提示（选到哪个 / 为什么没选上）。抽屉里显示，点开始时清掉 */
+  const dlNotice = ref('')
+  /** 已授权的文件夹名，让用户知道东西存哪儿了，也是「换一个」的锚点 */
+  const dlDirName = ref('')
 
   /**
    * 「这一集是 HLS 还是整片 MP4」。
@@ -126,9 +131,25 @@ export function useVideoDownload(deps: VideoDownloadDeps) {
     // 目录只请一次：一个手势覆盖整个队列。勾了 10 集要点 10 次保存框的话，
     // 后 9 次都发生在用户早已切走的时候（那时压根弹不出来）
     if (!queue.hasDownloadDir() && supportsDiskSink()) {
-      const h = await pickDownloadDir()
-      if (h) queue.setDownloadDir(h)
-      // 用户点了取消 → 退回 Blob 兜底（有体积上限），不当成错误
+      dlNotice.value = ''
+      const r = await pickDownloadDir()
+      if (r.handle) {
+        queue.setDownloadDir(r.handle)
+        dlDirName.value = r.handle.name || ''
+      } else if (r.canceled) {
+        /*
+         * **他点了取消 → 整个动作作废，别偷偷改用内存下载。**
+         * 内存那条有 3GB 上限、手机上还可能被系统杀掉；而他之所以取消，
+         * 很可能正是撞上了「无法打开此文件夹，因为其中含有系统文件」那个弹窗
+         *（Chrome 的敏感目录黑名单）—— 这时候静默换一条更差的路，
+         * 表现就是「下着下着莫名失败」，他压根不知道自己在用哪条路。
+         */
+        dlNotice.value = '没有选文件夹，下载没有开始。' + DIR_BLOCKED_HINT
+        return
+      } else if (r.error) {
+        dlNotice.value = r.error + ' ' + DIR_BLOCKED_HINT
+        return
+      }
     }
 
     queue.enqueue(picked.map(i => ({
@@ -156,8 +177,24 @@ export function useVideoDownload(deps: VideoDownloadDeps) {
     return '/api/proxy?' + params.toString()
   }
 
+  /**
+   * 换一个保存文件夹（也是「上次选错了」的出口）。同样必须在点击的调用栈里调。
+   * 换不成就保持原来那个，别把已经能用的授权弄丢。
+   */
+  const pickDownloadFolder = async () => {
+    dlNotice.value = ''
+    const r = await pickDownloadDir()
+    if (r.handle) {
+      queue.setDownloadDir(r.handle)
+      dlDirName.value = r.handle.name || ''
+      dlNotice.value = `保存到「${dlDirName.value}」`
+    } else if (r.canceled) dlNotice.value = ''
+    else if (r.error) dlNotice.value = r.error + ' ' + DIR_BLOCKED_HINT
+  }
+
   return {
     canDownload, dlIsMp4, dlTasks, dlRunning, dlPending, dlStreaming, dlFullSpeed, dlMp4,
+    dlNotice, dlDirName, pickDownloadFolder,
     startDownload, mp4DownloadHref,
     cancelDownload: queue.cancel,
     clearFinishedDownloads: queue.clearFinished,
