@@ -62,7 +62,12 @@ export function useVideoDownload(deps: VideoDownloadDeps) {
     (handoff.lazyTask.value && handoff.lazyIndexByUrl.value[url] !== undefined) || isM3u8Url(url)
       ? 'hls' : 'mp4'
 
-  const canDownload = computed(() => playlist.playlist.value.length > 0)
+  /**
+   * FLV 不给下载：直播流没有终点（原生下载器会一直写到磁盘满），
+   * 而它又必然被 `kindOf` 判成 `mp4` 走原生下载那条路。
+   */
+  const canDownload = computed(() =>
+    playlist.playlist.value.length > 0 && !playlist.playlist.value.some(u => isFlvUrl(u)))
   /** 当前列表是不是整片 MP4（抽屉据此换成「交给浏览器下载」那一版） */
   const dlIsMp4 = computed(() => {
     const list = playlist.playlist.value
@@ -124,6 +129,28 @@ export function useVideoDownload(deps: VideoDownloadDeps) {
   const dlStreaming = computed(() => supportsDiskSink())
 
   /**
+   * 集数的显示写法。**纯数字的补成「第02集」**：站点给的集名多半就是个孤零零的 `2`，
+   * 单独摆在文件名最前面看不出是什么（同 `currentVideoName` 的规矩）。
+   *
+   * 顺带**补零到跟总集数一样宽**（至少 2 位）：不补的话文件管理器按字典序排成
+   * 第1集、第10集、第11集、…、第2集，而「集数放前面」本来就是为了让同一部剧顺着排。
+   * 不是纯数字的（「第一季01」「上」「下」）原样保留 —— 那些本来就说得清，硬套只会更难认。
+   */
+  const epLabelOf = (ep: string, total: number): string => {
+    if (!/^\d+$/.test(ep)) return ep
+    return `第${ep.padStart(Math.max(2, String(total).length), '0')}集`
+  }
+
+  /** 文件名主体：**集数在前、剧名在后**（`第02集-现在不是出轨的问题`） */
+  const fileBaseOf = (index: number): string => {
+    const list = playlist.playlist.value
+    const url = list[index]
+    if (!url) return '视频'
+    const ep = epLabelOf(handoff.getVideoName(url, index), list.length)
+    return safeFileName(`${ep}-${handoff.playlistTitle.value || '视频'}`)
+  }
+
+  /**
    * 开始下载勾选的那几集。**必须在点击的同步调用栈里调**：
    * 目录授权弹窗要用户激活，`await` 之后再弹就弹不出来了。
    */
@@ -157,8 +184,10 @@ export function useVideoDownload(deps: VideoDownloadDeps) {
     }
 
     queue.enqueue(picked.map(i => ({
-      title: handoff.playlistTitle.value || '视频',
-      epName: handoff.getVideoName(list[i]!, i),
+      // 任务行上只显示集数（「第02集」），不重复剧名 —— 抽屉标题栏上已经有了；
+      // 文件名走 fileBaseOf，那份要带剧名（文件是要离开这个页面的）
+      epName: epLabelOf(handoff.getVideoName(list[i]!, i), list.length),
+      fileBase: fileBaseOf(i),
       placeholder: list[i]!,
     })))
   }
@@ -171,8 +200,7 @@ export function useVideoDownload(deps: VideoDownloadDeps) {
     const list = playlist.playlist.value
     const url = list[index]
     if (!url) return ''
-    const name = safeFileName(`${handoff.playlistTitle.value || '视频'}-${handoff.getVideoName(url, index)}`) + '.mp4'
-    const params = new URLSearchParams({ url, dl: '1', name })
+    const params = new URLSearchParams({ url, dl: '1', name: fileBaseOf(index) + '.mp4' })
     const o = conn.originHint.value || conn.requestOrigin.value
     const r = conn.refererHint.value || conn.requestReferer.value
     if (o) params.set('origin', o)

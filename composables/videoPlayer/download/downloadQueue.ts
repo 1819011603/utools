@@ -16,10 +16,14 @@ export type DlState = 'queued' | 'running' | 'done' | 'failed' | 'canceled'
 
 export interface DlTask {
   id: string
-  /** 剧名（文件名前缀） */
-  title: string
-  /** 集名（文件名后缀，也是任务行上显示的那个） */
+  /** 任务行上显示的集名（「2」「上」这种）。**不参与文件名**，见 fileBase */
   epName: string
+  /**
+   * 文件名主体（不含扩展名），由上层拼好传进来：**集数在前、剧名在后**且数字集名已补零
+   * （`02-现在不是出轨的问题`）。在这里拼的话就要把剧名和补零规则也搬进来，
+   * 而它们是上层（认识 playlist 和剧名）的事
+   */
+  fileBase: string
   /** 列表里那条地址：按需取址的站点是占位地址，真实地址开跑前现取 */
   placeholder: string
   state: DlState
@@ -73,14 +77,14 @@ let pumping = false
 /** 队列里还没落定的任务数 —— 徽标显示「3/10」用的就是它 */
 export const pendingCount = () => tasks.filter(t => t.state === 'queued' || t.state === 'running').length
 
-export const enqueue = (items: Array<{ title: string; epName: string; placeholder: string }>) => {
+export const enqueue = (items: Array<{ epName: string; fileBase: string; placeholder: string }>) => {
   for (const it of items) {
     // 同一集已经在队列里（或已经下好了）就别重复排：勾选面板上看得见状态，重复排纯属误触
     if (tasks.some(t => t.placeholder === it.placeholder
       && (t.state === 'queued' || t.state === 'running' || t.state === 'done'))) continue
     tasks.push({
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      title: it.title, epName: it.epName, placeholder: it.placeholder,
+      epName: it.epName, fileBase: it.fileBase, placeholder: it.placeholder,
       state: 'queued', segDone: 0, segTotal: 0, bytes: 0, kbps: 0, conn: 0, skipped: 0,
       error: '', fileName: '',
     })
@@ -158,7 +162,8 @@ const runOne = async (task: DlTask) => {
     if (ctrl.signal.aborted) throw new DOMException('已取消', 'AbortError')
 
     const res = await downloadHlsEpisode(realUrl, async ext => {
-      task.fileName = safeFileName(`${task.title || '视频'}-${task.epName}`) + '.' + ext
+      // 再 sanitize 一次：fileBase 上层已经洗过，但扩展名是这里定的，两处规则别分叉
+      task.fileName = safeFileName(task.fileBase || '视频') + '.' + ext
       return createSink(dirHandle, task.fileName)
     }, {
       origin: rt.origin(),

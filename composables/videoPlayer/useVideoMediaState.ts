@@ -13,6 +13,13 @@ export function useVideoMediaState() {
   const videoUrlInput = ref('')      // 多行输入
   const isVideoLoaded = ref(false)
   const isHls = ref(false)
+  /**
+   * 这一条走的是 FLV（mpegts.js 解复用 → MSE）。
+   *
+   * 跟 `isHls` 并列而不是塞进它：那一整套预取/卡顿自愈/门槛只对 HLS 分片成立，
+   * 而「非 HLS」那条路上的 MP4 专属动作（自读 moov 时长、恢复进度 seek）在直播流上也不能做。
+   */
+  const isFlv = ref(false)
   const errorMessage = ref('')
   const isLoading = ref(false)
   const isBuffering = ref(false)
@@ -132,7 +139,7 @@ export function useVideoMediaState() {
   const mp4Kbps = ref(0)
 
   return {
-    videoUrl, videoUrlInput, isVideoLoaded, isHls, errorMessage, isLoading, isBuffering, isResolvingUrl, resolveStage,
+    videoUrl, videoUrlInput, isVideoLoaded, isHls, isFlv, errorMessage, isLoading, isBuffering, isResolvingUrl, resolveStage,
     videoEl, playerContainer, progressBar, speedMenuRef,
     isPlaying, currentTime, duration, volume, isMuted, playbackRate, desiredRate, videoKey,
     isFullscreen, showControls, showPlayIcon, showSpeedMenu, showEpisodes, showSettings, showLines, showDownloads,

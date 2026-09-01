@@ -299,7 +299,7 @@ export function useVideoEvents(deps: VideoEventsDeps) {
     lastBufEnd = -1   // 换了一集，缓冲末尾的采样基准要重来
     // 出问题时最该看的三个读数：浏览器解出的时长、可 seek 区间、就绪等级。
     // 「拖不动」几乎一定是 seekable 为空或只到已缓冲处，光看时长看不出来
-    if (!isHls.value) {
+    if (!isHls.value && !media.isFlv.value) {
       const v = videoEl.value
       const sk = Array.from({ length: v.seekable.length }, (_, i) =>
         `${v.seekable.start(i).toFixed(0)}~${v.seekable.end(i).toFixed(0)}`).join(', ') || '(空)'
@@ -330,6 +330,8 @@ export function useVideoEvents(deps: VideoEventsDeps) {
         videoEl.value.currentTime = skipIntro.value
       }
       if (savedTime > 0 || skipIntro.value > 0) hasSkippedIntro.value = true
+    } else if (media.isFlv.value) {
+      // FLV（尤其直播）没有可落位的时间线：seek 到任何位置都只会把刚起播的流打断
     } else if (savedTime > 0 && savedTime < duration.value - 5) {
       videoEl.value.currentTime = savedTime
       hasSkippedIntro.value = true   // 已恢复进度，视为已跳过片头

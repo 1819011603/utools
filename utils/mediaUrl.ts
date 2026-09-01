@@ -18,6 +18,24 @@
 const MEDIA_EXT =
   /\.(ts|m4s|mp4|m4v|m4a|mp3|aac|ac3|eac3|flac|wav|ogg|opus|webm|mkv|mov|avi|flv|jpe?g|png|webp|gif|vtt|srt|ass|key)$/i
 
+/**
+ * 「这个地址是不是 FLV 流」（直播拉流 / 点播 flv 都算）。
+ *
+ * 判据顺序照 `isM3u8Url` 的思路：先看路径最后一段的扩展名，再退一步看 query——
+ * 直播地址的扩展名常被签名参数挤到 query 前面（抖音那种 `…_uiqsd5.flv?expire=…&biz_protocol=flv`
+ * 路径段仍是 `.flv`，但也有站把容器写在 query 里）。目录部分一律不看，理由同上面那条。
+ */
+export function isFlvUrl(url: string): boolean {
+  const cut = url.search(/[?#]/)
+  const path = cut === -1 ? url : url.slice(0, cut)
+  const rest = cut === -1 ? '' : url.slice(cut)
+  const last = path.slice(path.lastIndexOf('/') + 1)
+
+  if (/\.flv$/i.test(last)) return true
+  if (MEDIA_EXT.test(last)) return false
+  return /[?&](biz_)?protocol=flv\b/i.test(rest) || /\.flv([?&]|$)/i.test(rest)
+}
+
 export function isM3u8Url(url: string): boolean {
   const cut = url.search(/[?#]/)
   const path = cut === -1 ? url : url.slice(0, cut)

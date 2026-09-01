@@ -15,6 +15,7 @@ import { useLoadTimeout } from './engine/loadTimeout'
 import { useHlsErrorHandler, failMessageOf } from './engine/hlsErrors'
 import { useStallRecovery } from './engine/stallRecovery'
 import { probeMp4Head } from './engine/mp4Duration'
+import { createFlvStream, type FlvHandle } from './engine/flvStream'
 import { holdPiP, reclaimPiP, releasePiPHolder, isPiPHeld, startPiPTracking, resyncPiPAspect } from './engine/pipHandoff'
 import { onNetChange, isRecovering } from './engine/netWatch'
 import { clearDirectDead } from './probeStore'
@@ -40,12 +41,13 @@ let Hls: typeof HlsType | null = null
 export function useVideoEngine(deps: VideoEngineDeps) {
   const { media, conn, tier } = deps
   const {
-    videoUrl, videoEl, isHls, isLoading, isBuffering, isPlaying, isVideoLoaded,
+    videoUrl, videoEl, isHls, isFlv, isLoading, isBuffering, isPlaying, isVideoLoaded,
     errorMessage, currentTime, duration, bufferedPercent, videoKey,
     hlsConfig, hlsStats, playbackDiag, playbackRate, desiredRate, autoBestRate, volume, isMuted,
   } = media
 
   let hls: HlsType | null = null
+  let flv: FlvHandle | null = null
 
 
   /**
@@ -397,6 +399,9 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     cancelBufferingGate()   // 别让上一个流的闸门在新流身上到点
     onDestroyHooks.forEach(fn => fn())
     if (hls) { hls.destroy(); hls = null }
+    // FLV 也挂在这里销毁：它同样是「一个 MSE 实例绑在 <video> 上」，
+    // 不摘掉的话新流 attach 时会撞上上一条流的 SourceBuffer
+    if (flv) { flv.destroy(); flv = null }
     hlsStats.value = null
     // 取消正在跑的预取请求、停止清理定时器/心跳、重置策略实测（换流/换 CDN 重新测）。
     // 注意：不清空预取缓存——它是模块级单例，需跨换流/导航存活，让「点回去」命中内存缓存；
@@ -464,6 +469,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
 
     const url = videoUrl.value.trim()
     const nextIsHls = conn.isHlsUrl(url)
+    const nextIsFlv = !nextIsHls && isFlvUrl(url)
     /**
      * **HLS → HLS 时复用同一个 `<video>` 元素**，不再 `videoKey++`。
      *
@@ -507,12 +513,14 @@ export function useVideoEngine(deps: VideoEngineDeps) {
 
     startLoadTimeout()
     isHls.value = nextIsHls
+    isFlv.value = nextIsFlv
 
     console.log('开始加载视频:', url, '是否HLS:', isHls.value,
-      '使用代理:', conn.useProxy.value)
+      isFlv.value ? '（FLV）' : '', '使用代理:', conn.useProxy.value)
 
     try {
       if (isHls.value) await loadHlsVideo(url, reuseEl)
+      else if (isFlv.value) await loadFlvVideo(url)
       else await loadNativeVideo(url)
       // 挂在这里而不是更早：src 刚设上（重建元素那条路新元素也已挂好），元信息事件还没可能派发，
       // 一次都不会漏
@@ -687,6 +695,30 @@ export function useVideoEngine(deps: VideoEngineDeps) {
      */
     hls.attachMedia(videoEl.value)
     hls.loadSource(finalUrl)
+  }
+
+  /**
+   * FLV：交给 mpegts.js 解复用喂 MSE（浏览器不认这个容器，`<video src>` 一定放不出来）。
+   *
+   * **一律经 `/api/proxy`**：MSE 那条路上数据是我们自己 fetch 的，跨源就必须有 CORS 头，
+   * 而直播 CDN 基本不给。`getProxyUrl` 只在注入了 Origin/Referer 时才走代理，
+   * 所以这里补一发 `getProxyPassthroughUrl`（`noref=1`）兜住「什么头都没填」的常态。
+   */
+  const loadFlvVideo = async (url: string) => {
+    const proxied = conn.getProxyUrl(url)
+    const finalUrl = proxied === url ? conn.getProxyPassthroughUrl(url) : proxied
+    isVideoLoaded.value = true
+    // 元素是刚 videoKey++ 重建的，等它挂上来（同 loadNativeVideo）
+    await nextTick()
+    await new Promise(resolve => setTimeout(resolve, 100))
+    if (!videoEl.value) throw new Error('视频元素未初始化，请刷新页面重试')
+    flv = await createFlvStream(videoEl.value, finalUrl, url, msg => {
+      // 期间可能已经切走了，别把上一条流的错误盖到新的上面
+      if (videoUrl.value.trim() !== url) return
+      errorMessage.value = msg
+      isLoading.value = false
+      isBuffering.value = false
+    })
   }
 
   const loadNativeVideo = async (url: string) => {
