@@ -219,6 +219,36 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     if (spinnerSoftTimer) { clearTimeout(spinnerSoftTimer); spinnerSoftTimer = null }
     if (spinnerHardTimer) { clearTimeout(spinnerHardTimer); spinnerHardTimer = null }
   }
+  /**
+   * 转圈的兜底熄灯：以「真的在播」为地面真值，不指望事件齐全。
+   *
+   * `isBuffering` 只由 playing/canplaythrough/seeked/FRAG_BUFFERED 熄，而**正播着的视频
+   * 不会再补发 `playing`** —— 任何一次漏发都会让转圈一直盖在正常播放的画面上
+   *（同 stallTracker 那条「事件之外还要位置采样兜底」的理由）。
+   * 两条路都要跑：HLS 挂在 hlsTick 里，FLV 挂在 flvTick 里。
+   */
+  const dropSpinnerIfPlaying = () => {
+    const v = videoEl.value
+    if (isBuffering.value && v && !v.paused && !v.seeking && v.readyState >= 3 && getAheadBuffered(v) >= 1) {
+      isBuffering.value = false
+    }
+  }
+
+  /**
+   * FLV 专属心跳：**只做兜底熄灯这一件事**。
+   *
+   * 不复用 HLS 那个心跳 —— 它里面全是预取/卡顿自愈/档位统计，对 FLV 一件都不适用。
+   * 不做这一拍的表现就是「画面在播，转圈一直盖着」：直播流上 `waiting` 来得很勤
+   *（`armBufferingGate` 因此点亮），而熄灯那几个事件一个都不会再来。
+   */
+  let flvTickTimer: ReturnType<typeof setInterval> | null = null
+  const startFlvTick = () => {
+    stopFlvTick()
+    flvTickTimer = setInterval(dropSpinnerIfPlaying, 1000)
+  }
+  const stopFlvTick = () => {
+    if (flvTickTimer) { clearInterval(flvTickTimer); flvTickTimer = null }
+  }
 
   // ── 实时心跳的外挂钩子 ──
   // 自愈调参环（useVideoAutoTune.selfHeal）、下一集预热（useVideoPrewarm.tick）都挂在这儿，
@@ -319,14 +349,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     document.addEventListener('resize', onIntrinsicResize, true)
     window.addEventListener('offline', onNetworkOffline)   // 断网只用来写那句提示，不是恢复动作
     hlsTickTimer = setInterval(() => {
-      // 转圈的兜底熄灯：以「真的在播」为地面真值，不指望事件齐全。
-      // `isBuffering` 只由 playing/canplaythrough/seeked/FRAG_BUFFERED 熄，而正播着的视频
-      // **不会再补发 playing**——任何一次漏发都会让转圈一直盖在正常播放的画面上（同 stallTracker
-      // 那条「事件之外还要位置采样兜底」的理由）
-      const v = videoEl.value
-      if (isBuffering.value && v && !v.paused && !v.seeking && v.readyState >= 3 && getAheadBuffered(v) >= 1) {
-        isBuffering.value = false
-      }
+      dropSpinnerIfPlaying()   // 转圈兜底熄灯（见它自己那段注释）
       stall.tick()   // 绑定/改绑卡顿监听（幂等）+ 刷新连续流畅读数
       recoverTick()   // 刚换过网/刚恢复而还没播起来 → 补一枪 startLoad（见 onNetChanged）
       stallRecovery.tick()   // 播放头冻住而手上有货 → 跳空洞 / 从播放头重拉（bufferStalledError 不一定每次都来）
@@ -402,6 +425,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     // FLV 也挂在这里销毁：它同样是「一个 MSE 实例绑在 <video> 上」，
     // 不摘掉的话新流 attach 时会撞上上一条流的 SourceBuffer
     if (flv) { flv.destroy(); flv = null }
+    stopFlvTick()
     hlsStats.value = null
     // 取消正在跑的预取请求、停止清理定时器/心跳、重置策略实测（换流/换 CDN 重新测）。
     // 注意：不清空预取缓存——它是模块级单例，需跨换流/导航存活，让「点回去」命中内存缓存；
@@ -712,6 +736,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     await nextTick()
     await new Promise(resolve => setTimeout(resolve, 100))
     if (!videoEl.value) throw new Error('视频元素未初始化，请刷新页面重试')
+    startFlvTick()
     flv = await createFlvStream(videoEl.value, finalUrl, url, msg => {
       // 期间可能已经切走了，别把上一条流的错误盖到新的上面
       if (videoUrl.value.trim() !== url) return
