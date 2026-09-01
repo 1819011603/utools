@@ -28,6 +28,8 @@ export interface DlTask {
   bytes: number
   /** 最近一拍的下载速度（KB/s） */
   kbps: number
+  /** 当下几条连接在下。摆在界面上是为了让「勾了全速也没快」这种问题一眼能归因 */
+  conn: number
   /** 取不回来、直接跨过去的片数 */
   skipped: number
   error: string
@@ -79,7 +81,7 @@ export const enqueue = (items: Array<{ title: string; epName: string; placeholde
     tasks.push({
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       title: it.title, epName: it.epName, placeholder: it.placeholder,
-      state: 'queued', segDone: 0, segTotal: 0, bytes: 0, kbps: 0, skipped: 0,
+      state: 'queued', segDone: 0, segTotal: 0, bytes: 0, kbps: 0, conn: 0, skipped: 0,
       error: '', fileName: '',
     })
   }
@@ -136,10 +138,11 @@ const runOne = async (task: DlTask) => {
   // 下载器绝不能往 useHlsPrefetch 的带宽账本里写数（会污染它的分档采样）
   let lastAt = performance.now()
   let lastBytes = 0
-  const onProgress = (p: { segDone: number; segTotal: number; bytes: number }) => {
+  const onProgress = (p: { segDone: number; segTotal: number; bytes: number; conn: number }) => {
     task.segDone = p.segDone
     task.segTotal = p.segTotal
     task.bytes = p.bytes
+    task.conn = p.conn
     const now = performance.now()
     if (now - lastAt >= 1000) {
       task.kbps = Math.round((p.bytes - lastBytes) / 1024 / ((now - lastAt) / 1000))
@@ -183,6 +186,7 @@ const runOne = async (task: DlTask) => {
   } finally {
     aborts.delete(task.id)
     task.kbps = 0
+    task.conn = 0
   }
 }
 

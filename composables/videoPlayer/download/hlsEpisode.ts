@@ -7,7 +7,8 @@
  * 内部实现模块，走显式相对 import，不进 `imports.dirs`。
  */
 import { isOffline, waitForNet } from '../engine/netWatch'
-import { createTsRemuxer, patchFmp4Duration, type TsRemuxer } from './tsToMp4'
+import { createTsRemuxer, type TsRemuxer } from './tsToMp4'
+import { createMp4Writer, type Mp4Writer } from './mp4Writer'
 import type { FileSink } from './fileSink'
 import type { HlsSegment } from '../useM3u8'
 
@@ -23,7 +24,7 @@ export interface EpisodeDeps {
   holdReason: () => string
   /** 要不要把 TS 重封装成 MP4（用户设置；已经是 fMP4 的源无需也不会走这条） */
   wantMp4: boolean
-  onProgress: (p: { segDone: number; segTotal: number; bytes: number }) => void
+  onProgress: (p: { segDone: number; segTotal: number; bytes: number; conn: number }) => void
   signal: AbortSignal
 }
 
@@ -35,8 +36,21 @@ const MAX_CONSECUTIVE_FAIL = 6
 const MAX_SKIP = 3
 /** 攒够几片就按均值预估总量（Blob 兜底要靠它提前劝退） */
 const ESTIMATE_AFTER = 3
-/** 开满几条 worker。同 host 只有 6 条连接，开更多只是互相抢 */
-const MAX_WORKERS = 6
+/**
+ * 开满几条 worker（**上限**，实际几条干活由 `deps.concurrency()` 每拍决定）。
+ *
+ * 原来是 6，理由抄的是播放那边「同 host 只给 6 条连接」—— **在这儿是错的**：
+ * 那条限制只对 HTTP/1.1 成立，而这些分片 CDN 走的是 **HTTP/2**（一条连接上多路复用，
+ * 浏览器允许上百个并发流）。实测 `file.icve.com.cn`（curl，逐档量聚合）：
+ *   1 条 0.47 MB/s ｜ 4 条 1.89 ｜ 8 条 2.67 ｜ **16 条 6.00**
+ * 也就是说源站是**按连接限速**的，聚合几乎线性涨 —— 卡在 6 就是自己把速度锁死了
+ *（用户报「勾了全速下载也没快多少」，2.12 MB/s 正好是 6~8 条的量）。
+ */
+const MAX_WORKERS = 16
+/** 被并发数收窄掉的 worker 多久回头看一眼。要短：勾上「全速」得马上有反应 */
+const IDLE_POLL_MS = 250
+/** 让路（濒卡）时的等待。这个要长：让路的意义就是别去抢那几条连接 */
+const HOLD_POLL_MS = 700
 
 const TS_PACKET = 188
 
@@ -254,7 +268,8 @@ export const downloadHlsEpisode = async (
         }
       }
       writeCursor++
-      deps.onProgress({ segDone: writeCursor, segTotal: segments.length, bytes })
+      // 线程数一并报出去：「勾了全速也没快」这类问题，不把当下几条摆在界面上就只能靠猜
+      deps.onProgress({ segDone: writeCursor, segTotal: segments.length, bytes, conn: deps.concurrency() })
     }
   }
   /*
@@ -285,11 +300,9 @@ export const downloadHlsEpisode = async (
       if (nextToFetch >= segments.length) return
 
       // 两种停一停：并发收窄到我这条之外 / 濒卡让路。停在这儿而不是继续发请求
-      // —— 让路的全部意义就是不占那 6 条连接
-      if (myIndex >= deps.concurrency() || deps.holdReason()) {
-        await new Promise(r => setTimeout(r, 700))
-        continue
-      }
+      // —— 让路的全部意义就是不去抢正在播的那一集的连接
+      if (deps.holdReason()) { await new Promise(r => setTimeout(r, HOLD_POLL_MS)); continue }
+      if (myIndex >= deps.concurrency()) { await new Promise(r => setTimeout(r, IDLE_POLL_MS)); continue }
       // 乱序窗口满了：等写入追上来（不然内存里会攒下整集）
       if (nextToFetch - writeCursor >= deps.concurrency() + 2) {
         await new Promise(r => setTimeout(r, 120))

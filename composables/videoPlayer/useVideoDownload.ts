@@ -72,14 +72,18 @@ export function useVideoDownload(deps: VideoDownloadDeps) {
   /**
    * 这一拍允许几条连接。
    *
-   * **同 host 只有 6 条**，而「能不能播下去」全靠紧邻播放头那一两片
-   * （见 CLAUDE.md 那九级并发决策）。所以下载器一律排在播放后面：
-   * 没在播就放开，正在播就只拿一半，缓冲一吃紧再收。
+   * 「能不能播下去」全靠紧邻播放头那一两片（见 CLAUDE.md 那九级并发决策），
+   * 所以下载器一律排在播放后面：没在播就放开，正在播就收着，缓冲一吃紧再收。
    * 它**不参与**引擎那套决策、也不往它的带宽账本里写数（污染分档采样会连累好几级）。
+   *
+   * **这几个数不是「同 host 6 条」那条老规矩推出来的**（那条只对 HTTP/1.1 成立，
+   * 而分片 CDN 走 HTTP/2）。实测源站按连接限速、聚合到 16 条还在线性涨
+   *（1 条 0.47MB/s → 16 条 6.0MB/s），所以「全速」给到 16；
+   * 上限就是 `MAX_WORKERS`，别写得比它大（多出来的永远轮不到）。
    */
   const dlConcurrency = (): number => {
-    if (dlFullSpeed.value) return 6
-    if (!media.isPlaying.value) return 6
+    if (dlFullSpeed.value) return 16
+    if (!media.isPlaying.value) return 8
     return engine.strategy.value.healthZone === 'healthy' ? 3 : 2
   }
 

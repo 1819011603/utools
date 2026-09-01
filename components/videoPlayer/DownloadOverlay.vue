@@ -277,7 +277,9 @@ const stateText = (t: DlTask) => {
   if (t.state === 'failed') return '失败'
   if (t.state === 'done') return formatBytes(t.bytes)
   if (!t.segTotal) return '正在取地址…'
+  // 线程数也摆出来：源站是按连接限速的，速度慢的时候第一个要看的就是「现在几条」
   return `${t.segDone}/${t.segTotal} 片 · ${formatBytes(t.bytes)} · ${formatSpeed(t.kbps)}`
+    + (t.conn ? ` · ${t.conn} 线程` : '')
 }
 </script>
 

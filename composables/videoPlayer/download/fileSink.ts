@@ -27,6 +27,12 @@ export interface FileSink {
   abort: () => Promise<void>
   /** 预估总量超上限时提前劝退（返回原因），流式那版恒为空 */
   checkProjected: (projectedBytes: number) => string
+  /**
+   * **就地改写文件里某个位置的几个字节**（长度不变），在 `close()` 之前调。
+   * 只为一件事：普通 MP4 的 `mdat` 长度要等写完才知道，而那个字段在文件最前面
+   * （见 `mp4Writer.finish()` 返回的 `patch`）。
+   */
+  patchAt: (position: number, data: ArrayBuffer) => Promise<void>
 }
 
 /** 这个浏览器能不能流式写盘。UI 据此决定要不要提醒体积上限 */
@@ -76,8 +82,9 @@ export const safeFileName = (name: string): string =>
 const createDiskSink = async (dirHandle: any, fileName: string): Promise<FileSink> => {
   const fh = await dirHandle.getFileHandle(fileName, { create: true })
   const writable = await fh.createWritable()
+  let written = 0
   return {
-    write: async chunk => { await writable.write(chunk) },
+    write: async chunk => { await writable.write(chunk); written += chunk.byteLength },
     close: async () => { await writable.close() },
     abort: async () => {
       // 先关掉句柄再删：Windows 上文件还开着时 removeEntry 会失败，
@@ -86,6 +93,12 @@ const createDiskSink = async (dirHandle: any, fileName: string): Promise<FileSin
       try { await dirHandle.removeEntry(fileName) } catch { /* 删不掉就留着，比抛错好 */ }
     },
     checkProjected: () => '',
+    // 定位写完之后**光标要拨回末尾**：不拨的话接着写会从被覆盖的位置继续，把后面的内容糊掉。
+    // 眼下只在 close 前调一次，但别把这条隐含依赖留给下一个人踩
+    patchAt: async (position, data) => {
+      await writable.write({ type: 'write', position, data })
+      await writable.write({ type: 'seek', position: written })
+    },
   }
 }
 
@@ -119,6 +132,19 @@ const createBlobSink = (fileName: string): FileSink => {
     },
     abort: async () => { parts = null },
     checkProjected: projected => (projected > BLOB_MAX_BYTES ? overLimit(projected) : ''),
+    // 还没拼成 Blob，直接改内存里那几块。要写的那几个字节可能跨块，所以逐块算交集
+    patchAt: async (position, data) => {
+      if (!parts) return
+      const src = new Uint8Array(data)
+      let at = 0
+      for (const part of parts) {
+        const start = Math.max(position, at)
+        const end = Math.min(position + src.byteLength, at + part.byteLength)
+        if (start < end) new Uint8Array(part).set(src.subarray(start - position, end - position), start - at)
+        at += part.byteLength
+        if (at >= position + src.byteLength) break
+      }
+    },
   }
 }
 
