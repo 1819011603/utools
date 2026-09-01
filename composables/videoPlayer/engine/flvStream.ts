@@ -32,10 +32,21 @@ function looksLive(url: string): boolean {
   return /\/(pull|live)[-/.]/i.test(url) || /\bpull-[a-z]*flv\b/i.test(url)
 }
 
+/** 断流重连：最多几次、隔多久。直播地址带时效签名，试不通就是真不通，别无限重来 */
+const MAX_RETRY = 5
+const RETRY_DELAY_MS = 1000
+/** 已经稳稳播了这么久，就把重连额度还回去（同「每一个失败额度都必须是连续失败」那条） */
+const RETRY_RESET_MS = 20000
+
 /**
  * 起播一条 FLV 流。`fetchUrl` 是**已经拼好代理的**最终地址（调用方负责，见 useVideoEngine）。
- * `onFatal` 只在 mpegts.js 报致命错误时调一次，用来把提示打到界面上——这里不自己重试：
- * 直播地址带时效签名，过期后重试多少次都是同一个 403。
+ *
+ * **断流必须自己重连**：直播长连接抖一下就是 `UnrecoverableEarlyEof`（实测这条抖音源播 17s
+ * 就报一次，而同一地址用 curl 拉 45s 一直有数据 —— 也就是说上游没断，是这条连接断的）。
+ * mpegts.js 自己不重连，只报错就完 → 表现是「播二十几秒画面停住 + 一句播放失败」。
+ * 重连就是**整个实例重建**（`unload/load` 在直播上会卡在旧时间线上），直播天然从直播边缘接上。
+ *
+ * `onFatal` 只在额度用完后调一次。
  */
 export async function createFlvStream(
   el: HTMLVideoElement,
@@ -51,28 +62,62 @@ export async function createFlvStream(
   }
 
   const isLive = looksLive(srcUrl)
-  const player = mpegts.createPlayer(
-    { type: 'flv', url: fetchUrl, isLive, cors: true },
-    {
-      // 直播只求低延迟：不攒 stash、缓冲堆太多就追一次进度（点播那条留默认，靠浏览器自己节流）
-      enableStashBuffer: !isLive,
-      liveBufferLatencyChasing: isLive,
-      lazyLoad: !isLive,
-    },
-  )
+  let player: Mpegts.Player | null = null
+  let disposed = false
+  let retry = 0
+  let startedAt = 0
+  let timer: ReturnType<typeof setTimeout> | null = null
 
-  player.on(mpegts.Events.ERROR, (type: string, detail: string) => {
-    console.error('[flv] 错误:', type, detail)
-    onFatal(`FLV 播放失败: ${type}${detail ? ' / ' + detail : ''}`)
-  })
+  const start = () => {
+    if (disposed) return
+    startedAt = performance.now()
+    const p = mpegts.createPlayer(
+      { type: 'flv', url: fetchUrl, isLive, cors: true },
+      {
+        // 直播只求低延迟：不攒 stash、缓冲堆太多就追一次进度（点播那条留默认，靠浏览器自己节流）
+        enableStashBuffer: !isLive,
+        liveBufferLatencyChasing: isLive,
+        lazyLoad: !isLive,
+      },
+    )
+    player = p
 
-  player.attachMediaElement(el)
-  player.load()
+    p.on(mpegts.Events.ERROR, (type: string, detail: string) => {
+      if (disposed || player !== p) return
+      console.error('[flv] 错误:', type, detail)
+      // 播够久了说明这次不是「起播就不通」，额度还回去
+      if (performance.now() - startedAt > RETRY_RESET_MS) retry = 0
+      if (type !== mpegts.ErrorTypes.NETWORK_ERROR && type !== mpegts.ErrorTypes.MEDIA_ERROR) {
+        onFatal(`FLV 播放失败: ${type}${detail ? ' / ' + detail : ''}`)
+        return
+      }
+      if (retry >= MAX_RETRY) {
+        onFatal(`FLV 断流且重连 ${MAX_RETRY} 次未成功（${detail || type}）`)
+        return
+      }
+      retry++
+      console.log(`[flv] 断流，${RETRY_DELAY_MS}ms 后重连（第 ${retry}/${MAX_RETRY} 次）`)
+      try { p.destroy() } catch {}
+      if (player === p) player = null
+      timer = setTimeout(start, RETRY_DELAY_MS)
+    })
+
+    p.attachMediaElement(el)
+    p.load()
+    // 重连那几发要自己续上播：上一发的 error 已经让 <video> 停住了，
+    // 而这时候手上没有用户点击（自动重连），只能靠「已经播过」这个既有授权
+    if (retry > 0) void el.play().catch(() => {})
+  }
+
+  start()
   console.log(`[flv] 起播 ${isLive ? '直播' : '点播'}流:`, fetchUrl)
 
   return {
     destroy: () => {
-      try { player.destroy() } catch {}
+      disposed = true
+      if (timer) { clearTimeout(timer); timer = null }
+      try { player?.destroy() } catch {}
+      player = null
     },
   }
 }

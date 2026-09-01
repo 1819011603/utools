@@ -5,7 +5,7 @@
     <div v-if="!isVideoLoaded" class="pt-6 flex items-center justify-between flex-wrap gap-4">
       <div>
         <h1 class="text-2xl font-bold text-gray-900 dark:text-white">放映厅</h1>
-        <p class="text-gray-500 dark:text-gray-400 mt-1 text-sm">M3U8 / MP4，多线并发预取，自动挑连接方式</p>
+        <p class="text-gray-500 dark:text-gray-400 mt-1 text-sm">M3U8 / MP4 / FLV，多线并发预取，自动挑连接方式</p>
       </div>
       <UButton to="/" variant="soft" color="gray" size="xs" icon="i-heroicons-home">工具首页</UButton>
     </div>

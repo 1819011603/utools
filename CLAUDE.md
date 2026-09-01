@@ -351,6 +351,28 @@ H.264/AAC 字节原样搬容器，**不重编码**，画质无损、几乎不吃
   抽屉是**底部**那种（竖屏播放器只有 200 多 px 高，气泡会被裁掉），四块浮层互斥。
   面板上必须写明输出格式 / 哪些环境有体积上限 / 会跟播放抢带宽 —— 不写清楚只会被当成「下载功能坏了」
 
+### FLV（含直播，`engine/flvStream.ts`）
+
+**只求「能播」**：不做预取、不做卡顿自愈、不做进度记忆与下载 —— 那一整套是照 HLS 分片写的，直播流上没有分片表可算。
+判据 `isFlvUrl`（`utils/mediaUrl.ts`，同 `isM3u8Url` 的思路：只看路径最后一段，再退一步看 query），
+状态 `isFlv` 与 `isHls` **并列而不是塞进它**：非 HLS 那条路上的 MP4 专属动作（自读 moov 时长、恢复进度 seek）
+在直播流上也不能做。
+
+- **浏览器一律不认 FLV 容器** → 必须 `mpegts.js`（flv.js 的维护分支）解复用成 fMP4 喂 MSE。
+  它是 CJS 包，`import` 必须是**字面量 specifier 且不加 `@vite-ignore`**（同 mux.js 那条）
+- **一律经 `/api/proxy`**：走了 MSE 就是我们自己 fetch，跨源必须有 CORS 头而直播 CDN 基本不给。
+  `getProxyUrl` 只在填了 Origin/Referer 时才代理 → 补一发 `getProxyPassthroughUrl`（`noref=1`）兜住常态。
+  代理那侧不用改：FLV 的 content-type 不是 m3u8 → 走二进制 ReadableStream 透传，直播流不会被攒在内存里
+- **断流必须自己重连**（mpegts.js 只报错就完）：实测一条抖音源播 17s 就报一次
+  `NetworkError / UnrecoverableEarlyEof`，而**同一地址 curl 拉 45s 一直有数据** —— 上游没断，是这条连接断的。
+  不重连的表现是「播二十几秒画面停住 + 一句播放失败」。重连是**整个实例重建**
+  （`unload/load` 在直播上会卡在旧时间线），额度 5 次 / 隔 1s，**播够 20s 就把额度还回去**
+  （同「每一个失败额度都必须是连续失败」），且重连那几发要自己补 `play()`（手上没有用户点击）
+- **直播/点播的判错代价不对称**：判成点播只是多算一次不存在的时长，判成直播则进度条彻底拖不动
+  → `looksLive` 只认明显特征（`expire=` + `sign=`、路径里的 `pull`/`live`）
+- **FLV 一律不给下载**（`canDownload`）：直播没有终点，而它必然被 `kindOf` 判成 `mp4` 走原生下载那条路，
+  浏览器会一直写到磁盘满
+
 ### 手势与移动端
 
 鼠标与触摸走**同一套 Pointer Events**。桌面单击播放暂停/双击全屏；触摸全屏内单击只切控制栏（误触暂停最烦）、
