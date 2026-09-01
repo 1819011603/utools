@@ -155,12 +155,6 @@ export const downloadHlsEpisode = async (
   // 重依赖动态 import，且**赶在建文件之前**：mux.js 要是加载不上，别先在磁盘上留个空文件
   const remuxer: TsRemuxer | null = remuxing ? await createTsRemuxer() : null
   const sink = await makeSink(ext)
-  /**
-   * 整集时长，**只能从清单的 EXTINF 之和来**：文件是边下边写的，没人回头去数帧。
-   * 实测跟真实时间线差 6ms（42.042 vs 42.048），跟播放器读出的整集时长分毫不差。
-   */
-  const totalSecs = segments.reduce((a, s) => a + (s.duration || 0), 0)
-  if (remuxing && !totalSecs) console.warn('清单里没有 EXTINF 时长 → MP4 的时长字段只能留成「未知」')
 
   // ── 取一片字节（含通道降级与重试）──
 
@@ -240,7 +234,7 @@ export const downloadHlsEpisode = async (
   let failure: any = null
   let estimated = false
   let strippedOnce = false   // 伪装头只报一次，别在控制台刷 590 行
-  let initWritten = false    // `ftyp+moov` 只有第一块，且只有它要补时长
+  let writer: Mp4Writer | null = null   // 普通 MP4 的样本表攒在它里面（只在 remux 那条路上）
 
   const doFlush = async () => {
     while (done.has(writeCursor)) {
@@ -253,16 +247,17 @@ export const downloadHlsEpisode = async (
          * 出来的文件时间戳全乱（能播、但进度乱跳）。
          */
         if (remuxer) {
-          for (const part of remuxer.push(buf)) {
-            /*
-             * 第一块是 `ftyp+moov`（init 段）→ **就在这儿把时长写进去**。
-             * 时长早就知道（清单 EXTINF 之和），不必等下完再回头改文件开头 ——
-             * 而且补 `mehd` 会让这一段长 16 字节，定位覆盖那条路根本走不通。
-             */
-            const out = !initWritten ? patchFmp4Duration(part, totalSecs) : part
-            initWritten = true
-            await sink.write(out)
+          /*
+           * TS →（mux.js）→ fMP4 片段 →（mp4Writer）→ **普通 MP4**。
+           * 中间那层不能省，理由见 `mp4Writer.ts` 的头注释（AVFoundation 算不对 fMP4 的时长）。
+           */
+          const { init, fragments } = remuxer.push(buf)
+          if (init && !writer) {
+            writer = createMp4Writer(init)
+            await sink.write(writer.header())     // ftyp + 占位的 mdat 头
           }
+          if (!writer) throw new Error('remux 没有给出 init 段，无法写 MP4')
+          for (const frag of fragments) await sink.write(writer.addFragment(frag))
         } else {
           await sink.write(buf)
         }
@@ -362,7 +357,14 @@ export const downloadHlsEpisode = async (
     if (failure) throw failure
     if (writeCursor < segments.length) throw new Error(`只写进 ${writeCursor}/${segments.length} 片`)
     // 每片都 flush 过，正常这里拿不到东西；留着是为了不依赖 mux.js 的内部攒包时机
-    if (remuxer) for (const part of remuxer.finish()) await sink.write(part)
+    if (remuxer && writer) {
+      for (const frag of remuxer.finish().fragments) await sink.write(writer.addFragment(frag))
+      // 收尾：样本表（`moov`）追在 `mdat` 后面，再回头把 `mdat` 的真实长度填上。
+      // `moov` 排在 `mdat` 之后完全合法（ffmpeg 不加 +faststart 就是这个布局）
+      const { moov, patch } = writer.finish()
+      await sink.write(moov)
+      await sink.patchAt(patch.position, patch.data)
+    }
     await sink.close()
   } catch (e) {
     // 写了一半的文件必须清掉：留着就是「下过了但播不了」，比没下更糟

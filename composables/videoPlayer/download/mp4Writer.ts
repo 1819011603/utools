@@ -49,11 +49,6 @@ const u32 = (n: number) => {
   new DataView(b.buffer).setUint32(0, n >>> 0)
   return b
 }
-const i32 = (n: number) => {
-  const b = new Uint8Array(4)
-  new DataView(b.buffer).setInt32(0, n)
-  return b
-}
 const u64 = (n: number) => {
   const b = new Uint8Array(8)
   const dv = new DataView(b.buffer)
@@ -267,37 +262,56 @@ export const createMp4Writer = (init: ArrayBuffer): Mp4Writer => {
     }
   }
 
-  // ── 样本表 ──
+  /*
+   * ── 样本表 ──
+   *
+   * 每张表都**先算长度、开一块 buffer、逐个 setUint32 填进去**，
+   * 绝不用 `box('stsz', ...sizes.map(u32))` 这种展开写法：一集 52 分钟约 7.5 万个视频样本、
+   * 13 万个音频样本，展开成函数实参会直接撞上引擎的参数个数上限（`RangeError`）。
+   * **短片子试不出来**（我最初的 1260 样本测试片就一路通过），只有整集才炸 —— 别改回去。
+   */
 
-  /** `stts`：按「连续多少个样本是同一个时长」压缩 */
-  const buildStts = (durations: number[]): Uint8Array => {
-    const runs: number[] = []
-    for (const d of durations) {
-      const n = runs.length
-      if (n && runs[n - 1] === d) runs[n - 2]!++
-      else runs.push(1, d)
-    }
-    const parts = [u32(0), u32(runs.length / 2)]
-    for (let i = 0; i < runs.length; i += 2) parts.push(u32(runs[i]!), u32(runs[i + 1]!))
-    return box('stts', ...parts)
+  /** version+flags(4) + entry_count(4) 之后，逐条写 `n` 个 32 位字段 */
+  const table = (type: string, entries: number, fieldsPerEntry: number,
+    fill: (dv: DataView, at: number, i: number) => void, versionByte = 0): Uint8Array => {
+    const body = new Uint8Array(8 + entries * fieldsPerEntry * 4)
+    const dv = new DataView(body.buffer)
+    body[0] = versionByte
+    dv.setUint32(4, entries)
+    for (let i = 0; i < entries; i++) fill(dv, 8 + i * fieldsPerEntry * 4, i)
+    return box(type, body)
   }
 
-  /** `ctts`：全是 0 就不写这张表（大多数音频轨如此） */
+  /** 把 `[值, 值, …]` 压成 `[(个数, 值), …]`（`stts`/`ctts` 都是这个形状） */
+  const runLength = (values: number[]): number[] => {
+    const runs: number[] = []
+    for (const v of values) {
+      const n = runs.length
+      if (n && runs[n - 1] === v) runs[n - 2]!++
+      else runs.push(1, v)
+    }
+    return runs
+  }
+
+  const buildStts = (durations: number[]): Uint8Array => {
+    const runs = runLength(durations)
+    return table('stts', runs.length / 2, 2, (dv, at, i) => {
+      dv.setUint32(at, runs[i * 2]!)
+      dv.setUint32(at + 4, runs[i * 2 + 1]!)
+    })
+  }
+
+  /** `ctts`：全是 0 就不写这张表（音频轨一般如此）。有负偏移必须用 v1（v0 的字段是无符号的） */
   const buildCtts = (ctos: number[]): Uint8Array | null => {
     if (!ctos.some(c => c !== 0)) return null
     const signed = ctos.some(c => c < 0)
-    const runs: number[] = []
-    for (const c of ctos) {
-      const n = runs.length
-      if (n && runs[n - 1] === c) runs[n - 2]!++
-      else runs.push(1, c)
-    }
-    // 有负偏移就得用 v1（v0 的字段是无符号的）
-    const parts = [signed ? new Uint8Array([1, 0, 0, 0]) : u32(0), u32(runs.length / 2)]
-    for (let i = 0; i < runs.length; i += 2) {
-      parts.push(u32(runs[i]!), signed ? i32(runs[i + 1]!) : u32(runs[i + 1]!))
-    }
-    return box('ctts', ...parts)
+    const runs = runLength(ctos)
+    return table('ctts', runs.length / 2, 2, (dv, at, i) => {
+      dv.setUint32(at, runs[i * 2]!)
+      const v = runs[i * 2 + 1]!
+      if (signed) dv.setInt32(at + 4, v)
+      else dv.setUint32(at + 4, v)
+    }, signed ? 1 : 0)
   }
 
   /** `stsc`：chunk → 每 chunk 几个样本，同样按连续相同压缩 */
@@ -307,26 +321,41 @@ export const createMp4Writer = (init: ArrayBuffer): Mp4Writer => {
       const n = entries.length
       if (!n || entries[n - 2] !== c) entries.push(idx + 1, c, 1)   // first_chunk, samples_per_chunk, desc_index
     })
-    const parts = [u32(0), u32(entries.length / 3)]
-    for (let i = 0; i < entries.length; i += 3) parts.push(u32(entries[i]!), u32(entries[i + 1]!), u32(entries[i + 2]!))
-    return box('stsc', ...parts)
+    return table('stsc', entries.length / 3, 3, (dv, at, i) => {
+      dv.setUint32(at, entries[i * 3]!)
+      dv.setUint32(at + 4, entries[i * 3 + 1]!)
+      dv.setUint32(at + 8, entries[i * 3 + 2]!)
+    })
   }
 
   /** 偏移表：超过 4GB 就得用 64 位的 `co64`（整片电影很容易超） */
   const buildOffsets = (offsets: number[]): Uint8Array => {
     const need64 = offsets.some(o => o > 0xffffffff)
-    const parts = [u32(0), u32(offsets.length)]
-    for (const o of offsets) parts.push(need64 ? u64(o) : u32(o))
-    return box(need64 ? 'co64' : 'stco', ...parts)
+    if (!need64) return table('stco', offsets.length, 1, (dv, at, i) => dv.setUint32(at, offsets[i]!))
+    const body = new Uint8Array(8 + offsets.length * 8)
+    const dv = new DataView(body.buffer)
+    dv.setUint32(4, offsets.length)
+    for (let i = 0; i < offsets.length; i++) {
+      const o = offsets[i]!
+      dv.setUint32(8 + i * 8, Math.floor(o / 2 ** 32))
+      dv.setUint32(8 + i * 8 + 4, o >>> 0)
+    }
+    return box('co64', body)
   }
 
-  const buildStsz = (sizes: number[]): Uint8Array =>
-    box('stsz', u32(0), u32(0), u32(sizes.length), ...sizes.map(u32))
+  const buildStsz = (sizes: number[]): Uint8Array => {
+    // 比别的表多一个固定字段（sample_size=0 表示逐样本给），所以不走 table()
+    const body = new Uint8Array(12 + sizes.length * 4)
+    const dv = new DataView(body.buffer)
+    dv.setUint32(8, sizes.length)
+    for (let i = 0; i < sizes.length; i++) dv.setUint32(12 + i * 4, sizes[i]!)
+    return box('stsz', body)
+  }
 
   const buildStss = (sync: number[], total: number): Uint8Array | null => {
     // 每一帧都是关键帧（音频）→ 不写这张表，写了反而让播放器以为有限制
     if (!sync.length || sync.length === total) return null
-    return box('stss', u32(0), u32(sync.length), ...sync.map(u32))
+    return table('stss', sync.length, 1, (dv, at, i) => dv.setUint32(at, sync[i]!))
   }
 
   /** 把模板里的时长字段改成真实值（`tkhd` 用影片时基，`mdhd` 用轨道自己的时基） */

@@ -277,21 +277,34 @@ server/api/proxy.ts 跨域/防盗链代理      server/api/resolve.ts 解析接�
 
 **默认输出 `.mp4`（重封装，不重编码），`.ts` 只作退路**（面板上一对小按钮，随 `video-player-state` 持久化）：
 拼出来的 `.ts` **只有 VLC / mpv / PotPlayer 认** —— QuickTime、Windows「电影和电视」、手机相册、微信、
-浏览器一概打不开，而「下完传手机 / 发给别人」正是下载的主要用途。`download/tsToMp4.ts` 用 mux.js
-把 TS remux 成 fMP4（H.264/AAC 字节原样搬容器，画质无损、几乎不吃 CPU）。留 `.ts` 那一档是因为多一层就多一个
-出错点（贴片和正片编码参数不同的源）。四条纪律：
+浏览器一概打不开，而「下完传手机 / 发给别人」正是下载的主要用途。
+`download/tsToMp4.ts`（mux.js 出片段）+ `download/mp4Writer.ts`（改写成普通 MP4）两段完成重封装：
+H.264/AAC 字节原样搬容器，**不重编码**，画质无损、几乎不吃 CPU。
+留 `.ts` 那一档是因为多两层就多两个出错点，它是「字节原样落盘」的退路。纪律：
 
+- **输出必须是「普通 MP4」，绝不能直接落 fMP4**（`download/mp4Writer.ts`，两段式：
+  mux.js 出 `moof+mdat` 片段 → 改写成 `ftyp + mdat + moov`）。
+  **AVFoundation（QuickTime / iOS 相册 / 微信）算不对 fMP4 的时长**：同一段 32.499s 的片子，
+  普通 MP4 读出 32.56s（对），fMP4 读出 34.40s（+5.7%）；跨贴片边界那一段 42s 报 50s（+19%）。
+  **改头治不好，别再试**：`mvhd.duration`、补 `mehd`（规范里分片 MP4 的正式时长字段）、
+  填 `trex.default_sample_duration`、尾部补空 fragment —— 四种都试过，QuickTime 读数**一动不动**；
+  差值也不符合任何简单规律（一份恰好等于最后一片时长，另一份不等），所以不是某个字段写漏了。
+  对照实验才是定论：拿 `ffmpeg -c copy` 把同一份 fMP4 转成普通 MP4，QuickTime 立刻读对。
+  **ffprobe / VLC / mpv 全程都是对的**（它们自己扫），所以**只验 ffprobe 发现不了这个问题**
+- **能边下边写盘的关键是「`moov` 允许排在 `mdat` 后面」**（ffmpeg 不加 `+faststart` 就是这个布局）：
+  样本表留在内存里（整集约 1.5MB / 20 万样本，`finish()` 构建 20ms），最后追加。
+  代价是 `mdat` 长度要等写完才知道 → 用 64 位 `largesize` 占位，收尾时 `FileSink.patchAt` 回头改那 8 字节
+  （流式那条**写完要把光标拨回末尾**，否则接着写会糊掉后面）。`stsd`（`avc1`/`mp4a` 里的 SPS/PPS 和
+  AudioSpecificConfig）**整块从 mux.js 的 init 段抄**，不自己拼 —— 那是最容易错的部分而它已经做对了
+- **样本表一律「先算长度、开一块 buffer、逐个 `setUint32`」**，绝不用 `box('stsz', ...sizes.map(u32))`：
+  一集 7.5 万视频样本 + 13 万音频样本，展开成函数实参会撞引擎的参数个数上限（`RangeError`）。
+  **短片子试不出来**（1260 样本的测试片一路通过），只有整集才炸
+- **`remux: true` 给的不是「一个 `moof` 带两个 `traf`」**，而是 `type: 'combined'` 的一整段 buffer，
+  里面**依次排着好几对 `moof+mdat`**（音频一对、视频一对）。只处理第一对的表现极隐蔽：
+  文件结构、时长、ffprobe **全部正常**，只是画面没了（12.8MB 素材写出 0.75MB —— 只有音频）
 - **remux 只能放在那条串行的写入链上**：Transmuxer 有状态、靠喂进去的顺序维持时间线，
   放进并行 worker 就是「第 7 片先于第 3 片进去」→ 文件能播但进度乱跳
-- **`initSegment` 只能写一次**：mux.js 每片都带上它（MSE 允许重复 append），而我们是往一个文件里
-  首尾相接地写 —— 重复写等于在视频中间插一堆 `ftyp+moov`
-- **下完必须回头把 `moov` 里的时长补上**（`patchFmp4Duration` + `FileSink.patchStart`）：
-  mux.js 面向 MSE，`mvhd`/`tkhd`/`mdhd` 一律填 `0xFFFFFFFF`（未知）。**ffmpeg/VLC/mpv 会自己扫一遍，
-  所以只验 ffprobe 完全看不出问题**；而 QuickTime 直接信 `mvhd` —— 实测把 42 秒的片子显示成 **27 小时**，
-  进度条整条报废。时长只能取**清单 EXTINF 之和**（实测 42.042 vs 真实时间线 42.048，够准；
-  文件是边下边写的，没人回头数帧）。只改固定宽度字段、**长度必须与原来完全一致**，才能就地覆盖文件开头；
-  流式那条写完要**把光标拨回末尾**。⚠️ 补完之后 **QuickTime 仍会偏长**（42s 报 50s）——
-  五个时长字段都验过是对的（ffprobe 读出来准确无误），那是它自己对 fMP4 的算法，别再往这个方向查
+- **`initSegment` 只取第一份**：mux.js 每片都带上它（MSE 允许重复 append），我们只拿它当 `moov` 模板
 - **mux.js 的 `import` 必须是字面量 specifier、且绝不能加 `@vite-ignore`**（那是给服务端 `node:*` 的写法）：
   它是 CJS 包，要靠 Vite 预打包成 ESM；用变量 + ignore 会让这行原样留到运行时 → 浏览器解析裸包名直接失败。
   构建后它是一个 **68KB 的独立懒加载 chunk**，只有真的下 MP4 时才拉
