@@ -54,16 +54,35 @@ export const createTsRemuxer = async (): Promise<TsRemuxer> => {
     if (seg.data?.byteLength) out.fragments.push(toBuf(seg.data))
   })
 
-  const drain = (feed?: ArrayBuffer): RemuxOutput => {
+  /*
+   * **不能每片都 flush**（曾经是这么写的，实测一集 259 片会丢 38 秒音频、音画越播越飘）：
+   * mux.js 的 `AdtsStream`（`lib/codecs/adts.js`）是按「整段一次性喂完」设计的，
+   * 每次 `push()` 都会把帧计数器 `frameNum` 清零去算 ADTS 帧的时间戳——`flush()` 越频繁，
+   * 跨片边界那半个 AAC 帧被错误计时/丢弃的机会就越多。原始 `.ts`（不走 remux）音视频时长
+   * 严丝合缝，只有过完 mux.js 之后音频对不上，锁定就是这层。
+   * 攒够 `FLUSH_EVERY` 片再 flush 一次，把边界次数压到 1/12，用内存换正确性——
+   * 不能不 flush：mux.js 会把没 flush 的帧全攒在内存里，整集不 flush 就是把整集攒在内存里。
+   */
+  const FLUSH_EVERY = 12
+  let pending = 0
+
+  const flushNow = (): RemuxOutput => {
     out = { fragments: [] }
-    if (feed) transmuxer.push(new Uint8Array(feed))
-    // 每片都 flush：不 flush 的话 mux.js 会一直攒着（它本来是为「一段一段喂给 MSE」设计的），
-    // 攒到最后等于把整集放在内存里
     transmuxer.flush()
+    pending = 0
     return out
   }
 
-  return { push: ts => drain(ts), finish: () => drain() }
+  const push = (feed: ArrayBuffer): RemuxOutput => {
+    transmuxer.push(new Uint8Array(feed))
+    pending++
+    if (pending < FLUSH_EVERY) return { fragments: [] }
+    return flushNow()
+  }
+
+  const finish = (): RemuxOutput => (pending > 0 ? flushNow() : { fragments: [] })
+
+  return { push, finish }
 }
 
 /** mux.js 给的是 Uint8Array（可能是某个大 buffer 的视图），必须**按视图边界拷出来**再交给写盘 */

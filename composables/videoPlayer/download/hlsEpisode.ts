@@ -250,14 +250,20 @@ export const downloadHlsEpisode = async (
           /*
            * TS →（mux.js）→ fMP4 片段 →（mp4Writer）→ **普通 MP4**。
            * 中间那层不能省，理由见 `mp4Writer.ts` 的头注释（AVFoundation 算不对 fMP4 的时长）。
+           *
+           * `remuxer.push()` 现在是**攒够几片才 flush 一次**（见 `tsToMp4.ts` 的说明），
+           * 所以多数调用会拿到空的 `fragments`——这是正常的，不代表这一片丢了，
+           * 数据仍在 mux.js 内部攒着，下次 flush 会一起吐出来。
            */
           const { init, fragments } = remuxer.push(buf)
           if (init && !writer) {
             writer = createMp4Writer(init)
             await sink.write(writer.header())     // ftyp + 占位的 mdat 头
           }
-          if (!writer) throw new Error('remux 没有给出 init 段，无法写 MP4')
-          for (const frag of fragments) await sink.write(writer.addFragment(frag))
+          if (fragments.length) {
+            if (!writer) throw new Error('remux 没有给出 init 段，无法写 MP4')
+            for (const frag of fragments) await sink.write(writer.addFragment(frag))
+          }
         } else {
           await sink.write(buf)
         }
@@ -356,9 +362,18 @@ export const downloadHlsEpisode = async (
     await flush()
     if (failure) throw failure
     if (writeCursor < segments.length) throw new Error(`只写进 ${writeCursor}/${segments.length} 片`)
-    // 每片都 flush 过，正常这里拿不到东西；留着是为了不依赖 mux.js 的内部攒包时机
-    if (remuxer && writer) {
-      for (const frag of remuxer.finish().fragments) await sink.write(writer.addFragment(frag))
+    if (remuxer) {
+      /*
+       * **不足 `FLUSH_EVERY` 片的短集从没在 `doFlush` 里 flush 过**：`init`/`writer`
+       * 到这里才第一次出现，不能假设 `writer` 已存在（曾经这么假设过，短集会整个丢文件）。
+       */
+      const { init, fragments } = remuxer.finish()
+      if (init && !writer) {
+        writer = createMp4Writer(init)
+        await sink.write(writer.header())
+      }
+      if (!writer) throw new Error('remux 没有给出 init 段，无法写 MP4')
+      for (const frag of fragments) await sink.write(writer.addFragment(frag))
       // 收尾：样本表（`moov`）追在 `mdat` 后面，再回头把 `mdat` 的真实长度填上。
       // `moov` 排在 `mdat` 之后完全合法（ffmpeg 不加 +faststart 就是这个布局）
       const { moov, patch } = writer.finish()
