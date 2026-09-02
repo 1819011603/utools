@@ -10,7 +10,7 @@
     "dev": "nuxt dev",
     "generate": "nuxt generate",
     "preview": "nuxt preview",
-    "postinstall": "npx nuxi prepare || true",
+    "postinstall": "patch-package && (npx nuxi prepare || true)",
     "deploy": "npm run generate && wrangler pages deploy .output/public"
   },
   "dependencies": {
@@ -43,6 +43,7 @@
   },
   "devDependencies": {
     "@types/gif.js": "^0.2.5",
+    "patch-package": "^8.0.1",
     "typescript": "^5.5.0",
     "wrangler": "^3.60.0"
   },

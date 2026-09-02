@@ -6,6 +6,12 @@
  * remux = **不重编码**：H.264/AAC 的字节原样搬容器，画质无损、几乎不吃 CPU。
  * 用 mux.js（**只动态 import `lib/mp4/transmuxer`**，不整包引：整包还带 flv / partial / inspector）。
  *
+ * **这个包依赖 `patches/mux.js+*.patch`（patch-package）**：原版 mux.js 遇到不完整的音频
+ * PES 包会直接静默丢弃整包（不是丢几个字节，是丢几百字节，几十片下来就是几十秒）——某些 CDN
+ * 切 HLS 分片时经常切在音频 PES 包中间，ffmpeg 能容忍这种情况照样把已有字节吐出来，
+ * mux.js 不能，且不报错、不警告，症状是「下载的 mp4 开头正常、越播音画越不同步」。
+ * 补丁让它跟 ffmpeg 一样宽容。**`npm install` 后没跑 `patch-package` 就是踩着这个坑。**
+ *
  * 内部实现模块，走显式相对 import，不进 `imports.dirs`。
  */
 

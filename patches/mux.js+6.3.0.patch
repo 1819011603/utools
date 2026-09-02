@@ -1,0 +1,26 @@
+diff --git a/node_modules/mux.js/lib/m2ts/m2ts.js b/node_modules/mux.js/lib/m2ts/m2ts.js
+index 4f4a97b..f68cf91 100644
+--- a/node_modules/mux.js/lib/m2ts/m2ts.js
++++ b/node_modules/mux.js/lib/m2ts/m2ts.js
+@@ -407,9 +407,18 @@ ElementaryStream = function() {
+         stream.data.length = 0;
+       }
+ 
+-      // only emit packets that are complete. this is to avoid assembling
+-      // incomplete PES packets due to poor segmentation
+-      if (packetFlushable) {
++      /*
++       * Emit complete packets, and also **forced** flushes even when the packet fell
++       * short of its declared PES_packet_length (patched via patch-package, see
++       * patches/mux.js+*.patch): some CDNs cut HLS segments mid audio-PES-packet, and a
++       * strict "only emit if fully buffered" policy silently discards that entire
++       * packet's audio content once the next packet forces a flush. ffmpeg tolerates
++       * this (it demuxes whatever bytes are present); mux.js didn't, and it cost ~3% of
++       * a stream's audio duration on affected sources with no error or warning at all.
++       * Emitting the short packet as-is is safe: whatever partial ADTS frame trails off
++       * just sits unparsed in AdtsStream's buffer, same as any other incomplete tail.
++       */
++      if (packetFlushable || forceFlush) {
+         self.trigger('data', event);
+       }
+     };
