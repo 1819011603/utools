@@ -36,14 +36,14 @@ export function useVideoDownload(deps: VideoDownloadDeps) {
   const dlFullSpeed = ref(false)
 
   /**
-   * 输出 MP4（重封装）还是 `.ts`（原样拼）。**默认 MP4**：`.ts` 只有 VLC / mpv / PotPlayer 认，
-   * QuickTime、Windows「电影和电视」、手机相册、微信、浏览器一概打不开，而下完之后
-   * 「传手机上看 / 发给别人」正是主要用途。
-   *
-   * 留这个开关是因为 MP4 多一层 mux.js：源里贴片和正片编码参数不一样时那一层有翻车的可能，
-   * 而 `.ts` 是字节原样落盘、最不会出事的那条路（出问题时的退路）。
+   * 输出 MP4（重封装）还是 `.ts`（原样拼）。**默认 `.ts`**：MP4 那条路要经过 mux.js 重封装，
+   * 而 mux.js 对分片切割点处理不够宽容（遇到不完整的音频 PES 包会静默整包丢弃，即使打了
+   * patch-package 补丁把它改宽容后，某些源站切片本身就在切割点丢字节，字节原样落盘做不到
+   * 的事它也做不到），实测在部分源站上会有音画不同步（越播越飘）。`.ts` 是分片解密后原样
+   * `sink.write()`，压根不进 mux.js 那条管线，天然不会有这类问题——代价是只有
+   * VLC / mpv / PotPlayer 认，QuickTime、Windows「电影和电视」、手机相册、微信、浏览器打不开。
    */
-  const dlMp4 = ref(true)
+  const dlMp4 = ref(false)
   watch(dlMp4, () => deps.onDirty())
 
   /** 选文件夹这一步的结果提示（选到哪个 / 为什么没选上）。抽屉里显示，点开始时清掉 */

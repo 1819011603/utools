@@ -61,32 +61,36 @@ export const createTsRemuxer = async (): Promise<TsRemuxer> => {
   })
 
   /*
-   * **不能每片都 flush**（曾经是这么写的，实测一集 259 片会丢 38 秒音频、音画越播越飘）：
-   * mux.js 的 `AdtsStream`（`lib/codecs/adts.js`）是按「整段一次性喂完」设计的，
-   * 每次 `push()` 都会把帧计数器 `frameNum` 清零去算 ADTS 帧的时间戳——`flush()` 越频繁，
-   * 跨片边界那半个 AAC 帧被错误计时/丢弃的机会就越多。原始 `.ts`（不走 remux）音视频时长
-   * 严丝合缝，只有过完 mux.js 之后音频对不上，锁定就是这层。
-   * 攒够 `FLUSH_EVERY` 片再 flush 一次，把边界次数压到 1/12，用内存换正确性——
-   * 不能不 flush：mux.js 会把没 flush 的帧全攒在内存里，整集不 flush 就是把整集攒在内存里。
+   * **不能每片都 flush**：不 flush 的话 mux.js 会把没交货的帧全攒在内存里，
+   * 整集不 flush 就是把整集攒在内存里；攒够一批再 flush 一次，用内存换回收节奏。
+   *
+   * 攒批的口子按**字节数**而不是**片数**：分片大小随源码率浮动很大（480p 几十 KB、
+   * 1080p 可能几 MB），按片数攒（曾经写的是「12 片」）在低码率源上攒出的内存很小、
+   * 在高码率源上一批就是大几十 MB，波动没法预估。按字节数攒能让内存占用不管什么源
+   * 都稳定在 `FLUSH_EVERY_BYTES` 这一个数量级。
+   *
+   * **这不是音画同步 bug 的修复**（那个真根因是 mux.js 遇到不完整音频 PES 包会静默整包丢弃，
+   * 已经用 `patches/mux.js+*.patch` 修了，见文件头注释）——flush 频率对那个 bug 只有几秒的
+   * 边际影响，这里纯粹是内存占用的可预测性考量。
    */
-  const FLUSH_EVERY = 12
-  let pending = 0
+  const FLUSH_EVERY_BYTES = 100 * 1024 * 1024
+  let pendingBytes = 0
 
   const flushNow = (): RemuxOutput => {
     out = { fragments: [] }
     transmuxer.flush()
-    pending = 0
+    pendingBytes = 0
     return out
   }
 
   const push = (feed: ArrayBuffer): RemuxOutput => {
     transmuxer.push(new Uint8Array(feed))
-    pending++
-    if (pending < FLUSH_EVERY) return { fragments: [] }
+    pendingBytes += feed.byteLength
+    if (pendingBytes < FLUSH_EVERY_BYTES) return { fragments: [] }
     return flushNow()
   }
 
-  const finish = (): RemuxOutput => (pending > 0 ? flushNow() : { fragments: [] })
+  const finish = (): RemuxOutput => (pendingBytes > 0 ? flushNow() : { fragments: [] })
 
   return { push, finish }
 }

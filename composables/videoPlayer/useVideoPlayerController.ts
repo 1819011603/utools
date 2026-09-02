@@ -154,7 +154,7 @@ export function useVideoPlayerController() {
     media.fitMode.value = s.fitMode ?? 'default'
     media.hwDecode.value = s.hwDecode ?? true
     media.boostRatePref.value = s.boostRate ?? 2
-    download.dlMp4.value = s.dlMp4 ?? true
+    download.dlMp4.value = s.dlMp4 ?? false
     conn.useProxy.value = s.useProxy ?? false
     conn.requestOrigin.value = s.requestOrigin ?? ''
     conn.requestReferer.value = s.requestReferer ?? ''
