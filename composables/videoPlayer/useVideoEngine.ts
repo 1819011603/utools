@@ -198,10 +198,32 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   const SPINNER_HARD_MS = 800   // 有货却还在等 → 无条件亮
   let spinnerSoftTimer: ReturnType<typeof setTimeout> | null = null
   let spinnerHardTimer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * FLV（尤其直播）**只认「播放头动没动」，不能拿存货秒数判**。
+   *
+   * `liveBufferLatencyChasing` 的本意就是贴着缓冲边缘播 → 前方存货天然长期不足 1s，
+   * 于是 HLS 那套「不足 2s = 在等网络」在**正常播放时也恒成立**：每一发 `waiting`
+   * 都把转圈点亮，而熄灯判据（ahead ≥ 1）又多半不成立 → 「画面在播，加载中一直闪」。
+   *
+   * 采样由 flvTick（250ms）和闸门共同推进；**必须真的观察到一次前进**才算在播，
+   * 所以起播那一刻（还没动过）返回 false，转圈照亮。
+   */
+  const FLV_STALL_MS = 700
+  let flvLastTime = -1
+  let flvLastMoveAt = 0
+  const flvAdvancing = (v: HTMLVideoElement): boolean => {
+    const now = performance.now()
+    const t = v.currentTime
+    if (flvLastTime >= 0 && Math.abs(t - flvLastTime) > 0.01) flvLastMoveAt = now
+    flvLastTime = t
+    return flvLastMoveAt > 0 && now - flvLastMoveAt < FLV_STALL_MS
+  }
+
   /** 到点时还在等吗：暂停/正在 seek/前方已有 MSE 存货 → 都不算 */
   const stillStalled = (): HTMLVideoElement | null => {
     const v = videoEl.value
     if (!v || v.paused || v.seeking) return null
+    if (isFlv.value) return flvAdvancing(v) ? null : v
     return getAheadBuffered(v) < 2 ? v : null
   }
   const armBufferingGate = () => {
@@ -229,7 +251,14 @@ export function useVideoEngine(deps: VideoEngineDeps) {
    */
   const dropSpinnerIfPlaying = () => {
     const v = videoEl.value
-    if (isBuffering.value && v && !v.paused && !v.seeking && v.readyState >= 3 && getAheadBuffered(v) >= 1) {
+    if (!v) return
+    if (isFlv.value) {
+      // 采样每拍都要做（不能只在亮着时做），否则 flvAdvancing 的基准是几秒前的旧值
+      const moving = flvAdvancing(v)
+      if (isBuffering.value && moving && !v.paused && !v.seeking && v.readyState >= 3) isBuffering.value = false
+      return
+    }
+    if (isBuffering.value && !v.paused && !v.seeking && v.readyState >= 3 && getAheadBuffered(v) >= 1) {
       isBuffering.value = false
     }
   }
@@ -244,7 +273,11 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   let flvTickTimer: ReturnType<typeof setInterval> | null = null
   const startFlvTick = () => {
     stopFlvTick()
-    flvTickTimer = setInterval(dropSpinnerIfPlaying, 1000)
+    flvLastTime = -1
+    flvLastMoveAt = 0
+    // 250ms 而不是 1s：这一拍既是熄灯的唯一时机、也是「播放头动没动」的采样源，
+    // 1s 一拍会让转圈在正常播放的画面上多盖将近一秒
+    flvTickTimer = setInterval(dropSpinnerIfPlaying, 250)
   }
   const stopFlvTick = () => {
     if (flvTickTimer) { clearInterval(flvTickTimer); flvTickTimer = null }
@@ -724,20 +757,29 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   /**
    * FLV：交给 mpegts.js 解复用喂 MSE（浏览器不认这个容器，`<video src>` 一定放不出来）。
    *
-   * **一律经 `/api/proxy`**：MSE 那条路上数据是我们自己 fetch 的，跨源就必须有 CORS 头，
-   * 而直播 CDN 基本不给。`getProxyUrl` 只在注入了 Origin/Referer 时才走代理，
-   * 所以这里补一发 `getProxyPassthroughUrl`（`noref=1`）兜住「什么头都没填」的常态。
+   * **先直连，代理只作退路**。走了 MSE 就意味着数据是我们自己 fetch 的 → 跨源必须有 CORS 头，
+   * 所以这条路上确实可能要代理；但**直播 CDN 并不是都不给** —— 抖音那条实测回
+   * `Access-Control-Allow-Origin: *`（`Timing-Allow-Origin: *` 也给了），直连完全可行。
+   * 而**直播尤其不该白走一趟代理**：那是一条长连接，全程要占着 Worker 转发，
+   * 平白多一跳延迟、还把首帧和断流重连都压在我们自己的出口上。
+   * 所以顺序交给 `createFlvStream` 逐条试：**没出过数据就换下一条，出过就粘住**。
+   * 混合内容那种（https 页面拉 http 流）直连必被浏览器拦，直接跳过不试。
    */
   const loadFlvVideo = async (url: string) => {
     const proxied = conn.getProxyUrl(url)
-    const finalUrl = proxied === url ? conn.getProxyPassthroughUrl(url) : proxied
+    // getProxyUrl 只在注入了 Origin/Referer 时才代理 → 补一发 noref=1 兜住「什么头都没填」的常态
+    const viaProxy = proxied === url ? conn.getProxyPassthroughUrl(url) : proxied
+    const mixed = url.startsWith('http:') && location.protocol === 'https:'
+    const channels = mixed
+      ? [{ label: '代理', url: viaProxy }]
+      : [{ label: '直连', url }, { label: '代理', url: viaProxy }]
     isVideoLoaded.value = true
     // 元素是刚 videoKey++ 重建的，等它挂上来（同 loadNativeVideo）
     await nextTick()
     await new Promise(resolve => setTimeout(resolve, 100))
     if (!videoEl.value) throw new Error('视频元素未初始化，请刷新页面重试')
     startFlvTick()
-    flv = await createFlvStream(videoEl.value, finalUrl, url, msg => {
+    flv = await createFlvStream(videoEl.value, channels, url, msg => {
       // 期间可能已经切走了，别把上一条流的错误盖到新的上面
       if (videoUrl.value.trim() !== url) return
       errorMessage.value = msg

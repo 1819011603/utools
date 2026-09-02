@@ -360,9 +360,14 @@ H.264/AAC 字节原样搬容器，**不重编码**，画质无损、几乎不吃
 
 - **浏览器一律不认 FLV 容器** → 必须 `mpegts.js`（flv.js 的维护分支）解复用成 fMP4 喂 MSE。
   它是 CJS 包，`import` 必须是**字面量 specifier 且不加 `@vite-ignore`**（同 mux.js 那条）
-- **一律经 `/api/proxy`**：走了 MSE 就是我们自己 fetch，跨源必须有 CORS 头而直播 CDN 基本不给。
-  `getProxyUrl` 只在填了 Origin/Referer 时才代理 → 补一发 `getProxyPassthroughUrl`（`noref=1`）兜住常态。
-  代理那侧不用改：FLV 的 content-type 不是 m3u8 → 走二进制 ReadableStream 透传，直播流不会被攒在内存里
+- **先直连，代理只作退路**（`channels` = 直连 → 代理，`createFlvStream` 逐条试）：走了 MSE 就是我们自己
+  fetch，跨源确实要 CORS 头，但**直播 CDN 并不是都不给** —— 抖音那条实测回 `Access-Control-Allow-Origin: *`。
+  而直播是**长连接**，白走一趟代理等于全程占着 Worker 转发、多一跳延迟，首帧和每次断流重连都压在自己出口上。
+  换通道的判据是**「这条出过数据没有」（`MEDIA_INFO` 事件）**：一个字节都没出过 = 这条路本身不通
+  （缺 CORS 头 / 被墙 / 代理挂了）→ 换下一条；出过数据就**粘住**，之后一律按断流重连处理。
+  混合内容（https 页面拉 http 流）直连必被拦，直接跳过不试。
+  代理那条：`getProxyUrl` 只在填了 Origin/Referer 时才代理 → 补一发 `getProxyPassthroughUrl`（`noref=1`）；
+  代理那侧不用改（FLV 的 content-type 不是 m3u8 → 二进制 ReadableStream 透传，不会攒在内存里）
 - **断流必须自己重连**（mpegts.js 只报错就完）：实测一条抖音源播 17s 就报一次
   `NetworkError / UnrecoverableEarlyEof`，而**同一地址 curl 拉 45s 一直有数据** —— 上游没断，是这条连接断的。
   不重连的表现是「播二十几秒画面停住 + 一句播放失败」。重连是**整个实例重建**
@@ -370,6 +375,17 @@ H.264/AAC 字节原样搬容器，**不重编码**，画质无损、几乎不吃
   （同「每一个失败额度都必须是连续失败」），且重连那几发要自己补 `play()`（手上没有用户点击）
 - **直播/点播的判错代价不对称**：判成点播只是多算一次不存在的时长，判成直播则进度条彻底拖不动
   → `looksLive` 只认明显特征（`expire=` + `sign=`、路径里的 `pull`/`live`）
+- **转圈的判据只能是「播放头动没动」，绝不能用存货秒数**：`liveBufferLatencyChasing` 的本意就是
+  贴着缓冲边缘播 → 前方存货天然长期不足 1s，于是 HLS 那套「不足 2s = 在等网络」在**正常播放时也恒成立**
+  → 每一发 `waiting` 都点亮转圈，而熄灯判据（ahead ≥ 1）又多半不成立，表现是
+  **「画面在播，加载中一直闪」**。所以 `stillStalled`/`dropSpinnerIfPlaying` 里 FLV 走
+  `flvAdvancing`（700ms 没前进才算卡），`flvTick` 也从 1s 收到 250ms —— 这一拍既是唯一的熄灯时机、
+  也是那个采样的来源。**必须真的观察到一次前进才算在播**（起播那一刻还没动过 → 照亮）
+- **起播不能干等那 2 秒**（`scheduleAutoPlay` 里非 HLS 那条是 `waited >= 2000`）：直播存货永远攒不厚，
+  等满 2s 只是白盖 2 秒转圈 → FLV 判据换成 `readyState >= 3`。
+  且 **`canplay` 只许挂一发起播**（`autoPlayArmed`，`destroyHls` 时归零）：直播上每次 readyState 回升
+  就来一发 `canplay`，而 `scheduleAutoPlay` 起手就 `isBuffering = true` → 无条件重挂等于反复盖转圈，
+  还会把用户自己按的暂停自动放开
 - **FLV 一律不给下载**（`canDownload`）：直播没有终点，而它必然被 `kindOf` 判成 `mp4` 走原生下载那条路，
   浏览器会一直写到磁盘满
 

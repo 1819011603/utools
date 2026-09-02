@@ -186,9 +186,13 @@ export function useVideoEvents(deps: VideoEventsDeps) {
       const waited = performance.now() - startTs
       // 门槛每一拍现算：倍速可能在等待期间被自愈环改掉（尤其「自动最佳倍速」刚测出带宽那一下）
       const target = autoPlayTarget(playbackRate.value, relocating, recentStalls)
-      const ready = !isHls.value
-        ? waited >= 2000
-        : ahead >= target || waited >= AUTOPLAY_MAX_WAIT_MS
+      // FLV（直播）不能干等这 2 秒：`liveBufferLatencyChasing` 就是要贴着缓冲边缘播，
+      // 存货永远攒不厚，等满 2s 只是白盖 2 秒转圈 → 能播就播
+      const ready = media.isFlv.value
+        ? video.readyState >= 3 || waited >= 2000
+        : !isHls.value
+          ? waited >= 2000
+          : ahead >= target || waited >= AUTOPLAY_MAX_WAIT_MS
       if (!ready) {
         delayedPlayTimer = setTimeout(tryPlay, AUTOPLAY_POLL_MS)
         return
@@ -206,10 +210,14 @@ export function useVideoEvents(deps: VideoEventsDeps) {
     tryPlay()
   }
 
+  /** 这一次加载有没有挂过起播（非 HLS 那条路走 canplay，而它会反复触发） */
+  let autoPlayArmed = false
+
   // HLS 走 MANIFEST_PARSED 触发起播；destroyHls 时要清掉在飞的定时器
   engine.registerAutoPlayHook(scheduleAutoPlay)
   engine.registerDestroyHook(() => {
     if (delayedPlayTimer) { clearTimeout(delayedPlayTimer); delayedPlayTimer = null }
+    autoPlayArmed = false   // loadVideo 一律先 destroyHls，正好当「换了一条流」的信号
   })
 
   // ── 事件 ──
@@ -403,8 +411,16 @@ export function useVideoEvents(deps: VideoEventsDeps) {
       videoEl.value.volume = volume.value
       videoEl.value.muted = isMuted.value
     }
-    // 非 HLS 没有 MANIFEST_PARSED，起播预缓冲在这里挂
-    if (!isHls.value) scheduleAutoPlay()
+    /**
+     * 非 HLS 没有 MANIFEST_PARSED，起播预缓冲在这里挂。**但一次加载只许挂一发**：
+     * `canplay` 在直播 FLV 上会反复触发（每次 readyState 回升一次就来一发），
+     * 而 scheduleAutoPlay 起手就 `isBuffering = true` 并等到判据成立 —— 无条件重挂
+     * 等于**在正常播放的画面上反复盖转圈**，还会把用户自己按的暂停自动放开。
+     */
+    if (!isHls.value && !autoPlayArmed) {
+      autoPlayArmed = true
+      scheduleAutoPlay()
+    }
 
     // 自动全屏只登记意图，兑现交给 controls（它才管横屏锁和 iOS 的原生全屏兜底）。
     // 原来在这里直接 requestFullscreen 并把 reject 打进 console：安卓上**必然**被拒
