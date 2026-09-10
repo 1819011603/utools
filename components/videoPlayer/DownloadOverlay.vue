@@ -89,16 +89,36 @@
         <!-- ② 整片 MP4：一集一颗，直接交给浏览器（a[download] 必须在点击的同步调用栈里） -->
         <template v-if="dlIsMp4">
           <div class="px-1 text-xs text-white/60">
-            这个源是整片 MP4 —— 交给浏览器原生下载器，支持断点续传、关掉这一页也继续
+            这个源是整片 MP4 —— 交给浏览器原生下载器，支持断点续传、关掉这一页也继续。
+            <span class="text-white/40">进度在浏览器自己的下载栏里，这个面板看不到。</span>
           </div>
+          <div
+            v-if="mp4Note"
+            class="mx-1 rounded-lg bg-emerald-400/15 px-2.5 py-2 text-[11px] text-emerald-200 leading-snug"
+          >{{ mp4Note }}</div>
           <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-1.5">
             <a
               v-for="(item, index) in playlist" :key="index"
               :href="mp4DownloadHref(index)" download
-              class="flex items-center gap-1.5 px-2 py-2 rounded-md text-xs bg-white/[0.07] hover:bg-white/15 transition-colors"
+              class="flex items-center gap-1.5 px-2 py-2 rounded-md text-xs transition-colors"
+              :class="mp4Cooling.has(index)
+                ? 'bg-white/5 text-white/35 pointer-events-none'
+                : mp4Started[index]
+                  ? 'bg-emerald-500/20 text-emerald-100 hover:bg-emerald-500/30'
+                  : 'bg-white/[0.07] hover:bg-white/15'"
+              :title="mp4Started[index] ? '已经点过一次了。再点一次浏览器会再下一份' : '交给浏览器下载'"
+              @click="onMp4Click($event, index)"
             >
-              <UIcon name="i-heroicons-arrow-down-tray" class="w-3.5 h-3.5 shrink-0 text-white/60" />
+              <UIcon
+                :name="mp4Cooling.has(index) ? 'i-heroicons-arrow-path'
+                  : mp4Started[index] ? 'i-heroicons-check-circle' : 'i-heroicons-arrow-down-tray'"
+                class="w-3.5 h-3.5 shrink-0"
+                :class="mp4Cooling.has(index) ? 'animate-spin text-white/40'
+                  : mp4Started[index] ? 'text-emerald-300' : 'text-white/60'"
+              />
               <span class="truncate">{{ getVideoName(item, index) }}</span>
+              <span v-if="mp4Cooling.has(index)" class="ml-auto shrink-0 text-[10px]">已交给浏览器…</span>
+              <span v-else-if="mp4Started[index]" class="ml-auto shrink-0 text-[10px] text-emerald-300/80">已开始</span>
             </a>
           </div>
         </template>
@@ -267,6 +287,48 @@ const start = () => {
   // 不 await：目录授权弹窗在 startDownload 内部**同步**弹出（await 之后再弹会被浏览器拦），
   // 这里再等它反而什么也做不了
   void startDownload(list)
+}
+
+/**
+ * 整片 MP4 那条路交给浏览器之后，**这一页什么都收不到**（`<a download>` 没有进度、没有完成事件，
+ * 浏览器也不去重）—— 不给反馈的话唯一的解读就是「点了没反应」，于是接着点。
+ * 实测有人因此把同一个 61MB 的文件下了三十几份。
+ *
+ * 所以自己记一笔：点过的格子当场变成「已开始」，**3 秒内的重复点击直接拦掉**并说清进度在哪看。
+ * 过了 3 秒照旧放行 —— 第一次可能真的失败了（源站 403、断网），那时得让他能重来。
+ */
+/** 点过的格子（常驻标记「已开始」，切集/关抽屉都留着——它回答的是「我刚才到底点没点」） */
+const mp4Started = ref<Record<number, number>>({})
+/** 刚点下的 3 秒：格子**置灰且不可点**，从物理上挡住手抖的第二下 */
+const mp4Cooling = ref<Set<number>>(new Set())
+const mp4Note = ref('')
+let noteTimer: ReturnType<typeof setTimeout> | null = null
+
+const onMp4Click = (e: MouseEvent, index: number) => {
+  // 置灰那 3 秒已经把鼠标挡住了，这里兜的是键盘回车（`pointer-events-none` 管不着它）
+  if (mp4Cooling.value.has(index)) { e.preventDefault(); return }
+
+  const name = getVideoName(playlist.value[index]!, index)
+  mp4Started.value[index] = Date.now()
+  mp4Cooling.value = new Set(mp4Cooling.value).add(index)
+  setTimeout(() => {
+    const s = new Set(mp4Cooling.value)
+    s.delete(index)
+    mp4Cooling.value = s
+  }, 3000)
+
+  // 三处一起给：抽屉里的绿条 + 格子上的常驻标记 + 一枚 toast。
+  // toast 是唯一在**关掉抽屉之后**还看得见的那一份 —— 点完就关抽屉是很自然的动作
+  mp4Note.value = `已交给浏览器下载「${name}」。这个面板收不到进度，看浏览器右上角的下载栏`
+  if (noteTimer) clearTimeout(noteTimer)
+  noteTimer = setTimeout(() => { mp4Note.value = '' }, 8000)
+  useToast().add({
+    title: `已开始下载「${name}」`,
+    description: '交给浏览器原生下载器了，进度在浏览器的下载栏里',
+    icon: 'i-heroicons-arrow-down-tray',
+    color: 'green',
+    timeout: 4000,
+  })
 }
 
 /** 打开抽屉时默认勾上当前集：最常见的意图就是「下我正在看的这一集」 */
