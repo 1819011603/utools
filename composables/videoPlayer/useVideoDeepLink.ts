@@ -100,6 +100,23 @@ export function useVideoDeepLink(deps: VideoDeepLinkDeps) {
       }
     }
 
+    /**
+     * 收尾：把粘在视频地址上的 `&origin=`/`&referer=` 拆出来当候选防盗链头（详见 liftRefererHints）。
+     *
+     * 上面那个 switch 只认**顶层** query 里的 `origin=`/`referer=`，而分享出来的链接多半是
+     * 整条地址连带这两段一起 `encodeURIComponent` 成一个 `url=` 值（`&` 变 `%26`），
+     * 于是它们跟着地址走、一路粘到底：源站 404，`isM3u8Url` 还会把 HLS 判成 MP4。
+     *
+     * 必须排在循环之后：非本页参数是由 appendToLastUrl 现拼回地址的，循环中途拆等于漏掉那些。
+     * 顶层参数优先（只在还空着时才填）——那是调用方明确写下的，比地址里粘的一段更可信。
+     */
+    result.urls = result.urls.map(u => {
+      const lifted = liftRefererHints(u)
+      if (lifted.origin && !result.origin) result.origin = lifted.origin
+      if (lifted.referer && !result.referer) result.referer = lifted.referer
+      return lifted.url
+    })
+
     return result
   }
 

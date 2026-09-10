@@ -47,11 +47,22 @@ export function isFlvUrl(url: string): boolean {
  * 只在值本身就是个 http(s) 地址时才认：站点自己也可能带 `origin=cn` 这类同名参数，
  * 一律吃掉会把签名的一部分抠走。手工切串不用 `URLSearchParams`：它把 `+` 编码成空格，
  * 而签名里常有裸 `+`。
+ *
+ * **没有 `?` 也要拆**：分享出来的链接常把这两段直接用 `&` 粘在路径后面
+ * （`…/61869.m3u8&referer=https://jable.tv/&origin=https://jable.tv`），那时它们连 query 都不是。
+ * 这种粘法必须拆，不然两处同时坏掉：① 路径被这段垃圾撑坏，源站直接 404（实测干净地址
+ * 连头都不用带就是 200，粘上就 404）；② `isM3u8Url` 只看路径最后一段，而 referer 的值里带 `/`
+ * → 最后一段变成 `jable.tv`、没有 m3u8 扩展名 → **整条 HLS 被判成 MP4**，走原生播放那条路。
  */
 export function liftRefererHints(url: string): { url: string; origin: string; referer: string } {
   const none = { url, origin: '', referer: '' }
-  const cut = url.indexOf('?')
-  if (cut === -1) return none
+  let cut = url.indexOf('?')
+  if (cut === -1) {
+    // 退一步找 `&origin=`/`&referer=` 粘在哪儿；cut 指向那个 `&`，下面切串的写法与 `?` 完全一致
+    const glued = /&(?:origin|referer)=https?:\/\//i.exec(url)
+    if (!glued) return none
+    cut = glued.index
+  }
 
   const hashAt = url.indexOf('#', cut)
   const query = url.slice(cut + 1, hashAt === -1 ? undefined : hashAt)
