@@ -210,6 +210,50 @@ export function useVideoDownload(deps: VideoDownloadDeps) {
   }
 
   /**
+   * 下好之后「打开」这个文件能做到什么程度——**网页的能力就到这儿为止**，
+   * 面板上要把两道限制如实说出来，否则「按钮怎么没有 / 点了没反应」是唯一的解读：
+   *
+   *  · **只有流式写盘那条路有得开**：Blob 兜底是把文件交给浏览器原生下载器落进下载目录，
+   *    网页既不知道它在哪，也没有任何 API 能「在文件夹中显示」（这一条所有浏览器都一样）。
+   *  · **只有 `.mp4` 打得开**：`.ts` 浏览器根本不认，把它的 object URL 塞进新标签页
+   *    换来的不是播放而是**再下载一份**（一集 1GB 起，比不给这颗按钮糟得多）。
+   *
+   * 返回空串 = 能开；非空 = 开不了的原因（为空且 `false` 表示连提都不用提）。
+   */
+  const dlOpenBlockedBy = (fileName: string): string => {
+    if (!queue.hasDownloadDir()) return ''
+    if (!/\.mp4$/i.test(fileName)) return '浏览器打不开 .ts，用 VLC / mpv / PotPlayer 打开，或改用 .mp4 输出重下'
+    return ''
+  }
+  const dlCanOpen = (fileName: string): boolean =>
+    queue.hasDownloadDir() && !dlOpenBlockedBy(fileName)
+
+  /**
+   * 在新标签页打开下好的文件（浏览器自己当播放器）。
+   *
+   * **空白标签页必须在点击的同步调用栈里先开出来**，取文件是之后的事：
+   * `await` 之后再 `window.open` 就不在用户手势里了，一律被弹窗拦截器吃掉
+   *（同「播放器开新标签」那条）。
+   */
+  const openDownloadedFile = (fileName: string) => {
+    if (!dlCanOpen(fileName)) return
+    const tab = window.open('', '_blank')
+    if (!tab) { dlNotice.value = '浏览器拦了新标签页，允许本站弹出窗口后再试'; return }
+    void (async () => {
+      const file = await queue.getDownloadedFile(fileName)
+      if (!file) {
+        tab.close()
+        dlNotice.value = `打不开「${fileName}」——文件可能已被移动或删除，也可能是文件夹授权已失效（重新选一次文件夹）`
+        return
+      }
+      const url = URL.createObjectURL(file)
+      tab.location.href = url
+      // 立刻 revoke 会让新标签页拿不到数据，留一分钟够它接手（同 Blob 落盘那处）
+      setTimeout(() => URL.revokeObjectURL(url), 60_000)
+    })()
+  }
+
+  /**
    * 换一个保存文件夹（也是「上次选错了」的出口）。同样必须在点击的调用栈里调。
    * 换不成就保持原来那个，别把已经能用的授权弄丢。
    */
@@ -227,6 +271,7 @@ export function useVideoDownload(deps: VideoDownloadDeps) {
   return {
     canDownload, dlIsMp4, dlTasks, dlRunning, dlPending, dlStreaming, dlFullSpeed, dlMp4,
     dlNotice, dlDirName, pickDownloadFolder,
+    dlCanOpen, dlOpenBlockedBy, openDownloadedFile,
     startDownload, mp4DownloadHref,
     cancelDownload: queue.cancel,
     clearFinishedDownloads: queue.clearFinished,

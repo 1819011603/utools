@@ -67,6 +67,22 @@ let dirHandle: any = null
 export const setDownloadDir = (h: any) => { dirHandle = h }
 export const hasDownloadDir = () => !!dirHandle
 
+/**
+ * 取回已经下好的那个文件，供「打开」用。
+ *
+ * **只有流式写盘那条路能做到**：Blob 兜底是把文件交给浏览器原生下载器、落在下载目录里，
+ * 网页对那个位置一无所知（也没有任何 API 能「在文件夹中显示」）。
+ * 拿不到就返回 null —— 文件可能已被用户挪走/删掉，或授权在别的标签页里被撤销了。
+ */
+export const getDownloadedFile = async (fileName: string): Promise<File | null> => {
+  if (!dirHandle || !fileName) return null
+  try {
+    return await (await dirHandle.getFileHandle(fileName)).getFile()
+  } catch {
+    return null
+  }
+}
+
 export const tasks = reactive<DlTask[]>([])
 /** 有任务在跑（UI 上那枚徽标和 beforeunload 提示都看它） */
 export const running = ref(false)

@@ -56,9 +56,27 @@
               />
             </div>
             <div v-if="t.error" class="mt-1 text-[11px] text-rose-300 leading-snug">{{ t.error }}</div>
-            <div v-else-if="t.state === 'done'" class="mt-1 text-[11px] text-white/45 truncate">
-              {{ t.fileName }}
-              <span v-if="t.skipped" class="text-amber-300/80">（有 {{ t.skipped }} 片取不回来，那几秒会跳过去）</span>
+            <div v-else-if="t.state === 'done'" class="mt-1 flex items-center gap-1.5 text-[11px] text-white/45">
+              <span class="truncate">{{ t.fileName }}</span>
+              <span v-if="t.skipped" class="shrink-0 text-amber-300/80">（有 {{ t.skipped }} 片取不回来，那几秒会跳过去）</span>
+              <!--
+                「打开」只在真开得了的时候出（流式写盘 + .mp4，见 dlOpenBlockedBy）。
+                开不了的时候摆一句原因而不是一颗点了没反应的灰按钮 —— .ts 是最常见的那一种。
+              -->
+              <button
+                v-if="dlCanOpen(t.fileName)"
+                class="ml-auto shrink-0 flex items-center gap-1 px-1.5 py-0.5 rounded
+                       text-white/70 hover:text-white hover:bg-white/10 active:scale-90 transition-all"
+                title="在新标签页打开这个文件"
+                @click="openDownloadedFile(t.fileName)"
+              >
+                <UIcon name="i-heroicons-play-circle" class="w-3.5 h-3.5" />打开
+              </button>
+              <span
+                v-else-if="dlOpenBlockedBy(t.fileName)"
+                class="ml-auto shrink-0 text-white/30"
+                :title="dlOpenBlockedBy(t.fileName)"
+              >仅 VLC / mpv 可播</span>
             </div>
             <div v-else-if="t.state === 'running' && holdNote" class="mt-1 text-[11px] text-amber-300/80">{{ holdNote }}</div>
             <div
@@ -205,6 +223,7 @@ const {
   showDownloads, playlist, currentIndex, getVideoName,
   dlIsMp4, dlTasks, dlPending, dlStreaming, dlFullSpeed, dlMp4,
   startDownload, mp4DownloadHref, cancelDownload, clearFinishedDownloads,
+  dlCanOpen, dlOpenBlockedBy, openDownloadedFile,
   isPlaying, strategy,
 } = useVideoPlayerCtx()
 
