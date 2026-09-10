@@ -236,6 +236,25 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
       return
     }
 
+    /**
+     * 地址尾巴上的 `&origin=`/`&referer=` 拆成候选防盗链头（详见 liftRefererHints）：
+     * 贴在 query 上 CDN 不看，得经 /api/proxy 注入成请求头才有用。
+     * 只有真拆出东西来才回写输入框——那里可能还有用户自己写的非链接行，无条件覆盖会把它们抹掉。
+     */
+    let hintOrigin = ''
+    let hintReferer = ''
+    const cleaned = urls.map(u => {
+      const lifted = liftRefererHints(u)
+      if (lifted.origin && !hintOrigin) hintOrigin = lifted.origin
+      if (lifted.referer && !hintReferer) hintReferer = lifted.referer
+      return lifted.url
+    })
+    if (hintOrigin || hintReferer) {
+      deps.applyHints(hintOrigin, hintReferer)
+      // 拆干净的地址回写输入框：那两段已经进了「连接设置」，留在框里只会让人以为没生效
+      videoUrlInput.value = cleaned.join('\n')
+    }
+
     // 手工贴进来的地址跟上一份来源没关系了，附加信息（作业单/来源/集名）留着只会张冠李戴：
     // 作业单的占位地址对不上、来源会让地址栏写成上一部剧的 parseUrl，分享出去驴唇不对马嘴。
     //
@@ -247,10 +266,10 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
       handoff.lazyIndexByUrl.value[u] !== undefined ||
       handoff.playlistNames.value[u] !== undefined ||
       playlist.value.includes(u)
-    if (!urls.every(known)) { handoff.clearHandoffMeta(); clearLazyUrlCache() }
+    if (!cleaned.every(known)) { handoff.clearHandoffMeta(); clearLazyUrlCache() }
 
-    playlist.value = urls
-    const from = typeof startIndex === 'number' && startIndex >= 0 && startIndex < urls.length ? startIndex : 0
+    playlist.value = cleaned
+    const from = typeof startIndex === 'number' && startIndex >= 0 && startIndex < cleaned.length ? startIndex : 0
     currentIndex.value = from
 
     deps.onDirty()

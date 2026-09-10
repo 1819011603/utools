@@ -36,6 +36,49 @@ export function isFlvUrl(url: string): boolean {
   return /[?&](biz_)?protocol=flv\b/i.test(rest) || /\.flv([?&]|$)/i.test(rest)
 }
 
+/**
+ * 把地址尾巴上的 `&origin=`/`&referer=` 拆出来当候选防盗链头。
+ *
+ * 分享出来的直链常这么拼（抖音那种 `v26-web.douyinvod.com` 就是），而**参数留在地址里 CDN 压根不看**：
+ * 实测同一条地址不带 `Referer` 头一律 403、带上就是 206，把这两段原样贴在 query 上照旧 403。
+ * 它们只有变成**请求头**才有用，而 Origin/Referer 是 forbidden headers，只能经 `/api/proxy` 注入
+ * ——所以必须拆成候选值交给连接策略，留在地址里等于没填。
+ *
+ * 只在值本身就是个 http(s) 地址时才认：站点自己也可能带 `origin=cn` 这类同名参数，
+ * 一律吃掉会把签名的一部分抠走。手工切串不用 `URLSearchParams`：它把 `+` 编码成空格，
+ * 而签名里常有裸 `+`。
+ */
+export function liftRefererHints(url: string): { url: string; origin: string; referer: string } {
+  const none = { url, origin: '', referer: '' }
+  const cut = url.indexOf('?')
+  if (cut === -1) return none
+
+  const hashAt = url.indexOf('#', cut)
+  const query = url.slice(cut + 1, hashAt === -1 ? undefined : hashAt)
+  const hash = hashAt === -1 ? '' : url.slice(hashAt)
+
+  const kept: string[] = []
+  let origin = ''
+  let referer = ''
+  for (const part of query.split('&')) {
+    const eq = part.indexOf('=')
+    const key = eq === -1 ? part : part.slice(0, eq)
+    const raw = eq === -1 ? '' : part.slice(eq + 1)
+    let val = raw
+    try { val = decodeURIComponent(raw) } catch {}
+
+    if (/^https?:\/\/[^/?#]/i.test(val) && (key === 'origin' || key === 'referer')) {
+      if (key === 'origin') origin = val
+      else referer = val
+      continue
+    }
+    kept.push(part)
+  }
+
+  if (!origin && !referer) return none
+  return { url: url.slice(0, cut) + (kept.length ? '?' + kept.join('&') : '') + hash, origin, referer }
+}
+
 export function isM3u8Url(url: string): boolean {
   const cut = url.search(/[?#]/)
   const path = cut === -1 ? url : url.slice(0, cut)

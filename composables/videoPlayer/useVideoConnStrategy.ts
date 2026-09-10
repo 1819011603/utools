@@ -434,7 +434,23 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
     }
     if (autoStrategyStep.value >= MAX_STRATEGY_STEP) return false
     ladderMode.value = true
-    autoStrategyStep.value++
+    /**
+     * 往上爬，但**跳过拼出来跟刚失败那条一模一样的级**。
+     *
+     * 整片 MP4 没有清单，「代理清单·分片直连」对它就是原样返回直连地址（getProxyUrl 里
+     * `manifestOnly && !isHlsUrl(url)` 那一句）——重载一次、再赔一整轮加载超时，才轮到下一级，
+     * 而这一级从头到尾发的是同一个请求。HLS 上每级的地址都不同，这个循环一次就出来，行为不变。
+     */
+    const failedWith = getProxyUrl(url)
+    do {
+      autoStrategyStep.value++
+      applyReachabilityStep(autoStrategyStep.value)
+    } while (autoStrategyStep.value < MAX_STRATEGY_STEP && getProxyUrl(url) === failedWith)
+    // 剩下的级全是空转（爬到顶了地址还没变）→ 别再重载，交回上层报错
+    if (getProxyUrl(url) === failedWith) {
+      console.warn('线性阶梯剩余各级对这条地址都是空转，不再重载')
+      return false
+    }
     console.log('探测未能救回，退回线性阶梯 → step', autoStrategyStep.value)
     errorMessage.value = `正在自动尝试「${STRATEGY_STEP_LABELS[autoStrategyStep.value]}」...`
     deps.reload()
