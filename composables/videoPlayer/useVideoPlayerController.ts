@@ -181,17 +181,6 @@ export function useVideoPlayerController() {
     // URL 参数优先于本地存储：外部直链打开时不该被上次的地址/播放列表覆盖
     const queryParams = parseQueryVideoParams()
 
-    // 老链接里的 origin/referer 收作候选值喂给探测（不再强制生效——连接方式一律自动决定）。
-    // proxy/noref/manifestOnly 直接忽略：它们是引擎的中间态，固化下来只会让探测绕远。
-    // 注意这几个键仍留在 PAGE_QUERY_KEYS 里，否则 `&origin=` 这段会被当成视频地址的一部分回写。
-    //
-    // 必须放在所有加载分支**之前**：解析失败/超时那条路上不会有 applyHints，
-    // 这对候选头只能从 query 来，漏了就只剩探测硬碰，防盗链站点直接一片红。
-    if (queryParams.origin !== undefined || queryParams.referer !== undefined) {
-      if (queryParams.origin !== undefined) conn.originHint.value = queryParams.origin
-      if (queryParams.referer !== undefined) conn.refererHint.value = queryParams.referer
-    }
-
     const savedState = loadSavedState()
     if (savedState) {
       hydrate(savedState)
@@ -209,6 +198,28 @@ export function useVideoPlayerController() {
         // 作业单要跟着列表一起回来，否则恢复出来的是一列播不了的占位地址
         if (savedState.lazyTask) handoff.setLazyTask(savedState.lazyTask, playlist.playlist.value)
       }
+    }
+
+    // 老链接里的 origin/referer 收作候选值喂给探测（不再强制生效——连接方式一律自动决定）。
+    // proxy/noref/manifestOnly 直接忽略：它们是引擎的中间态，固化下来只会让探测绕远。
+    // 注意这几个键仍留在 PAGE_QUERY_KEYS 里，否则 `&origin=` 这段会被当成视频地址的一部分回写。
+    //
+    // 位置有两条硬约束，只有夹在这中间才对：
+    //   · **必须在 hydrate 之后**——hydrate 会把这对候选头一并恢复成「上一次那条片源」的值
+    //     （`s.originHint`/`s.refererHint`），排在它前面等于刚写就被盖掉。踩过：拿一条带
+    //     `&referer=https://jable.tv/` 的链接打开，面板上显示的却是上一次那部剧的 bilibili/ncat22，
+    //     而探测就拿着这对错头去试防盗链通道 —— 现象是「链接里明明填了、面板上却是别的站」。
+    //     `undefined` 表示 query 里压根没这个键 → 不动 hydrate 恢复的值，只有真传了才覆盖。
+    //   · **必须在所有加载分支之前**——解析失败/超时那条路上不会有 applyHints，
+    //     这对候选头只能从 query 来，漏了就只剩探测硬碰，防盗链站点直接一片红。
+    //
+    // 两个键**必须当一对整体覆盖**：外部播放器的模板常常只给得出其中一个
+    //（`?url=…%26referer%3D…`，没有 playOrigin 就整段不输出）。一个一个判的话，
+    // 没给的那个会留着 hydrate 恢复的、上一部剧的值 → 探测拿着「这条链接的 Referer
+    // + 上一部剧的 Origin」这对错配的头去试防盗链通道，比两个都不填还糟。
+    if (queryParams.origin !== undefined || queryParams.referer !== undefined) {
+      conn.originHint.value = queryParams.origin ?? ''
+      conn.refererHint.value = queryParams.referer ?? ''
     }
 
     if (queryParams.parseUrl) {
