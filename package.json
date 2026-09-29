@@ -43,6 +43,7 @@
     "vue": "^3.4.0"
   },
   "devDependencies": {
+    "@nuxt/schema": "3.15.4",
     "@types/gif.js": "^0.2.5",
     "patch-package": "^8.0.1",
     "typescript": "^5.5.0",
