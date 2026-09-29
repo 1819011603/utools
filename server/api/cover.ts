@@ -13,7 +13,7 @@ import { findDetailUrl, hostOf, parseCategory, parseCover, patternMatches } from
 import { readCookie } from '../parsers/cookieStore'
 import { matchParser } from '../parsers'
 import { coverFromRule } from '../parsers/htmlRule'
-import { BUILTIN_PARSE_RULES } from '../../composables/videoParseRules'
+import { BUILTIN_PARSE_RULES } from '../../composables/videoParseRules.data'
 import { fetchSitePage } from '../utils/siteFetch'
 
 const cache = new Map<string, { cover?: string; cat?: string; at: number }>()

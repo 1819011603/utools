@@ -6,7 +6,7 @@
  *
  * 「最高流畅倍速」为什么是纯带宽模型：早期靠「缓冲增长率」反推，
  * 但预取到「预加载时长」封顶之后缓冲不再增长、增长率≈0，会把可持续倍速误判成 1x。
- * 改成「满并发聚合带宽 ÷ 码率」直接算，与并发模型（computeTargetConcurrency）同源。
+ * 改成「满并发聚合带宽 ÷ 码率」直接算，与并发模型（useHlsPrefetch 的 desiredConn）同源。
  *
  * 内部实现模块，走显式相对 import，不进 `imports.dirs`。
  */
@@ -139,7 +139,7 @@ export function useBandwidthModel() {
    * 把所有帽子全顶回满并发；而那一刻聚合 20.8Mbps 已经是 5.2Mbps 码率的 4 倍。
    *
    * 凡是问「这个源要几条才喂得动」的地方（地板）都该用 solo；
-   * 问「当前这一拍的供给够不够」的地方（headroomConnCap）才用混合均值。
+   * 问「当前这一拍的供给够不够」的地方（desiredConn）才用混合均值。
    */
   const requiredConn = (rate: number, safety: number, solo = false): number => {
     const per = solo && perConnLow > 0 ? perConnLow : perConnBps

@@ -138,7 +138,7 @@ const FALLBACK_SEG_SECS = 10
 const FILL_HORIZON_SECS = 60
 
 /**
- * 「存货厚到可以躺着花」的墙钟余量（秒）：超过「存货阶梯放开线 + 它」就给到满折扣（见 headroomConnCap）。
+ * 「存货厚到可以躺着花」的墙钟余量（秒）：超过「存货阶梯放开线 + 它」就给到满折扣（见 desiredConn）。
  * 取 20s —— 阶梯放开线（默认 10s 墙钟）之上再攒够 20 秒，才算真的有余量可花。
  * 调大 = 更保守（更愿意为钉住预加载时长而多开连接），调小 = 更省连接、缓存更愿意往下滑。
  */
@@ -290,7 +290,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
    *
    * 用户填的「预加载时长」是**够播几秒**（墙钟），不是「缓存几秒视频」——两者差一个倍速：
    * 3x 下缓存 90 秒视频才等于「够播 30 秒」。而这里所有比较对象（`cachedAhead`、
-   * `headroomConnCap` 的缺口）都是**视频秒**，所以在这一处、且只在这一处乘回去。
+   * `desiredConn` 的缺口）都是**视频秒**，所以在这一处、且只在这一处乘回去。
    *
    * 跟「存货保险线」用的是同一把尺子（见下面 `cachedAhead / Math.max(1, rate)`）：
    * 两个输入框都以「够播几秒」计量，用户不用在脑子里做倍速换算——
@@ -366,14 +366,13 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   // 并发上限：默认单 host 6；多 CDN（分片跨多个 host）时按 host 数放宽（每 host 6，封顶 12）
   let hostConcurrencyCap = MAX_CONN
 
-  // 闭环控制状态：以「缓冲是否在掉」为反馈调并发，比开环测速更抗卡顿、天然适配倍速
-  let ctrlConn = 0                        // 当前受控并发（0=未初始化）
+  // 并发控制的持久状态。**没有「受控并发」这个积分器了**：目标值每拍由 desiredConn 的
+  // 吞吐模型现算（见 getAdaptivePrefetchCount），这里只留爬坡/沉降/迟滞需要的几个时间戳与档位。
   let lastTargetConn = 0                  // 上一拍算出的目标并发（卡顿守卫拿它判「带宽够不够」）
   let connDownAt = 0                      // 上次**下调**并发的时刻：沉降期内只许再降不许升
   let connUpAt = 0                        // 上次**上调**并发的时刻：爬升每 CONN_RAMP_MS 只许 +1
   let wallStep = WALL_CONN_STEPS.length   // 存货阶梯当前所在档（= length 表示放开）：迟滞用
   let headroomIdle = false                // 缺口已到目标、停取中：恢复要等缺口张开到 5%（迟滞）
-  let lastAhead = -1                      // 上次的前向缓冲秒数
   let lastHealthZone: HealthZone = 'healthy'  // 健康区（驱动 UI 与降速守卫）
   let lastPlayable = 0                    // 上次量到的有效可播秒数（MSE + 预取缓存）
   let segDurSecs = 0                      // 实测分片时长（秒，0=还没量到）：一条线程下一片就补这么多缓存
@@ -382,32 +381,17 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   const resetStrategy = () => {
     bw.resetSamples()
     hostConcurrencyCap = MAX_CONN
-    ctrlConn = 0
     lastTargetConn = 0
     connDownAt = 0
     connUpAt = 0
     wallStep = WALL_CONN_STEPS.length
     headroomIdle = false
-    lastAhead = -1
     lastHealthZone = 'healthy'
     lastPlayable = 0
     segDurSecs = 0
     resetLanes()
     segInflightStart.clear()
     strategy.value = { perConnKBps: 0, soloKBps: 0, soloRetain: 0, satConn: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0, aggregateScales: true, healthZone: 'healthy', playableSecs: 0, avgSegLoadMs: 0, aggKneeConn: 0 }
-  }
-
-  // 实测驱动的目标并发：需要带宽 = 码率 × 倍速 × 安全系数；并发 = ⌈需要 / 每连接速度⌉
-  const computeTargetConcurrency = (): number => {
-    // 冷启动（切集/换流刚清掉样本）：乐观值 4 起步，但按 host 学到的并发更可信就用它
-    // ——慢站上 4 条一样喂不动，而阶梯的地板已经放开了，这里不跟上就等于白学（见 catchUpFloor）
-    // 冷启动：**一律不超过 COLD_START_CONN_CAP**。按 host 学到的并发只用来「不低于」，
-    // 不再用来突破那个帽子——学到的是上次稳态的值，而此刻还没起播，处境完全不同
-    if (!bw.hasSamples()) {
-      return Math.min(hostConcurrencyCap, COLD_START_CONN_CAP, Math.max(2, opts.getColdStartConn?.() ?? 0))
-    }
-    const need = bw.requiredConn(getPlaybackRate(), tier().safety)
-    return Math.min(hostConcurrencyCap, Math.max(2, need))
   }
 
   // 刷新对外策略快照（供 UI 展示与倍速可行性判断）
@@ -437,36 +421,20 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     anchorTime,
   })
 
-  // 闭环控制步进（两个指标都按「有效已缓冲」cachedAhead = MSE + 预取缓存 来判，但用途不同）：
-  //   · 健康区(healthZone)：濒卡/吃紧/健康。**只驱动抗卡动作**（降速守卫、双通道自动开、
-  //     预热放行、面板徽标），不再参与并发——并发的低位判据统一交给存货阶梯（WALL_CONN_STEPS）。
-  //     两者单位本就不同：panicSecs/lowSecs 是视频秒，阶梯量的是「还够播几秒」的墙钟秒。
-  //   · 并发爬坡：偏低/在掉→+1；接近预取目标→−1 省带宽。
+  // 健康区（濒卡/吃紧/健康）：**只驱动抗卡动作**（降速守卫、双通道自动开、预热放行、面板徽标），
+  // **不参与并发**——并发的值统一由 desiredConn 的吞吐模型给（见 getAdaptivePrefetchCount）。
   //
-  // 健康区曾按「真实 MSE 前向」(mseAhead) 分档，理由是「卡不卡只看 MSE」。**这是错的**：
-  // 预取缓存里的分片由 fLoader 同步返回，hls.js 拿到即 append，不需要任何网络等待。
-  // 而 MSE 前向本身有天花板（maxBufferLength / 浏览器 MSE 配额），深缓存时它会长期停在几十秒的平台上
-  // ——那是正常稳态，不是吃紧。按它分档的后果：有效可播 651s、真实卡顿 0 次的情况下仍判「吃紧」，
-  // 降速守卫永远等不到 healthy 就永远不解除，「自动最佳倍速」被死锁在 1x（踩过）。
-  // 真正只看 MSE 的是跳片，它自己量（见 skipSegment），不走健康区。
-  const stepControl = (mseAhead: number, cachedAhead: number) => {
-    if (ctrlConn === 0) ctrlConn = computeTargetConcurrency()   // 冷启动用实测估算作初值
+  // 按「有效可播」（cachedAhead = MSE + 预取缓存）分档，**不是 MSE 前向**：预取缓存里的分片由
+  // fLoader 同步返回、hls.js 拿到即 append，不需要任何网络等待；而 MSE 前向本身有天花板
+  // （maxBufferLength / 浏览器 MSE 配额），深缓存时会长期停在几十秒的平台上——那是正常稳态，
+  // 不是吃紧。按它分档的后果踩过：有效可播 651s、真实卡顿 0 次仍判「吃紧」，降速守卫永远等不到
+  // healthy，「自动最佳倍速」被死锁在 1x。真正只看 MSE 的是跳片，它自己量（见 skipSegment）。
+  const updateHealthZone = (mseAhead: number, cachedAhead: number) => {
     const t = tier()
-    // 有效可播秒数分档。mseAhead 参与取大只为兜底：无分片列表时 getCachedAhead 会退化成 MSE 读数
+    // mseAhead 参与取大只为兜底：无分片列表时 getCachedAhead 会退化成 MSE 读数
     const playable = Math.max(mseAhead, cachedAhead)
     lastPlayable = playable
     lastHealthZone = playable < t.panicSecs ? 'panic' : (playable < t.lowSecs ? 'low' : 'healthy')
-    // 并发爬坡：按有效缓存趋势
-    const drained = lastAhead >= 0 && cachedAhead < lastAhead - 0.5
-    lastAhead = cachedAhead
-    const target = effectivePrefetchTarget()
-    // 这里曾有一句「cachedAhead < panicSecs → ctrlConn = hostConcurrencyCap」（缓存极少就拉满）。
-    // 已删：那一刻存货阶梯本来就把实际并发压在 2~3 条，拉满只是把**受控值**顶到 12 存着，
-    // 等存货一过保险线就原形毕露——表现是「刚补起来几秒就从 2 条直接跳到 12 条」（用户报的就是这个）。
-    // 缺存货时该做的是让眼前那一片先到（阶梯负责），而不是先把受控值攒满。现在一律 +1 慢慢爬。
-    if (cachedAhead < t.lowSecs || drained) ctrlConn = Math.min(hostConcurrencyCap, ctrlConn + 1)      // 偏低/在掉：加
-    else if (Number.isFinite(target) && cachedAhead > target * 0.75) ctrlConn = Math.max(2, ctrlConn - 1) // 接近目标：省
-    // 中间且未在掉：维持
   }
 
   /**
@@ -576,12 +544,20 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
    * 全程用「视频秒 / 墙钟秒」这个无量纲比值（倍速、缺口÷期限都是它），跟抗卡那两档
    * （墙钟「够播几秒」）各用各的尺子——两者管的是相反方向。
    *
-   * 它**必须排在「暂停→顶格」之后**：预加载时长 100s、已有 98s 却钉在 6/12 条，就是档位那个
-   * 已删掉的「并发下限 6」和「暂停→顶格」把闭环那句「接近目标就 −1」压回去了（踩过）。
+   * 它是 `getAdaptivePrefetchCount` 的**基值**（「值」），其余各级是对它的钳制（「界」）。
+   * 曾是 min 链里的第 ⑦ 级「帽子」；提成基值后，原来那句「必须排在暂停→顶格之后」的顾虑不再成立
+   * （暂停不再单独顶格，见 getAdaptivePrefetchCount）。
    */
-  const headroomConnCap = (cachedAhead: number): number => {
+  const desiredConn = (cachedAhead: number): number => {
     const target = effectivePrefetchTarget()
-    if (!Number.isFinite(target)) return hostConcurrencyCap   // 没设预加载时长 → 这条不参与
+    // 不限预加载：不拉满，按「维持播放」所需的连接数走（无谓的摊薄没必要）。
+    // ⚠️ 旧代码这里返回 `hostConcurrencyCap`，那是「不咬人」的语义（当时它是 min 链里的第 ⑦ 级帽子）；
+    // 现在它是**基值**，返回 hostCap 会把目标直接抬到满并发——评审抓到：不限预加载的源从 2 条变 hostCap。
+    if (!Number.isFinite(target)) {
+      return bw.hasSamples()
+        ? Math.min(hostConcurrencyCap, Math.max(2, bw.requiredConn(getPlaybackRate(), tier().safety)))
+        : Math.min(hostConcurrencyCap, COLD_START_CONN_CAP, Math.max(2, opts.getColdStartConn?.() ?? 0))
+    }
     /*
      * 「已到目标」用**两条线**：停取看「缺口不足一片」，恢复要等缺口重新张开到目标的 5%
      * （见 HEADROOM_RESUME_FRAC）。单条线——无论是 `gap <= 0` 还是 `gap <= 一片`——
@@ -594,9 +570,11 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
       : gap <= seg                                              // 在取：缺口不足一片就收工
     if (stop) { headroomIdle = true; return 0 }                  // 已到目标（上层还会再判一次停取）
     headroomIdle = false
-    // 还没测出速度：退回「缺口装得下几片」。冷启动时缺口远大于一片，等于不限；
-    // 但这样「快满了还开满线程」这个毛病就不依赖采样数据也不会犯
-    if (!bw.hasSamples()) return Math.max(1, Math.ceil(gap / (segDurSecs || FALLBACK_SEG_SECS)))
+    // 还没测出速度：退回冷启动帽（旧代码这里按「缺口装得下几片」给，冷启动时会算出 3~6 条，
+    // 比原来 computeTargetConcurrency 的 2 条多——评审抓到，改回冷启动口径）
+    if (!bw.hasSamples()) {
+      return Math.min(hostConcurrencyCap, COLD_START_CONN_CAP, Math.max(2, opts.getColdStartConn?.() ?? 0))
+    }
 
     /*
      * 手上存货厚的时候，「播放消耗」那一项可以**打折**——余量本来就是拿来花的。
@@ -730,7 +708,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
    * 都是为了「线程不能太少」：
    *   · **存货没过阶梯放开线就整条不参与**。省线程是「有余量才做的事」：起播、切集、拖进度
    *     那一刻手上够播几秒是唯一要紧的事，这时候还按「单条够快」去收，等于跟 ② 抢方向盘。
-   *     判据用墙钟「还够播几秒」而不是视频秒，跟 ② / `headroomConnCap` 同一把尺子。
+   *     判据用墙钟「还够播几秒」而不是视频秒，跟 ② / `desiredConn` 同一把尺子。
    *   · 没测到低并发样本（`solo === 0`）→ 不咬人，交给存货阶梯和冷启动帽；
    *   · 帽子**不低于 `catchUpFloor()`**。它是 min 链的一环，压穿地板会重演慢源自锁
    *     （2 条连维持播放都不够 → 存货永远涨不到阶梯放开线 → 永远不放开）。高倍速下
@@ -747,33 +725,31 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     return hostConcurrencyCap   // 单条慢（含 solo=0 还没测到）：不咬人，该多开就多开
   }
 
-  // 返回当前目标并发（受控值，双重钳制在 [2, hostCap]）。只读，供两个预取入口共用。
-  // 注意：永远保持并行预取后续分片，绝不因当前分片慢而停掉后面的（否则退化成串行/卡死）。
+  // 当前目标并发（只读，供两个预取入口共用）。
+  // 永远保持并行预取后续分片，绝不因当前分片慢而停掉后面的（否则退化成串行/卡死）。
   const getAdaptivePrefetchCount = (cachedAhead?: number): number => {
-    if (ctrlConn === 0) ctrlConn = computeTargetConcurrency()
-    // 暂停时带宽全空闲 → 顶格并发猛缓存后续分片（下到 JS 预取缓存，恢复播放即命中）。
-    // 播放时按闭环受控值走，钳制在 [2, hostCap]。
-    //
-    const paused = opts.getVideoEl()?.paused ?? false
-    let target = paused ? hostConcurrencyCap : Math.min(hostConcurrencyCap, ctrlConn)
-    // 下面两条都排在「暂停→顶格」之后，好压过它：
-    //   · 存货阶梯：还够播几秒 → 2/3/4/6 条，过 2 倍保险线才放开（见 WALL_CONN_STEPS）。
-    //     起播那一刻正是「还没 play() 所以 paused 为真」+「缓存为 0」同时成立，压不住就是满并发抢第一片。
-    //   · 快到预加载时长 → 按「播放消耗 + 缺口摊到 60s 补」所需的速率收（见 headroomConnCap）。
     /*
-     * ── 并发决策的优先级阶梯 ──
-     * 一律取 min（除了最后那道地板），**越靠前越「救命」，越靠后越只是「省」**：
+     * ── 目标 = 「值」夹在「界」之间 ──
+     * 值：`desiredConn` —— 唯一一处「要多少吞吐」的模型：
+     *     需要吞吐 = 播放消耗（倍速）+ 缺口 ÷ 补齐期限 → 再除每连接实测速度。缺口→0 时正好收敛到
+     *     「刚够跟上播放」（快源 1 条、慢源该几条给几条）；到目标时返回 0（停取，带迟滞）。
+     *     **暂停不再单独顶格**：旧代码的 `paused ? hostCap` 只是基值，随后照样被 ⑦ 压回来，删掉等价。
+     * 界（一律 min，除 ⑧ 地板是 max）——越靠前越「救命」，越靠后越只是「省」：
      *   ① 冷启动帽    没有任何实测 → ≤3，无论双通道（拿第一片去赌是最亏的）
-     *   ② 存货墙钟    还够播几秒 → 2/3/4/6（「现在能不能播下去」压倒一切）
+     *   ② 存货墙钟    还够播几秒 → 2/3/4/6（「现在能不能播下去」压倒一切；饿区快源只留 1 条）
      *   ③ 卡顿守卫    真卡过 → 摊薄型收紧到 3 / 真慢型抬地板到 hostCap
      *   ④ 摊薄帽      单条速度掉了三成/一半 → 封在 3/2（比 ⑤ 快，见 dilutionCap）
      *   ⑤ 单连接够快  存货过放开线 + 单条跑到 500KB/s×倍速 → 封在 2~3（见 soloFastCap）
      *   ⑥ 聚合拐点    加线程不涨吞吐 → 封在拐点 +1
-     *   ⑦ 缺口速率    接近预加载时长 → 按所需速率收（headroomConnCap，只省流量）
      *   ⑧ 地板        慢源兜底：catchUpFloor / 卡顿守卫的 floor（防「越缺越不敢开」自锁）
      *   ⑨ 沉降/爬升   刚减过 → 只许再降不许升（CONN_SETTLE_*）；升一律一档一档来（CONN_RAMP_MS）
      *                 ——**地板顶格也要走这条路**，否则 3 → 12 一步到位
+     *
+     * （原来这里是「闭环积分器 ctrlConn + ⑦ 缺口速率帽」两套在算同一件事——积分器稳态会被棘轮
+     *   顶到 hostCap、真正拍板的是这些帽子。已把 ⑦ 提成基值 `desiredConn`、删掉积分器：
+     *   模型现算、响应更快，也少了 `ctrlConn`/`lastAhead` 两处状态与 `computeTargetConcurrency`。）
      */
+    let target = cachedAhead === undefined ? hostConcurrencyCap : desiredConn(cachedAhead)
     if (!bw.hasSamples()) target = Math.min(target, COLD_START_CONN_CAP)     // ①
     if (cachedAhead !== undefined) {
       const wall = cachedAhead / Math.max(1, getPlaybackRate())
@@ -783,7 +759,6 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
       target = Math.min(target, dilutionCap())                              // ④
       target = Math.min(target, soloFastCap(wall))                          // ⑤
       target = Math.min(target, aggregateKneeCap())                         // ⑥
-      target = Math.min(target, headroomConnCap(cachedAhead))               // ⑦
       // ⑧ 地板只在「真慢型卡顿」时抬——它要压过上面所有的收紧，否则慢源永远补不回来。
       //    冷启动帽不受它影响：那时没样本，stallGuard 直接返回不咬人的值
       target = Math.max(target, Math.min(hostConcurrencyCap, guard.floor))
@@ -897,7 +872,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     const startIdx = frags.findIndex((f: any) => f.sn === lastFragSn) + 1
     if (startIdx <= 0) return
 
-    // 分片时长：headroomConnCap 用它算「缺口还装得下几片」。取清单的 targetduration
+    // 分片时长：desiredConn 用它算「缺口还装得下几片」。取清单的 targetduration
     // （它就是「最长的一片」，用来算上限正合适），拿不到就退回真实分片的 duration
     segDurSecs = levelDetails.targetduration || frags[startIdx]?.duration || segDurSecs
 
@@ -909,10 +884,10 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     // 双通道：代理是额外一个 origin（本站），再加 6 条（封顶 12）
     if (getLaneCount(lookahead[0]?.url) > 1) hostConcurrencyCap = Math.min(12, hostConcurrencyCap + MAX_CONN)
 
-    // 双指标：mseAhead（真实可播）驱动健康区/降速/跳片；cachedAhead（含预取缓存）驱动并发爬坡与停取。
+    // 双指标：mseAhead（真实可播）驱动健康区/降速/跳片；cachedAhead（含预取缓存）驱动并发与停取。
     const mseAhead = getAheadBuffered(video)
     const cachedAhead = getCachedAhead(video)
-    stepControl(mseAhead, cachedAhead)             // 闭环：健康区按 MSE、并发按缓存
+    updateHealthZone(mseAhead, cachedAhead)        // 健康区（只驱动抗卡动作，不参与并发）
     let count = getAdaptivePrefetchCount(cachedAhead)
     if (cachedAhead >= effectivePrefetchTarget()) count = 0   // 已达有效预取深度 → 停止预取
 
@@ -1051,7 +1026,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     }
     const mseAhead = getAheadBuffered(video)
     const cachedAhead = getCachedAhead(video)
-    stepControl(mseAhead, cachedAhead)
+    updateHealthZone(mseAhead, cachedAhead)
     let count = getAdaptivePrefetchCount(cachedAhead)
     if (cachedAhead >= effectivePrefetchTarget()) count = 0   // 已达有效预取深度 → 停止预取
     prefetchInfo.value.bufferSecs = Math.round(mseAhead * 10) / 10

@@ -9,7 +9,7 @@
  *   · 需要写代码       → 在 sites/ 加一个 .ts 导出 SiteParser，在 CODED_PARSERS 登记，
  *                        同时在 CODED_PARSE_SITES 登记 pattern（前端要用它判断支持与否）
  */
-import { BUILTIN_PARSE_RULES } from '../../composables/videoParseRules'
+import { BUILTIN_PARSE_RULES } from '../../composables/videoParseRules.data'
 import type { ParseRule } from '../../composables/videoParseRules'
 import type { SiteParser } from './types'
 import { createHtmlParser } from './htmlRule'
