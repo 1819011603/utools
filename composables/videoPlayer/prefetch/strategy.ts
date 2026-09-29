@@ -468,12 +468,7 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
      */
     const now = performance.now()
     let target = cachedAhead === undefined ? runtime.hostConcurrencyCap : desiredConn(cachedAhead)
-    // 「咬人的那一级」：目标每变一次就记下是哪一级把它定成这个数（排查用，见下面的 [conn] 日志）
-    let biter = '值 desiredConn'
-    const levels: string[] = []
-    const clamp = (name: string, v: number) => { levels.push(`${name}=${v}`); if (v < target) { target = v; biter = name } }
-
-    if (!bw.hasSamples()) clamp('①冷启动帽', COLD_START_CONN_CAP)
+    if (!bw.hasSamples()) target = Math.min(target, COLD_START_CONN_CAP)     // ①
     if (cachedAhead !== undefined) {
       const wall = cachedAhead / Math.max(1, getPlaybackRate())
       const targetSecs = effectivePrefetchTarget()
@@ -486,16 +481,15 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
       }
       const notAtTarget = Number.isFinite(targetSecs)
         && targetSecs - cachedAhead > (runtime.segDurSecs || FALLBACK_SEG_SECS)
-      clamp('②存货阶梯', wallConnCap(wall, getSafeWallSecs(), bufferStuck && notAtTarget))
+      target = Math.min(target, wallConnCap(wall, getSafeWallSecs(), bufferStuck && notAtTarget))   // ②
       const guard = stallGuard()                                            // ③
-      clamp('③卡顿帽', guard.cap)
-      clamp('④摊薄帽', dilutionCap())                                        // ④
-      clamp('⑤单条够快', soloFastCap(wall))                                  // ⑤
-      clamp('⑥聚合拐点', aggregateKneeCap())                                 // ⑥
+      target = Math.min(target, guard.cap)
+      target = Math.min(target, dilutionCap())                              // ④
+      target = Math.min(target, soloFastCap(wall))                          // ⑤
+      target = Math.min(target, aggregateKneeCap())                         // ⑥
       // ⑧ 地板只在「真慢型卡顿」时抬——它要压过上面所有的收紧，否则慢源永远补不回来。
       //    冷启动帽不受它影响：那时没样本，stallGuard 直接返回不咬人的值
-      const floor = Math.min(runtime.hostConcurrencyCap, guard.floor)
-      if (floor > target) { target = floor; biter = '⑧地板' }
+      target = Math.max(target, Math.min(runtime.hostConcurrencyCap, guard.floor))
     }
     /*
      * ⑨ 沉降期：刚减过线程就**只许再降不许升**。
@@ -516,16 +510,14 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
       // 场合，回快档——那里慢爬会把恢复拖很久。
       const urgent = lastHealthZone !== 'healthy' || catchUpFloor() > 0
       const rampMs = urgent ? CONN_RAMP_MS_FAST : CONN_RAMP_MS_SLOW
-      if (now - connDownAt < settleMs) { target = lastTargetConn; biter = '⑨沉降期' }      // 刚减过：等在途排空
-      else if (now - connUpAt < rampMs) { target = lastTargetConn; biter = '⑨爬升间隔' }   // 上一档还没站稳
-      else { const v = Math.min(target, lastTargetConn + 1); if (v < target) { target = v; biter = '⑨爬升+1' } }
+      if (now - connDownAt < settleMs) target = lastTargetConn              // 刚减过：等在途排空，读数还不可信
+      else if (now - connUpAt < rampMs) target = lastTargetConn             // 上一档还没站稳，这一拍不动
+      else target = Math.min(target, lastTargetConn + 1)                    // 一档一档来（地板顶格也走这条路）
     }
     if (target !== lastTargetConn) {
       if (lastTargetConn > 0 && target < lastTargetConn) connDownAt = now
       if (target > lastTargetConn) connUpAt = now
       bw.markConcChange()
-      // 九级点名：只在目标变化时打一行，一眼看出是「值」还是哪一级帽子咬的（排查并发决策用）
-      console.info(`[conn] ${lastTargetConn} → ${target}（咬人：${biter}） ${levels.join(' ')}`)
     }
     lastTargetConn = target
     hasEvaluated = true

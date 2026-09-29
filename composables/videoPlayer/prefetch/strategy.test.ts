@@ -5,7 +5,7 @@
  * 钉成断言：冷启动帽、存货阶梯、摊薄帽、单条够快帽、卡顿守卫的两个分岔、爬升一档一档。
  * 带宽模型用桩（完全可控），这样每条用例只验一级、失败时能直接点名是哪一级。
  */
-import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import type { TierParams } from '../../videoSiteRules'
 import type { BandwidthModel } from './bandwidth'
 import { useConcurrencyStrategy } from './strategy'
@@ -72,7 +72,6 @@ function setup(o: SetupOpts) {
   return { ctl, runtime }
 }
 
-beforeEach(() => { vi.spyOn(console, 'info').mockImplementation(() => {}) })   // 静音 [conn] 点名日志
 afterEach(() => { vi.restoreAllMocks() })
 
 describe('effectivePrefetchTarget：把「够播几秒」换算成视频秒', () => {
