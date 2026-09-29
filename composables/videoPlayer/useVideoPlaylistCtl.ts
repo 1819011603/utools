@@ -4,6 +4,8 @@
 import type { VideoMediaState } from './useVideoMediaState'
 import type { VideoHandoff } from './useVideoHandoff'
 import { useLazyUrlResolver } from './playlist/lazyUrlResolver'
+import { usePlaylistProgress } from './playlist/progress'
+import { usePlaylistRefresh } from './playlist/refresh'
 // 只依赖最底层的本机账本，不认识同步引擎本身（方向见 cloudSyncLocal 文件头）
 import { onSyncApplied, requestSyncFlush } from '../cloudSyncLocal'
 

@@ -8,6 +8,7 @@
 import type { VideoMediaState } from './useVideoMediaState'
 import type { VideoAutoTune } from './useVideoAutoTune'
 import type { VideoPlaylistCtl } from './useVideoPlaylistCtl'
+import { useFullscreenController } from './controls/fullscreen'
 // 只依赖最底层的本机账本，不认识同步引擎本身（方向与 useWatchHistory 一致，见 cloudSyncLocal 文件头）
 import { requestSyncFlush } from '../cloudSyncLocal'
 
@@ -185,7 +186,7 @@ export function useVideoUiControls(deps: VideoUiControlsDeps) {
   watch(turboRate, on => { if (!on && desiredRate.value > 3) setPlaybackRate(3) })
 
   // ── 全屏 / 画中画 / 切走-切回来 / 锁定看门狗（实现见 ./controls/fullscreen.ts）──
-  const { toggleFullscreen, togglePiP, consumeAutoFullscreen, bindFsListeners, unbindFsListeners } =
+  const { toggleFullscreen, togglePiP, consumeAutoFullscreen, enterAutoFullscreen, isTouchPrimary, bindFsListeners, unbindFsListeners } =
     useFullscreenController({ media, playlist })
 
 
