@@ -64,9 +64,12 @@
  * 各写一遍必然和播放器的结论对不上。
  */
 import {
-  probeReachability, diagnoseProbe, probeMatrixRows, buildChannelUrl, resolveConnConfig,
-  type ProbeResult, type ProbeVerdict, type Channel,
+  probeReachability, buildChannelUrl, resolveConnConfig,
+  type ProbeResult, type Channel,
 } from '~/composables/videoPlayer/useReachabilityProbe'
+import {
+  diagnoseProbe, probeMatrixRows, type ProbeVerdict,
+} from '~/composables/videoPlayer/probeDiagnose'
 
 const props = defineProps<{
   /** 被测地址（必须是已解析出的真实播放地址，占位地址测不了） */

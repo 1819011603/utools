@@ -261,10 +261,16 @@ const CONN_SETTLE_MAX_MS = 5000
  *     才可信（见 saturationConn）——中间档全跳过去，这个判据就永远等不到数据。
  *     一档一档爬正好把 4/5/6…都测一遍，是把探测顺手做掉，不是白等。
  *
- * 700ms 的量级：比一拍心跳略短、比一片下载耗时略短，6 条上限约 4 秒爬满、12 条约 8 秒。
+ * **默认走慢档**：用户反馈「线程数涨得太快太多，把紧邻播放头那一片拖慢了」——模型（desiredConn）
+ * 一看到缺口大就要求多开，可缺口大不等于现在需要更多连接（缓冲还在涨时就只是白摊薄）。
+ * 慢档把「往上加」的节奏放缓，给摊薄帽/饱和判据留出采样时间，也让眼前那一片先到。
+ *
+ * **真需要的场合回快档**（见 getAdaptivePrefetchCount 的 ⑨）：存货在掉/濒卡，或目标是被**地板**
+ * 顶上去的（真慢源、刚卡过）——那时「少开」才是错的，慢爬会让恢复拖很久。
  * 只限「升」不限「降」（同 CONN_SETTLE_*，降是救命方向）。
  */
-const CONN_RAMP_MS = 700
+const CONN_RAMP_MS_SLOW = 1500
+const CONN_RAMP_MS_FAST = 700
 
 /**
  * 卡顿守卫的观察窗（ms）：这段时间内发生过真实卡顿就算「近期在卡」。
@@ -370,7 +376,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   // 吞吐模型现算（见 getAdaptivePrefetchCount），这里只留爬坡/沉降/迟滞需要的几个时间戳与档位。
   let lastTargetConn = 0                  // 上一拍算出的目标并发（卡顿守卫拿它判「带宽够不够」）
   let connDownAt = 0                      // 上次**下调**并发的时刻：沉降期内只许再降不许升
-  let connUpAt = 0                        // 上次**上调**并发的时刻：爬升每 CONN_RAMP_MS 只许 +1
+  let connUpAt = 0                        // 上次**上调**并发的时刻：爬升按 CONN_RAMP_MS_SLOW/FAST 一档一档来
   let wallStep = WALL_CONN_STEPS.length   // 存货阶梯当前所在档（= length 表示放开）：迟滞用
   let headroomIdle = false                // 缺口已到目标、停取中：恢复要等缺口张开到 5%（迟滞）
   let lastHealthZone: HealthZone = 'healthy'  // 健康区（驱动 UI 与降速守卫）
@@ -550,14 +556,9 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
    */
   const desiredConn = (cachedAhead: number): number => {
     const target = effectivePrefetchTarget()
-    // 不限预加载：不拉满，按「维持播放」所需的连接数走（无谓的摊薄没必要）。
-    // ⚠️ 旧代码这里返回 `hostConcurrencyCap`，那是「不咬人」的语义（当时它是 min 链里的第 ⑦ 级帽子）；
-    // 现在它是**基值**，返回 hostCap 会把目标直接抬到满并发——评审抓到：不限预加载的源从 2 条变 hostCap。
-    if (!Number.isFinite(target)) {
-      return bw.hasSamples()
-        ? Math.min(hostConcurrencyCap, Math.max(2, bw.requiredConn(getPlaybackRate(), tier().safety)))
-        : Math.min(hostConcurrencyCap, COLD_START_CONN_CAP, Math.max(2, opts.getColdStartConn?.() ?? 0))
-    }
+    // 不限预加载：用户明确要「缓存到顶」，这里返回 hostCap（沿用旧行为）。爬升速度另由 ⑨ 控制，
+    // 所以「要满」但「慢慢满」，不会一上来就摊薄眼前那一片。
+    if (!Number.isFinite(target)) return hostConcurrencyCap
     /*
      * 「已到目标」用**两条线**：停取看「缺口不足一片」，恢复要等缺口重新张开到目标的 5%
      * （见 HEADROOM_RESUME_FRAC）。单条线——无论是 `gap <= 0` 还是 `gap <= 一片`——
@@ -570,10 +571,11 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
       : gap <= seg                                              // 在取：缺口不足一片就收工
     if (stop) { headroomIdle = true; return 0 }                  // 已到目标（上层还会再判一次停取）
     headroomIdle = false
-    // 还没测出速度：退回冷启动帽（旧代码这里按「缺口装得下几片」给，冷启动时会算出 3~6 条，
-    // 比原来 computeTargetConcurrency 的 2 条多——评审抓到，改回冷启动口径）
+    // 还没测出速度：**冷启动帽 与「缺口装得下几片」取小**（旧行为 = base(冷启动估算) 与 ⑦(ceil(gap/seg))
+    // 取 min）。只用冷启动帽会在小缺口时多开（评审核到 3 vs 2）。
     if (!bw.hasSamples()) {
-      return Math.min(hostConcurrencyCap, COLD_START_CONN_CAP, Math.max(2, opts.getColdStartConn?.() ?? 0))
+      const cold = Math.min(hostConcurrencyCap, COLD_START_CONN_CAP, Math.max(2, opts.getColdStartConn?.() ?? 0))
+      return Math.min(cold, Math.max(1, Math.ceil(gap / seg)))
     }
 
     /*
@@ -742,7 +744,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
      *   ⑤ 单连接够快  存货过放开线 + 单条跑到 500KB/s×倍速 → 封在 2~3（见 soloFastCap）
      *   ⑥ 聚合拐点    加线程不涨吞吐 → 封在拐点 +1
      *   ⑧ 地板        慢源兜底：catchUpFloor / 卡顿守卫的 floor（防「越缺越不敢开」自锁）
-     *   ⑨ 沉降/爬升   刚减过 → 只许再降不许升（CONN_SETTLE_*）；升一律一档一档来（CONN_RAMP_MS）
+     *   ⑨ 沉降/爬升   刚减过 → 只许再降不许升（CONN_SETTLE_*）；升一档一档来（慢档 CONN_RAMP_MS_SLOW / 急档 CONN_RAMP_MS_FAST）
      *                 ——**地板顶格也要走这条路**，否则 3 → 12 一步到位
      *
      * （原来这里是「闭环积分器 ctrlConn + ⑦ 缺口速率帽」两套在算同一件事——积分器稳态会被棘轮
@@ -770,7 +772,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
      * 那一两拍里速度读数仍是高并发时的低值（单条保有率、每连接速度全是），照它决策就会
      * 立刻把线程加回去 → 又摊薄 → 再减，谁也不让谁。所以只在「升」这个方向上等一等；
      * 「降」始终放行（存货阶梯濒卡那一档必须随时生效），而各条帽子都是绝对值算式、
-     * 不是增量累加，连续降也不会踩过头。
+     * 不是累加，连续降也不会踩过头。
      *
      * 同一处顺便通知带宽模型「并发变了」：跨越变更点的那些采样不能进分档账本，
      * 否则低并发档会被高并发时的低速度污染（见 bandwidth 的 markConcChange）。
@@ -778,8 +780,13 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     const now = performance.now()
     const settleMs = Math.min(CONN_SETTLE_MAX_MS, Math.max(CONN_SETTLE_MIN_MS, bw.avgSegLoadMs()))
     if (lastTargetConn > 0 && target > lastTargetConn) {
+      // 爬升间隔：**默认慢档**（线程涨太快会把紧邻播放头那一片摊薄——用户反馈）；但
+      // 「存货吃紧/濒卡」或「源站真慢（地板被顶起来，`catchUpFloor`>0）」是真需要更多连接的
+      // 场合，回快档——那里慢爬会把恢复拖很久。
+      const urgent = lastHealthZone !== 'healthy' || catchUpFloor() > 0
+      const rampMs = urgent ? CONN_RAMP_MS_FAST : CONN_RAMP_MS_SLOW
       if (now - connDownAt < settleMs) target = lastTargetConn              // 刚减过：等在途排空，读数还不可信
-      else if (now - connUpAt < CONN_RAMP_MS) target = lastTargetConn       // 上一档还没站稳，这一拍不动
+      else if (now - connUpAt < rampMs) target = lastTargetConn             // 上一档还没站稳，这一拍不动
       else target = Math.min(target, lastTargetConn + 1)                    // 一档一档来（地板顶格也走这条路）
     }
     if (target !== lastTargetConn) {
@@ -1052,7 +1059,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
    * 用在 seek：拖进度那一刻存货归零，存货阶梯把目标压到 1~2，同时按「刚减过线程」记下
    * `connDownAt`——于是缓冲补起来之后，升线程还得再等一个沉降期（`avgSegLoadMs`，最长 5s），
    * 正好卡住「拖完进度要好几秒才把并发拉回来」。位置变了不是「判定多开了」，这道锁对 seek 无意义。
-   * 清掉之后：升线程立刻走 +1、之后仍受 `CONN_RAMP_MS` 一档一档来（不会一步顶格）。
+   * 清掉之后：升线程立刻走 +1、之后仍受 `CONN_RAMP_MS_*` 一档一档来（不会一步顶格）。
    */
   const resetConcurrencyRamp = () => { connDownAt = 0; connUpAt = 0 }
 
