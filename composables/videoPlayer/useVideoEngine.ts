@@ -10,15 +10,18 @@ import type { VideoConnStrategy } from './useVideoConnStrategy'
 import type { VideoServerTier } from './useVideoServerTier'
 import { createPlaylistLoaderFactory } from './engine/playlistLoader'
 import { useRecomposite } from './engine/recomposite'
-import { buildHlsConfig } from './engine/hlsConfig'
 import { useLoadTimeout } from './engine/loadTimeout'
-import { useHlsErrorHandler, failMessageOf } from './engine/hlsErrors'
+import { failMessageOf } from './engine/hlsErrors'
 import { useStallRecovery } from './engine/stallRecovery'
-import { probeMp4Head } from './engine/mp4Duration'
-import { createFlvStream, type FlvHandle } from './engine/flvStream'
-import { holdPiP, reclaimPiP, releasePiPHolder, isPiPHeld, startPiPTracking, resyncPiPAspect } from './engine/pipHandoff'
-import { onNetChange, isRecovering } from './engine/netWatch'
+import { type FlvHandle } from './engine/flvStream'
+import { reclaimPiP, releasePiPHolder, isPiPHeld, startPiPTracking, resyncPiPAspect } from './engine/pipHandoff'
+import { onNetChange } from './engine/netWatch'
 import { clearDirectDead } from './probeStore'
+import { useSpinnerGate } from './engine/spinnerGate'
+import { useNetRecovery } from './engine/netRecovery'
+import { useHlsStats } from './engine/hlsStats'
+import { useStartAnchor } from './engine/startAnchor'
+import { useVideoLoader } from './engine/videoLoader'
 
 export interface VideoEngineDeps {
   media: VideoMediaState
@@ -35,9 +38,6 @@ export interface VideoEngineDeps {
 }
 
 
-// 动态导入 hls.js（避免 SSR 问题），模块级缓存一次
-let Hls: typeof HlsType | null = null
-
 export function useVideoEngine(deps: VideoEngineDeps) {
   const { media, conn, tier } = deps
   const {
@@ -50,34 +50,12 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   let flv: FlvHandle | null = null
 
 
-  /**
-   * 起播锚点：刷新/恢复进度起播时，播放头还停在 0、但要起播的位置在 pendingStartPos。
-   * 预取以此为起点（见 useHlsPrefetch 的 getStartPosition）——起播即在正确位置全力并行预取，
-   * 既不浪费带宽下开头，也不会退化成「只有 hls.js 串行下 1 片」。到位/用户跳转后清 0。
-   */
-  let pendingStartPos = 0
-  let startAnchorActive = false
-  const clearStartAnchor = () => { startAnchorActive = false; pendingStartPos = 0 }
-  const isArrivingAtStart = (ct: number) => startAnchorActive && Math.abs(ct - pendingStartPos) < 3
-  /**
-   * 本次交给 hls.js `startPosition` 的位置。与 pendingStartPos 分开存：后者是预取锚点、
-   * 到位就被 clearStartAnchor 清 0，而 useVideoEvents 在 loadedmetadata 里要知道
-   * 「引擎到底把起播位置定在哪」才能判断还要不要补一次 seek（见那里的片尾区兜底）。
-   */
-  let appliedStartPos = 0
-  const getAppliedStartPos = () => appliedStartPos
-
-  /**
-   * 本次起播是不是「定位类」（切集 / 重载 / 拖进度），供 useVideoEvents 选起播门槛：
-   * 定位类只要「够播 2 秒」就出画面，首次冷启动仍要攒够 6 秒（两档都 × 倍速，
-   * 见 useVideoEvents.autoPlayTarget）。
-   *
-   * 区别在于用户的预期：冷启动时他刚点开、还在看页面，多等两秒攒厚一点划算；
-   * 而切集/拖进度时画面是停着的，每多一秒都在盯着转圈——那时「先出画面、边播边补」明显更好。
-   */
-  let isRelocating = false
-  const isRelocatingStart = () => isRelocating
-  const clearRelocating = () => { isRelocating = false }
+  // 起播锚点（刷新/恢复进度/切集起播的位置），实现见 ./engine/startAnchor.ts
+  const startAnchor = useStartAnchor()
+  const {
+    clearStartAnchor, isArrivingAtStart, getAppliedStartPos, isRelocatingStart, clearRelocating,
+    getStartPosition, beginAnchor, setAppliedStartPos, setRelocating,
+  } = startAnchor
 
   // ── 预取缓存 + 自适应预取 + 卡顿记录 ──
   const segmentCache = useSegmentCache({ getMaxBufferSizeMB: () => hlsConfig.value.maxBufferSizeMB })
@@ -98,7 +76,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
       return t && t > 0 ? t : Infinity
     },
     // 起播锚点：定位未到位前，预取从 pendingStartPos 起（而非 currentTime=0）
-    getStartPosition: () => (startAnchorActive ? pendingStartPos : 0),
+    getStartPosition,
     // 存货保险线：缓存够播的秒数低于它就按阶梯收敛并发（见 useHlsPrefetch 的 WALL_CONN_STEPS）
     getSafeWallSecs: () => hlsConfig.value.safeWallSecs,
     // 切集/换流会清掉实测样本，那一刻用按 host 学到的并发当阶梯地板（见 catchUpFloor）
@@ -176,112 +154,15 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     },
   })
 
-  /**
-   * 转圈遮罩的延迟闸门（`isBuffering` 的唯一点亮入口）。
-   *
-   * 治的是**拖进度时那一下 0~1s 的无意义转圈**（实测：徽标显示「缓冲 24.1s」还在转）。
-   * 成因是**判据用错了量**：新位置的分片往往已经在预取缓存里，`fLoader` 同步就返回，
-   * 但 hls.js 仍要 demux + append、浏览器还要解码，这几百毫秒 **MSE 前向确实是 0**
-   * ——按 MSE 判就点亮转圈，几百毫秒后 FRAG_BUFFERED 又熄掉。那一圈不携带任何信息：
-   * 数据一个字节都不缺，缺的只是 append。
-   *
-   * 所以闸门到点后按**两级判据**决定要不要亮：
-   *  · 150ms：只有「**有效可播**（MSE + 预取缓存）也不足 2s」才亮——那才是真在等网络。
-   *  · 800ms：货在手上却还没播起来 = 反常（曾经真出过：分片一个接一个 200、缓冲恒 0、
-   *    一直转圈，pLoader 同步回调把 MediaSource 撞坏了）。这种必须让用户看见，否则
-   *    画面冻住却什么提示都没有，更难归因。
-   *
-   * 两个定时器都**在到点时自检**（播放头已前进 / 已暂停 / 已 seek 走 → 直接放弃），
-   * 因此不需要在 seeked/playing/canplaythrough 那一堆事件里逐个 cancel——漏一个就是长亮。
-   */
-  const SPINNER_SOFT_MS = 150   // 有货就先别喊
-  const SPINNER_HARD_MS = 800   // 有货却还在等 → 无条件亮
-  let spinnerSoftTimer: ReturnType<typeof setTimeout> | null = null
-  let spinnerHardTimer: ReturnType<typeof setTimeout> | null = null
-  /**
-   * FLV（尤其直播）**只认「播放头动没动」，不能拿存货秒数判**。
-   *
-   * `liveBufferLatencyChasing` 的本意就是贴着缓冲边缘播 → 前方存货天然长期不足 1s，
-   * 于是 HLS 那套「不足 2s = 在等网络」在**正常播放时也恒成立**：每一发 `waiting`
-   * 都把转圈点亮，而熄灯判据（ahead ≥ 1）又多半不成立 → 「画面在播，加载中一直闪」。
-   *
-   * 采样由 flvTick（250ms）和闸门共同推进；**必须真的观察到一次前进**才算在播，
-   * 所以起播那一刻（还没动过）返回 false，转圈照亮。
-   */
-  const FLV_STALL_MS = 700
-  let flvLastTime = -1
-  let flvLastMoveAt = 0
-  const flvAdvancing = (v: HTMLVideoElement): boolean => {
-    const now = performance.now()
-    const t = v.currentTime
-    if (flvLastTime >= 0 && Math.abs(t - flvLastTime) > 0.01) flvLastMoveAt = now
-    flvLastTime = t
-    return flvLastMoveAt > 0 && now - flvLastMoveAt < FLV_STALL_MS
-  }
-
-  /** 到点时还在等吗：暂停/正在 seek/前方已有 MSE 存货 → 都不算 */
-  const stillStalled = (): HTMLVideoElement | null => {
-    const v = videoEl.value
-    if (!v || v.paused || v.seeking) return null
-    if (isFlv.value) return flvAdvancing(v) ? null : v
-    return getAheadBuffered(v) < 2 ? v : null
-  }
-  const armBufferingGate = () => {
-    if (!spinnerSoftTimer) spinnerSoftTimer = setTimeout(() => {
-      spinnerSoftTimer = null
-      const v = stillStalled()
-      if (v && getCachedAhead(v) < 2) isBuffering.value = true   // 连预取缓存都没货 = 真在等网络
-    }, SPINNER_SOFT_MS)
-    if (!spinnerHardTimer) spinnerHardTimer = setTimeout(() => {
-      spinnerHardTimer = null
-      if (stillStalled()) isBuffering.value = true
-    }, SPINNER_HARD_MS)
-  }
-  const cancelBufferingGate = () => {
-    if (spinnerSoftTimer) { clearTimeout(spinnerSoftTimer); spinnerSoftTimer = null }
-    if (spinnerHardTimer) { clearTimeout(spinnerHardTimer); spinnerHardTimer = null }
-  }
-  /**
-   * 转圈的兜底熄灯：以「真的在播」为地面真值，不指望事件齐全。
-   *
-   * `isBuffering` 只由 playing/canplaythrough/seeked/FRAG_BUFFERED 熄，而**正播着的视频
-   * 不会再补发 `playing`** —— 任何一次漏发都会让转圈一直盖在正常播放的画面上
-   *（同 stallTracker 那条「事件之外还要位置采样兜底」的理由）。
-   * 两条路都要跑：HLS 挂在 hlsTick 里，FLV 挂在 flvTick 里。
-   */
-  const dropSpinnerIfPlaying = () => {
-    const v = videoEl.value
-    if (!v) return
-    if (isFlv.value) {
-      // 采样每拍都要做（不能只在亮着时做），否则 flvAdvancing 的基准是几秒前的旧值
-      const moving = flvAdvancing(v)
-      if (isBuffering.value && moving && !v.paused && !v.seeking && v.readyState >= 3) isBuffering.value = false
-      return
-    }
-    if (isBuffering.value && !v.paused && !v.seeking && v.readyState >= 3 && getAheadBuffered(v) >= 1) {
-      isBuffering.value = false
-    }
-  }
-
-  /**
-   * FLV 专属心跳：**只做兜底熄灯这一件事**。
-   *
-   * 不复用 HLS 那个心跳 —— 它里面全是预取/卡顿自愈/档位统计，对 FLV 一件都不适用。
-   * 不做这一拍的表现就是「画面在播，转圈一直盖着」：直播流上 `waiting` 来得很勤
-   *（`armBufferingGate` 因此点亮），而熄灯那几个事件一个都不会再来。
-   */
-  let flvTickTimer: ReturnType<typeof setInterval> | null = null
-  const startFlvTick = () => {
-    stopFlvTick()
-    flvLastTime = -1
-    flvLastMoveAt = 0
-    // 250ms 而不是 1s：这一拍既是熄灯的唯一时机、也是「播放头动没动」的采样源，
-    // 1s 一拍会让转圈在正常播放的画面上多盖将近一秒
-    flvTickTimer = setInterval(dropSpinnerIfPlaying, 250)
-  }
-  const stopFlvTick = () => {
-    if (flvTickTimer) { clearInterval(flvTickTimer); flvTickTimer = null }
-  }
+  // 转圈遮罩的延迟闸门 + FLV 兜底熄灯心跳（实现见 ./engine/spinnerGate.ts）
+  const spinnerGate = useSpinnerGate({
+    getVideoEl: () => videoEl.value,
+    isFlv,
+    isBuffering,
+    getAheadBuffered,
+    getCachedAhead,
+  })
+  const { armBufferingGate, cancelBufferingGate, dropSpinnerIfPlaying, startFlvTick, stopFlvTick } = spinnerGate
 
   // ── 实时心跳的外挂钩子 ──
   // 自愈调参环（useVideoAutoTune.selfHeal）、下一集预热（useVideoPrewarm.tick）都挂在这儿，
@@ -289,73 +170,22 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   const tickHooks: Array<() => void> = []
   const registerTickHook = (fn: () => void) => { tickHooks.push(fn) }
 
-  /**
-   * ── 网络变了（断网恢复 / 换 Wi-Fi / 切蜂窝 / 回前台发现换过网，见 engine/netWatch）──
-   *
-   * 这一刻要做四件事，少一件就是「网络明明好了，画面还一直转圈」：
-   *   ① **lane 熔断记录整份作废**：出口 IP 一变，之前那些 403/超时的结论一条都不再成立
-   *      （熔断本身还有 30s 观察期自愈，但这里能立刻恢复双通道，不用干等）；
-   *   ② **可达性结论也一起作废**：`warmProbes` 和「直连是黑洞」都是**上一个网络**测出来的，
-   *      换网之后它们不但过期，还会把本可直连的源按在代理上（或反过来）。这两份都只影响
-   *      「等多久 / 用哪条」，清掉最多是多探一轮，留着却可能整轮判错；
-   *   ③ **让 hls.js 从播放头重新开始加载**：断网期间它多半已经报过 fatal NETWORK_ERROR
-   *      停在那儿了，`startLoad()` 是唯一能把它叫起来的动作。**必须带位置**——
-   *      不带的话它按断网前的 `nextLoadPosition` 挑片，那个位置早就不是播放头了；
-   *   ④ **重开预取**：预取失败不重排队，只靠心跳补——`primePrefetch()` 立刻满上，不等下一拍。
-   *
-   * 只在真的没在播时才 `startLoad()`：正常播着的流被 startLoad 打断会白丢一次缓冲
-   * （回前台那条信号尤其要靠这个判断兜住，切走 30s 回来时缓冲往往是满的）。
-   *
-   * **一枪打不中就补枪**（`recoverShots`）：刚重连那一两秒请求常常还发不出去，
-   * 老代码在这里只 `startLoad()` 一次，打空之后就再没人管，最终仍旧落回
-   * 「重新取址 → 重探通道 → 销毁」那条慢路径。所以在恢复窗口里由心跳复查。
-   *
-   * 但**补枪必须以「一点进展都没有」为条件**：`startLoad(pos)` 会把在途的分片请求全丢掉重排，
-   * 慢源上每秒补一枪等于永远下不完第一片——那是把「恢复慢」换成「恢复不了」。
-   * 所以三道闩：至少隔 `RECOVER_SHOT_GAP_MS`、缓冲和播放头都没动过、总共不超过 4 枪。
-   */
-  let recoverShots = 0
-  let lastShotAt = 0
-  let lastShotAhead = -1
-  let lastShotTime = -1
-  /** 补枪次数上限：同一招重复十次无效就该换招（同 stallRecovery 的阶梯那条教训） */
-  const MAX_RECOVER_SHOTS = 4
-  /** 两枪之间至少隔这么久：给上一枪的请求留出真正跑完一片的时间 */
-  const RECOVER_SHOT_GAP_MS = 2000
-  const shootStartLoad = () => {
-    const v = videoEl.value
-    if (!v || !hls) return
-    // 已经播起来了 → 别打断（正常播着的流被 startLoad 打断会白丢一次缓冲）
-    if (!v.paused && v.readyState >= 3 && getAheadBuffered(v) > 0.5) return
-    recoverShots++
-    lastShotAt = Date.now()
-    lastShotAhead = getAheadBuffered(v)
-    lastShotTime = v.currentTime
-    try { hls.startLoad(v.currentTime) } catch {}
-  }
-  const onNetChanged = () => {
-    reviveLanes()
-    conn.invalidateReachCache()
-    try { clearDirectDead(new URL(videoUrl.value, location.href).hostname) } catch {}
-    if (errorMessage.value.startsWith('网络已断开')) errorMessage.value = ''
-    recoverShots = 0
-    shootStartLoad()
-    primePrefetch()
-  }
-  /** 心跳里的补枪：恢复窗口内**毫无进展**才再叫一次，见上面 recoverShots 那段 */
-  const recoverTick = () => {
-    if (!isRecovering() || recoverShots >= MAX_RECOVER_SHOTS) return
-    if (Date.now() - lastShotAt < RECOVER_SHOT_GAP_MS) return
-    const v = videoEl.value
-    if (!v) return
-    // 缓冲涨了、或播放头动了 = 上一枪正在见效，别打断它
-    if (getAheadBuffered(v) > lastShotAhead + 0.05 || Math.abs(v.currentTime - lastShotTime) > 0.05) return
-    shootStartLoad()
-  }
-  /** 断网时说一句话就够：重试逻辑那边一律等 netWatch，不在没网的时候烧额度（见 hlsErrors） */
-  const onNetworkOffline = () => {
-    if (!errorMessage.value) errorMessage.value = '网络已断开，恢复后会自动继续'
-  }
+  // ── 网络变化的恢复动作：断网恢复 / 换 Wi-Fi / 切蜂窝 / 回前台（实现见 ./engine/netRecovery.ts）──
+  const netRecovery = useNetRecovery({
+    getVideoEl: () => videoEl.value,
+    getHls: () => hls,
+    getAheadBuffered,
+    getVideoUrl: () => videoUrl.value,
+    errorMessage,
+    // 网络变了：lane 熔断记录 + 可达性结论 + 「直连是黑洞」缓存都是**上一个网络**测出来的，整份作废
+    invalidateNetworkState: () => {
+      reviveLanes()
+      conn.invalidateReachCache()
+      try { clearDirectDead(new URL(videoUrl.value, location.href).hostname) } catch {}
+    },
+    primePrefetch,
+  })
+  const { onNetChanged, recoverTick, onNetworkOffline } = netRecovery
 
   // ── 实时心跳：每秒刷新缓冲读数 + 跑闭环预取控制（不依赖 FRAG_BUFFERED，卡顿时也持续工作） ──
   /**
@@ -420,28 +250,15 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     },
   })
 
-  const updateHlsStats = () => {
-    if (!hls || !videoEl.value) return
-    const video = videoEl.value
-    playbackDiag.value = describePlaybackState(video, getStuckSegment())
-    // 掉帧只有 <video> 自己知道（解码器丢的帧不会体现在任何缓冲读数上）
-    const q = video.getVideoPlaybackQuality?.()
-    hlsStats.value = {
-      buffered: getCachedAhead(video),   // 含预取缓存的有效已缓冲，不只 MSE 的 ~60s
-      /*
-       * 档位索引三级兜底：
-       * · 只有一档时不存在「选哪档」的问题，直接就是它——不用等 currentLevel/loadLevel 落定，
-       *   刚切集、一片都还没请求时（0 线程 0 KB/s）这两个都还是 -1，会晚好几拍才亮出清晰度
-       * · `currentLevel` 只在切过档之后才有效，多档流没切过档时也是 -1
-       * · `loadLevel` 是「正在下载/已下载的档」，比 currentLevel 更早有值
-       */
-      level: describeLevel(hls.levels[
-        hls.levels.length === 1 ? 0 : hls.currentLevel >= 0 ? hls.currentLevel : hls.loadLevel
-      ]),
-      dropped: q?.droppedVideoFrames ?? 0,
-      total: q?.totalVideoFrames ?? 0,
-    }
-  }
+  // 播放统计刷新（实现见 ./engine/hlsStats.ts）
+  const { updateHlsStats } = useHlsStats({
+    getHls: () => hls,
+    getVideoEl: () => videoEl.value,
+    getCachedAhead,
+    getStuckSegment,
+    playbackDiag,
+    hlsStats,
+  })
 
   // ── 加载 / 销毁 ──
 
@@ -505,328 +322,43 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     }
   }
 
-  const loadVideo = async () => {
-    if (!videoUrl.value.trim()) return
-
-    errorMessage.value = ''
-    isLoading.value = true
-    isBuffering.value = true
-    isPlaying.value = false
-    currentTime.value = 0
-    duration.value = 0
-    bufferedPercent.value = 0
-    appliedStartPos = 0   // 非 HLS 那条路不设 startPosition，别留上一次的值
-    /**
-     * 「定位类起播」= 页面上已经有播放器了（切集 / 重载 / 改配置），起播门槛走「够播 2 秒」那一档。
-     * 本次会话第一发（`isVideoLoaded` 还是 false）算冷启动，仍要攒够 6 秒——那时用户刚打开页面，
-     * 多等一会儿攒厚一点划算；而切集时画面是停着的，每多一秒都在盯转圈。
-     * 必须在下面把 isVideoLoaded 置真**之前**读。
-     */
-    isRelocating = isVideoLoaded.value
-
-    const url = videoUrl.value.trim()
-    const nextIsHls = conn.isHlsUrl(url)
-    const nextIsFlv = !nextIsHls && isFlvUrl(url)
-    /**
-     * **HLS → HLS 时复用同一个 `<video>` 元素**，不再 `videoKey++`。
-     *
-     * 重建元素要付四笔账：等一次 `nextTick` + 50ms（新元素挂载）；解码器被卸掉重建；
-     * 刚发出的 `play()` 撞上 attach 变成 `AbortError`、再等 400ms×n 重试；
-     * 以及**画面立刻变黑**——切集体感「慢」有一半来自这一下黑屏，跟真实耗时无关。
-     * 换成复用之后，上一集最后一帧会留在屏幕上直到新流出画面。
-     *
-     * 只有「HLS ↔ MP4 互转」才必须重建：原生播放要 `src`，而 MSE 那套挂在同一个元素上，
-     * 两种模式的内部状态（error / networkState / 已 append 的 buffer）混在一起清不干净。
-     * `videoTransform` 也不再被重建冲掉（见 forceRecomposite）。
-     */
-    const reuseEl = !!videoEl.value && isVideoLoaded.value && nextIsHls && isHls.value
-    /**
-     * 画中画接力**第一段**，必须赶在下面 `destroyHls` / `removeAttribute('src')` 之前：
-     * 那两步一执行，Chrome 就把 `document.pictureInPictureElement` 清空（小窗还开着但已经没主），
-     * 「已有元素在画中画里 → 申请免用户激活」那条豁免随之消失，播完自动切集就再也开不回来。
-     * 详见 engine/pipHandoff.ts。
-     */
-    const wasPiP = !!videoEl.value && document.pictureInPictureElement === videoEl.value
-    const pipHeld = wasPiP ? await holdPiP('正在切换到下一集…') : false
-    if (!reuseEl) videoKey.value++
-    isVideoLoaded.value = true
-    destroyHls()
-    // 复用时元素上还留着上一条流的痕迹（MSE 的 blob src、error、已缓冲区间）。
-    // hls.js 的 attachMedia 会重设 srcObject/src，但先手动摘掉更稳：
-    // 残留的 src 会让 <video> 在 attach 之前先对旧地址发一次请求（表现是控制台多一条取消的请求）。
-    if (reuseEl && videoEl.value) {
-      videoEl.value.removeAttribute('src')
-      try { videoEl.value.load() } catch {}
-    }
-
-    // 按视频切换缓存：同一视频（重播/点回去）保留内存缓存，换了视频才清空旧的
-    useCacheForVideo(url)
-    // 可达性探测可能阻塞（首访该 host 时约 0.5-3s）——必须在 startLoadTimeout 之前 await，
-    // 否则探测耗时会被算进加载超时，慢源直接被误判成「加载超时」。
-    await conn.applyStrategy(url)
-    // 探测期间用户切了地址 → 放弃本次加载。占位画面要一起收掉，否则小窗永远停在「正在切换…」
-    // （新的那一发 loadVideo 会自己重新接力）
-    if (videoUrl.value.trim() !== url) { if (pipHeld) releasePiPHolder(); return }
-
-    startLoadTimeout()
-    isHls.value = nextIsHls
-    isFlv.value = nextIsFlv
-
-    console.log('开始加载视频:', url, '是否HLS:', isHls.value,
-      isFlv.value ? '（FLV）' : '', '使用代理:', conn.useProxy.value)
-
-    try {
-      if (isHls.value) await loadHlsVideo(url, reuseEl)
-      else if (isFlv.value) await loadFlvVideo(url)
-      else await loadNativeVideo(url)
-      // 挂在这里而不是更早：src 刚设上（重建元素那条路新元素也已挂好），元信息事件还没可能派发，
-      // 一次都不会漏
-      if (pipHeld) armPiPRestore()
-    } catch (e) {
-      console.error('加载视频失败:', e)
-      if (pipHeld) releasePiPHolder()   // 这一集起不来了，别让小窗一直停在「正在切换…」
-      errorMessage.value = '加载视频失败: ' + (e instanceof Error ? e.message : String(e))
-      isLoading.value = false
-      isBuffering.value = false
-      isVideoLoaded.value = false
-    }
-  }
-
-  const loadHlsVideo = async (url: string, reuseEl = false) => {
-    if (!Hls) Hls = (await import('hls.js')).default
-    const HlsLib = Hls   // 取成局部常量，闭包里就不用到处写 Hls!
-
-    isVideoLoaded.value = true
-    // 只有真重建了元素才需要等它挂载。复用时元素一直在 DOM 里，这 50ms 是白等——
-    // 而它落在切集的关键路径上，每切一集都赔一次。
-    // `!videoEl.value` 那半边是兜底：判定「可复用」是在 await 可达性探测**之前**做的，
-    // 那期间出错路径可能把 isVideoLoaded 关掉、Stage 连同 <video> 一起卸掉，
-    // 这时候还是得等它挂回来，而不是当场抛「视频元素未初始化」。
-    if (!reuseEl || !videoEl.value) {
-      await nextTick()
-      await new Promise(resolve => setTimeout(resolve, 50))
-    }
-
-    if (!HlsLib.isSupported()) {
-      // 尝试原生支持（Safari）
-      if (videoEl.value?.canPlayType('application/vnd.apple.mpegurl')) {
-        await loadNativeVideo(url)
-        return
-      }
-      errorMessage.value = '您的浏览器不支持 HLS 播放'
-      isLoading.value = false
-      return
-    }
-    if (!videoEl.value) throw new Error('视频元素未初始化')
-
-    const finalUrl = conn.getProxyUrl(url)
-    console.log('加载 HLS 视频:', finalUrl)
-
-    /**
-     * 起播位置：直接告诉 hls.js 从这里起播，避免它先从头猛下一堆用不上的分片、
-     * 等 onLoadedMetadata 里再 seek 过去（那样等于白下了一遍开头）。
-     *
-     * **跳过片头也走这条路**。原来 startPosition 只认进度记录，`skipIntro` 是在
-     * onLoadedMetadata 里手动 `currentTime = skipIntro` 实现的——于是开着「跳过片头 90s」时
-     * hls.js 从 0 开始下，下到一半被 seek 打断，再从 90s 重下一遍。片头那段全是白下的流量，
-     * 起播还平白多等一轮。两者语义本来就一样：都是「从第 N 秒开始播」。
-     * 进度优先于片头（看到一半回来的人不该被扔回片头之后）。
-     *
-     * 进度按稳定键存（按需取址的站点真实地址每次都变），不能用 url 查。
-     */
-    const resumeTime = deps.getSavedProgress(deps.progressKey())
-    const startPos = resumeTime > 0 ? resumeTime : (media.skipIntro.value > 0 ? media.skipIntro.value : 0)
-    pendingStartPos = startPos
-    appliedStartPos = startPos
-    startAnchorActive = startPos > 0
-
-    hls = new HlsLib(buildHlsConfig({
-      tuning: hlsConfig.value,
-      startPos,
-      fLoader: createHlsFragLoader() as any,
-      // 清单加载器必须包在 hls.js 默认 loader 之上（miss 时要走它原来的那套重试/超时）
-      pLoader: createHlsPlaylistLoader((HlsLib as any).DefaultConfig.loader) as any,
-      hwDecode: media.hwDecode.value,
-    }))
-
-    /**
-     * 字幕默认不出。hls.js 的 `subtitleDisplay` 默认为真，清单里带字幕轨时它会自动选一条并渲染，
-     * 于是画面上凭空多出一层字幕——而本播放器压根没有字幕开关，用户只能问「这怎么关」（实测被问到）。
-     * 源站带的字幕多半还硬编码在画面里，这一层纯属重叠。
-     * 真要字幕就用浏览器自带的字幕菜单，不在这里造一套 UI。
-     * 注意它是**实例属性**不是构造配置，写进 new Hls({...}) 里 tsc 直接报未知属性。
-     */
-    hls.subtitleDisplay = false
-
-    /**
-     * **事件必须在 loadSource 之前登记**（hls.js 官方也是这么建议的）。
-     *
-     * 原来是「loadSource → attachMedia → 然后才 hls.on(...)」，靠的是「网络请求总是异步的、
-     * 事件不可能在这几行之内就派发」。而 pLoader 命中探测下载好的清单时是**同步**回调的，
-     * 于是 MANIFEST_LOADED/MANIFEST_PARSED 在 `loadSource()` 里就派发完了——
-     * 那时还没有人订阅，`autoPlayHook` 一辈子不会被调，画面永远停在「加载中…」（踩过）。
-     */
-    hls.on(HlsLib.Events.MANIFEST_PARSED, (_, data) => {
-      /*
-       * **画质档要连分辨率一起打出来**（一行字符串，不是对象——控制台默认把对象折成 `{…}`）。
-       * 「档数 5」这个读数分不清一件要紧的事：**各档的宽高比一致吗**。
-       * 实测遇到同一条流里 1920x800（2.40:1 裁过的）和 1920x1080（16:9 烧了黑边的）并存，
-       * ABR 一换档，`<video>` 的固有比例就变 → 画中画小窗被浏览器跟着改尺寸（且只增不减，
-       * 缩小方向浏览器不给）。没有这一行的话，现场只能看到「小窗自己越变越大」。
-       */
-      const levelBrief = data.levels
-        .map((l: any, i: number) => `${i}:${l.width || '?'}x${l.height || '?'}`
-          + `${l.width && l.height ? `(${(l.width / l.height).toFixed(2)})` : ''}`)
-        .join(' ')
-      console.log(`HLS manifest 解析完成，画质数: ${data.levels.length} → ${levelBrief}`)
-      markDataReceived()
-      isLoading.value = false
-      startPrefetchCleanup()  // 启动周期清理过期缓存
-      if (videoEl.value) {
-        videoEl.value.playbackRate = playbackRate.value
-        videoEl.value.volume = volume.value
-        videoEl.value.muted = isMuted.value
-      }
-      autoPlayHook?.()
-    })
-
-    // playlist（分片列表）就绪 → 立刻并行预热前若干分片 + 启动实时心跳
-    hls.on(HlsLib.Events.LEVEL_LOADED, () => {
-      primePrefetch()
-      startHlsTick()
-    })
-
-    // 致命错误处理（实现见 ./engine/hlsErrors.ts）：网络重试 → 重新取址 → 重探；媒体错误恢复带上限
-    const { onHlsError, resetErrorCounters, noteLoadOk } = useHlsErrorHandler({
-      HlsLib,
-      getHls: () => hls,
-      setError: (msg: string) => { errorMessage.value = msg; return msg },
-      clearIfUnchanged: (msg: string) => { if (errorMessage.value === msg) errorMessage.value = '' },
-      failMessage,
-      giveUp: () => {
-        isLoading.value = false
-        isBuffering.value = false
-        isVideoLoaded.value = false
-        destroyHls()
-      },
-      refetchUrl: () => deps.refetchUrl(),
-      escalateStrategy: () => conn.escalateStrategyAndReload(),
-      onBufferStalled: stallRecovery.onBufferStalled,
-    })
-    resetErrorCounters()
-    hls.on(HlsLib.Events.ERROR, (_, data) => onHlsError(data))
-
-    // 分片加载完成 → 更新统计 + 触发自适应预取
-    hls.on(HlsLib.Events.FRAG_BUFFERED, (_, data) => {
-      updateHlsStats()
-      cancelBufferingGate()
-      isBuffering.value = false
-      // 成功一片就把网络重试额度还回去：额度的语义是「连续失败」，不是「本次播放累计」
-      // （见 hlsErrors.noteLoadOk——不还的话看久了任何一次抖动都直接走到销毁）
-      noteLoadOk()
-      // sn 在 init segment 上是字符串 'initSegment'，那种片没有后续可预取，跳过
-      const sn = data?.frag?.sn
-      if (typeof sn === 'number') triggerAdaptivePrefetch(sn)
-    })
-
-    // 分片加载中：不再当场点亮转圈，交给延迟闸门按「有效可播」判（见 armBufferingGate）。
-    // 原来这里是 `buffered.end(最后一段) - currentTime < 2` 就亮，两处都错：判据该看播放头
-    // 所在缓冲段的前向（拖进度后最后一段常整段落在播放头后面，两者差十几秒），且不该立刻亮
-    hls.on(HlsLib.Events.FRAG_LOADING, () => armBufferingGate())
-
-    hls.on(HlsLib.Events.LEVEL_SWITCHED, (_, data: any) => {
-      updateHlsStats()
-      // 换档要留一行痕迹：`<video>` 的固有比例跟着当前档走，比例一变画中画小窗就被浏览器改尺寸。
-      // 没这行的话，「小窗自己越变越大」和「流里拼了不同分辨率的片段」这两件事在现场分不开
-      const l: any = hls?.levels?.[data?.level]
-      if (l?.width && l?.height) console.log(`[level] 切到档 ${data.level}：${l.width}x${l.height} = ${(l.width / l.height).toFixed(3)}`)
-    })
-
-    // 全部事件登记完毕，这才开始加载（见上面 MANIFEST_PARSED 处的说明）
-    /**
-     * **先 attachMedia 再 loadSource**。顺序反了在 pLoader 命中时会整个播不起来：
-     * 那一发清单是同步返回的，于是 `loadSource()` 一行之内就把清单解析完并开始拉分片，
-     * 而此时 `<video>` 还没 attach、MediaSource 压根不存在——分片下下来无处可 append，
-     * 表现是「分片一个接一个 200，缓冲恒 0，画面一直转圈」（踩过）。
-     * 这也是 hls.js 文档里给的标准顺序，异步那条路上同样更稳。
-     */
-    hls.attachMedia(videoEl.value)
-    hls.loadSource(finalUrl)
-  }
-
-  /**
-   * FLV：交给 mpegts.js 解复用喂 MSE（浏览器不认这个容器，`<video src>` 一定放不出来）。
-   *
-   * **先直连，代理只作退路**。走了 MSE 就意味着数据是我们自己 fetch 的 → 跨源必须有 CORS 头，
-   * 所以这条路上确实可能要代理；但**直播 CDN 并不是都不给** —— 抖音那条实测回
-   * `Access-Control-Allow-Origin: *`（`Timing-Allow-Origin: *` 也给了），直连完全可行。
-   * 而**直播尤其不该白走一趟代理**：那是一条长连接，全程要占着 Worker 转发，
-   * 平白多一跳延迟、还把首帧和断流重连都压在我们自己的出口上。
-   * 所以顺序交给 `createFlvStream` 逐条试：**没出过数据就换下一条，出过就粘住**。
-   * 混合内容那种（https 页面拉 http 流）直连必被浏览器拦，直接跳过不试。
-   */
-  const loadFlvVideo = async (url: string) => {
-    const proxied = conn.getProxyUrl(url)
-    // getProxyUrl 只在注入了 Origin/Referer 时才代理 → 补一发 noref=1 兜住「什么头都没填」的常态
-    const viaProxy = proxied === url ? conn.getProxyPassthroughUrl(url) : proxied
-    const mixed = url.startsWith('http:') && location.protocol === 'https:'
-    const channels = mixed
-      ? [{ label: '代理', url: viaProxy }]
-      : [{ label: '直连', url }, { label: '代理', url: viaProxy }]
-    isVideoLoaded.value = true
-    // 元素是刚 videoKey++ 重建的，等它挂上来（同 loadNativeVideo）
-    await nextTick()
-    await new Promise(resolve => setTimeout(resolve, 100))
-    if (!videoEl.value) throw new Error('视频元素未初始化，请刷新页面重试')
-    startFlvTick()
-    flv = await createFlvStream(videoEl.value, channels, url, msg => {
-      // 期间可能已经切走了，别把上一条流的错误盖到新的上面
-      if (videoUrl.value.trim() !== url) return
-      errorMessage.value = msg
-      isLoading.value = false
-      isBuffering.value = false
-    })
-  }
-
-  const loadNativeVideo = async (url: string) => {
-    const finalUrl = conn.getProxyUrl(url)
-    console.log('加载原生视频:', finalUrl)
-    isVideoLoaded.value = true
-    // 等待 DOM 更新（video 元素重新创建需要更多时间）
-    await nextTick()
-    await new Promise(resolve => setTimeout(resolve, 100))
-    if (!videoEl.value) throw new Error('视频元素未初始化，请刷新页面重试')
-    videoEl.value.src = finalUrl
-    videoEl.value.load()
-
-    /**
-     * 顺手自己读一次真实时长与平均码率（约 2.5KB 两发小请求，见 engine/mp4Duration.ts）。
-     *
-     * 安卓 Chrome 在这类整片 MP4 上**读不出总时长** → 进度条钉在最左边、拖不动
-     *（实测 `01:04 / 00:00`），而时长明明就写在 `moov/mvhd` 里。
-     * 不 await：它跟起播没有先后关系，读到了再补上去。
-     */
-    media.mp4ProbedDuration.value = 0
-    media.mp4AvgMbps.value = 0
-    media.mp4Kbps.value = 0
-    void probeMp4Head(finalUrl).then(({ durationSecs, mediaBytes }) => {
-      // 期间可能已经切集了，别把上一集的读数写到这一集头上
-      if (!durationSecs || videoUrl.value.trim() !== url) return
-      media.mp4ProbedDuration.value = durationSecs
-      media.mp4AvgMbps.value = mediaBytes
-        ? Math.round((mediaBytes * 8 / durationSecs / 1e6) * 100) / 100
-        : 0
-      const own = videoEl.value?.duration
-      const browserKnows = typeof own === 'number' && Number.isFinite(own) && own > 0
-      console.log(`[mp4] 自读时长 ${durationSecs.toFixed(1)}s / 码率 ${media.mp4AvgMbps.value} Mbps`
-        + `（浏览器${browserKnows ? `读到 ${own!.toFixed(1)}s` : '没读出来 → 用我们这份'}）`)
-      if (!browserKnows) duration.value = durationSecs
-    })
-  }
 
   // MANIFEST_PARSED 之后要触发的起播预缓冲，由 useVideoEvents 登记（避免引擎依赖它）
   let autoPlayHook: (() => void) | null = null
   const registerAutoPlayHook = (fn: () => void) => { autoPlayHook = fn }
+
+  // ── 视频装载：HLS / FLV / 原生 MP4 三条路（实现见 ./engine/videoLoader.ts）──
+  const loader = useVideoLoader({
+    media,
+    conn,
+    getSavedProgress: deps.getSavedProgress,
+    progressKey: deps.progressKey,
+    refetchUrl: () => deps.refetchUrl(),
+    destroyHls,
+    setHls: (h) => { hls = h },
+    setFlv: (f) => { flv = f },
+    armPiPRestore,
+    useCacheForVideo,
+    startLoadTimeout,
+    markDataReceived,
+    startPrefetchCleanup,
+    primePrefetch,
+    startHlsTick,
+    startFlvTick,
+    updateHlsStats,
+    cancelBufferingGate,
+    armBufferingGate,
+    triggerAdaptivePrefetch,
+    failMessage,
+    createHlsFragLoader,
+    createHlsPlaylistLoader,
+    onBufferStalled: stallRecovery.onBufferStalled,
+    getAutoPlayHook: () => autoPlayHook,
+    beginAnchor,
+    setAppliedStartPos,
+    setRelocating,
+  })
+  const loadVideo = loader.loadVideo
 
   /** 「应用配置」：重载并回到原播放位置 */
   const applyHlsConfig = async () => {

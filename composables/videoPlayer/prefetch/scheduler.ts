@@ -296,10 +296,9 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
     fillPrefetch(count)
   }
 
-  /** 换视频/CDN 时重置调度状态（在途计时表清空，下次 tick 重新起算自动清理）。 */
+  /** 换视频/CDN 时重置调度状态（只清在途计时表；每小时自动清理的计时跨流保留，同原实现）。 */
   const reset = () => {
     segInflightStart.clear()
-    lastAutoPurge = 0
   }
 
   return {
