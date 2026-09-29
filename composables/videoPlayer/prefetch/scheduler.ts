@@ -33,7 +33,7 @@ export interface PrefetchSchedulerDeps {
 export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
   const { getHls, getVideoEl, cache, bw, lanes, strategy, runtime, anchorTime, getAheadBuffered, getCachedAhead } = deps
   const { getAdaptivePrefetchCount, effectivePrefetchTarget, updateHealthZone } = strategy
-  const { getLaneCount, acquireLane, releaseLane, markLaneOk, markLaneFail } = lanes
+  const { getLaneCount, acquireLane, releaseLane, markLaneOk, markLaneFail, getInflightTotal } = lanes
   const { sampleSpeed, sampleBitrate } = bw
 
   const {
@@ -100,7 +100,7 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
       const aStart = performance.now()
       const { lane, laneUrl, laneCount } = acquireLane(url)   // 直连/代理分流：取在途最少的 lane
       segInflightStart.set(url, aStart)            // 计时：登记在途（重试则刷新起点）
-      const conc = segPrefetching.size             // 采样时的在途并发数，供聚合可并行探针分档
+      const conc = getInflightTotal()           // 采样时的在途总数（预取 + 关键片），供聚合可并行探针分档
       return fetch(laneUrl, { signal: ctrl.signal, referrerPolicy: 'no-referrer' })
         .then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error(`HTTP ${r.status}`)))
         .then(buf => { clearTimeout(timer); releaseLane(lane); markLaneOk(lane); sampleSpeed(buf.byteLength, performance.now() - aStart, conc, aStart); return buf })
@@ -202,6 +202,7 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
     if (countOverride === undefined) {
       const mseAhead = getAheadBuffered(video)
       const cachedAhead = getCachedAhead(video)
+      updateHealthZone(mseAhead, cachedAhead)   // 与 tick/trigger 一致：现算读数就把健康区刷新，别滞后一拍
       count = capAtTarget(cachedAhead, getAdaptivePrefetchCount(cachedAhead))
       writePrefetchInfo(mseAhead, count)
     } else {

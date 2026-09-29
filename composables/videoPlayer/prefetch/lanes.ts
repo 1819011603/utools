@@ -55,6 +55,11 @@ export interface LaneControl {
   reviveLanes: () => void
   /** 当前流的**可用** lane 数（排除熔断的），用于放宽并发上限 */
   getLaneCount: (sampleUrl?: string) => number
+  /**
+   * 此刻真正在途的分片请求总数（预取 + 关键片都在 `laneInflight` 里）。
+   * 带宽采样统一用它当「并发」——两个路径各自用「预取线程数」「竞速条数」会污染分档账本。
+   */
+  getInflightTotal: () => number
 }
 
 export function useLaneControl(getLaneUrls: (url: string) => string[]): LaneControl {
@@ -144,10 +149,17 @@ export function useLaneControl(getLaneUrls: (url: string) => string[]): LaneCont
     if ((laneInflight[lane] ?? 0) > 0) laneInflight[lane]--
   }
 
+  /** 此刻真正在途的分片请求数（预取 + 关键片都在 laneInflight 里）——带宽采样统一用它当「并发」。 */
+  const getInflightTotal = (): number => {
+    let n = 0
+    for (const v of laneInflight) n += v ?? 0
+    return n
+  }
+
   // 必须排除熔断掉的 lane：否则直连 lane 已经每发必 403，并发上限还按两个 origin 放到 12，
   // 等于让 6 条连接去挤同一个 origin，浏览器排队反而更慢。
   const getLaneCount = (sampleUrl?: string): number =>
     sampleUrl ? Math.max(1, getLaneUrls(sampleUrl).filter((_, i) => laneAlive(i)).length) : 1
 
-  return { laneDead, acquireLane, releaseLane, markLaneOk, markLaneFail, resetLanes, reviveLanes, getLaneCount }
+  return { laneDead, acquireLane, releaseLane, markLaneOk, markLaneFail, resetLanes, reviveLanes, getLaneCount, getInflightTotal }
 }

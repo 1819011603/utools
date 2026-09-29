@@ -46,3 +46,29 @@ describe('acquireLane / preferDirect（关键片）', () => {
     expect(lc.acquireLane('u', true).lane).toBe(0)
   })
 })
+
+describe('getInflightTotal：统一的并发口径（预取 + 关键片共用一份）', () => {
+  it('acquire +1、release −1', () => {
+    const lc = dual()
+    expect(lc.getInflightTotal()).toBe(0)
+    lc.acquireLane('u')   // lane 0
+    lc.acquireLane('u')   // lane 1
+    expect(lc.getInflightTotal()).toBe(2)
+    lc.releaseLane(0)
+    expect(lc.getInflightTotal()).toBe(1)
+  })
+
+  it('两条 origin 的在途都算进总数', () => {
+    const lc = dual()
+    for (let i = 0; i < MAX_CONN; i++) lc.acquireLane('u', true)   // 6 条直连
+    lc.acquireLane('u')                                            // 溢出到代理
+    expect(lc.getInflightTotal()).toBe(MAX_CONN + 1)
+  })
+
+  it('resetLanes 归零', () => {
+    const lc = dual()
+    lc.acquireLane('u'); lc.acquireLane('u')
+    lc.resetLanes()
+    expect(lc.getInflightTotal()).toBe(0)
+  })
+})
