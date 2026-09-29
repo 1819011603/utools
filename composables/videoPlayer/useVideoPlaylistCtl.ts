@@ -49,6 +49,18 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
   const progressKey = (): string => playlist.value[currentIndex.value] || videoUrl.value
 
   /**
+   * 媒体元素**当前真装着**的那一集，存进度一律按它。
+   *
+   * `currentIndex` 是乐观的：切集一开始就指向目标集，而取址 + 建流要好几秒。这几秒里旧 `<video>`
+   * 还在原地播、`timeupdate` 照常每秒来四次，而「每 5 秒存一次进度」正挂在它上面——若不分开，
+   * **上一集的秒数**会被写进**下一集的**键里：下次进这一集就从上一集的位置起播，用户看到的就是
+   * 「手动点下一集，进度还是上一集的」；自动下一集时更会被那个位置当场判成片尾再弹走，看着像
+   * 「切换不了下一集」。`playingIndex` 只在媒体真正换流的前一刻更新（见 doPlayByIndex）。
+   */
+  let playingIndex = 0
+  const playingKey = (): string => playlist.value[playingIndex] || videoUrl.value
+
+  /**
    * 当前这一集的显示名。理由与 progressKey 完全相同——集名也是按「列表里那条地址」存的，
    * 而按需取址时 videoUrl 是现取的真实地址（每次都不同），拿它去查 playlistNames 必然落空，
    * 退化成显示 `ec54d9af…m3u8` 这种文件名，可播放列表里同一集却好端端写着「1」（踩过）。
@@ -89,8 +101,8 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
       pageUrl: src?.pageUrl,
       line: src?.line,
       lineName: src?.lineName,
-      index: currentIndex.value,
-      epName: handoff.getVideoName(playlist.value[currentIndex.value] || '', currentIndex.value),
+      index: playingIndex,
+      epName: handoff.getVideoName(playlist.value[playingIndex] || '', playingIndex),
       total: playlist.value.length,
       cover: handoff.playlistCover.value || undefined,
       cat: handoff.playlistCat.value || undefined,
@@ -174,7 +186,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
   })
 
   const saveCurrentProgress = () => {
-    const key = progressKey()
+    const key = playingKey()
     if (!key || media.currentTime.value <= 0) return   // 还没播就别动已有记录（切集时会经过这里）
     const finished = media.currentTime.value >= finishedThreshold()
     recordWatchProgress(finished)
@@ -271,6 +283,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
     playlist.value = cleaned
     const from = typeof startIndex === 'number' && startIndex >= 0 && startIndex < cleaned.length ? startIndex : 0
     currentIndex.value = from
+    playingIndex = from   // 整份列表换了，旧集下标作废（存进度按 playingIndex，见其说明）
 
     deps.onDirty()
     await playByIndex(from)
@@ -373,6 +386,11 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
     videoUrl.value = realUrl
     media.hasSkippedIntro.value = false
 
+    // 媒体这一刻起属于这一集了：**必须在 loadVideo 之前**更新 playingIndex，
+    // 否则上面那段 `await resolveLazyUrl` 的窗口里，旧集的 timeupdate 会把旧秒数存进新键
+    //（反之放到 loadVideo 之后，新集刚起播的那几秒又会被存进旧键）。见 playingIndex 说明
+    playingIndex = index
+
     deps.onDirty()
     deps.syncUrl()   // 地址栏跟着当前集数走，随时可复制分享
 
@@ -458,6 +476,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
       const byName = epName ? names.indexOf(epName) : -1
       const from = byName >= 0 ? byName : (index >= 0 && index < urls.length ? index : 0)
       currentIndex.value = from
+      playingIndex = from   // 整份列表换了，旧集下标作废（存进度按 playingIndex，见其说明）
       // 起播位置交给 savedProgress，下面 playByIndex → loadVideo 那条路会把它落成
       // hls.js 的 startPosition（见 startTime 参数上的说明）。
       // 只在**比已有记录更靠后**时写：本机看过的进度多半比链接里带的那个新，
@@ -533,6 +552,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
     handoff.clearHandoffMeta()
     clearLazyUrlCache()
     currentIndex.value = 0
+    playingIndex = 0
     videoUrlInput.value = ''
     deps.syncUrl()
   }
@@ -613,6 +633,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
         lineName: result.lines[result.activeLineIndex]?.name || src.lineName,
       }
       currentIndex.value = nextIndex
+      playingIndex = nextIndex   // 列表换了，旧集下标作废（存进度按 playingIndex，见其说明）
       lastRefreshAt.value = Date.now()
       deps.onDirty()
       deps.syncUrl()

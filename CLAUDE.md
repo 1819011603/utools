@@ -500,6 +500,11 @@ H.264/AAC 字节原样搬容器，**不重编码**，画质无损、几乎不吃
 - **取址失败必须把 `currentIndex` 退回去**，否则「没跳过去」和「跳了两集」会连着来
 - **进度记忆不能记进片尾区**（越过就删记录），否则恢复进度后当场被弹走，**这集永远看不成**
 - **进度按 URL 存** → `progressKey()` 取 `playlist[currentIndex]`（按需取址时 `videoUrl` 是现签的）
+- **存进度必须认「媒体元素真装着的那一集」`playingIndex`，不能用乐观的 `currentIndex`**：切集一开始
+  `currentIndex` 就指向目标集，而取址/建流要几秒，这几秒里旧 `<video>` 还在播、`timeupdate` 照常来，
+  5 秒一次的防抖存进度会把**上一集的秒数写进下一集的键**（踩过：手动点下一集进度还是上一集的；
+  自动下一集则被那个位置当场判成片尾再弹走，看着像「切换不了下一集」）。`playingIndex` 在 `loadVideo`
+  前一刻更新，`progressKey()`（恢复用）仍按 `currentIndex`；防抖存进度另加 `!isSwitching` 兜底
 - **「现在是第几集」要一眼看得到**（画面下方一枚实色徽标）；选集面板 `scrollIntoView({ block: 'nearest' })`
   **必须用 ResizeObserver 不能用 IntersectionObserver**（`v-show` 折叠时是空操作，展开没有事件可听，IO 又要等进视口）
 - **跨天续看靠 `useWatchHistory`（按剧名记一条）**，解析页和播放器**两处都要有入口**；三条闭嘴规则：

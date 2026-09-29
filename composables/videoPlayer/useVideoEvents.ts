@@ -248,7 +248,9 @@ export function useVideoEvents(deps: VideoEventsDeps) {
     // 每 5 秒保存一次进度（防抖）
     if (!progressSaveTimer) {
       progressSaveTimer = setTimeout(() => {
-        playlist.saveCurrentProgress()
+        // 切集途中旧 `<video>` 还在原地播，此刻读到的秒数属于**上一集**，不能按新集数落库
+        //（playByIndex 开头已经就地把上一集存过一次了）。见 useVideoPlaylistCtl 的 playingIndex
+        if (!playlist.isSwitching.value) playlist.saveCurrentProgress()
         progressSaveTimer = null
       }, 5000)
     }
