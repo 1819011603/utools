@@ -123,7 +123,9 @@
   所以并成三个信号：`online`/`offline` + `navigator.connection` 的 `change`（**只认 `type`/`effectiveType` 变了**，
   `downlink`/`rtt` 一直在抖）+ 回前台（后台期间 `change` 会被吞）。对外只有「有没有网」和
   **「刚刚变过没有」（`isRecovering()`，8s 窗口）**：窗口内 fatal 网络错误**不计额度、快退重试 300/600/1200ms、
-  不进重新取址与重探**，`hedgeMs` 对折、换连接间隔 500→200ms，两档加载闹钟各让路一次。
+  不进重新取址与重探**（三档退完仍在窗口内就按 1200ms 接着试——曾经退完就回常态计额度，
+  约 5s 便进了重新取址，正落在换网恢复完成前一刻），`hedgeMs` 对折、换连接间隔 500→200ms，两档加载闹钟各让路一次。
+  **所有 `startLoad` 都要带播放头位置**（`hlsErrors.restartLoad`）：fatal 后 hls.js 的 `lastCurrentTime` 停在出错那一刻。
   **不做主动 ping**——`startLoad()` 本身就是最好的探针
 - **网络变了要做的事**：作废熔断 → 作废可达性结论（`invalidateReachCache` + `clearDirectDead`，它们是**上一个网络**
   测出来的）→ `startLoad(currentTime)`（**只在没在播时**，且**必须带位置**：不带就按断网前的 `nextLoadPosition` 挑片）
@@ -212,6 +214,22 @@
 - **自动最佳倍速**：上限 `autoRateCap = max(2, desiredRate)`；`bufferRich` 时免掉「连续流畅 20s」（否则提速被锁死）；
   **算出目标一次到位不设幅度上限**（爬台阶要 200 秒，用户会认定没生效），节流交给惰性期。
   超快倍速 3.5~5x 默认关（**4x 往上多数浏览器直接静音**，是浏览器硬规则）
+
+### 异常场景怎么复现（Chrome DevTools，`npm run dev`）
+
+先打开「统计」面板看 `线程 / 单条 / 饱和 / 健康区`，控制台过滤 `[net]` `[lane]` `HLS 错误`。
+
+| 场景 | 复现 | 该看到什么 |
+|---|---|---|
+| 慢源 / 卡顿 | Network → Throttling 自定义档（如 下行 300kbps、RTT 400ms），**别用 Offline** | 线程先 2~3 条再一档一档爬；卡过之后分摊型收到 3 条、真慢型地板抬到饱和并发 |
+| 某一片卡死 | Network 面板右键一片 `.ts` → Block request URL | 关键片对冲竞速 → `skipMs` 到点跳过这一片，不整段冻住 |
+| 真断网再恢复 | Throttling 选 Offline 播 10s → 切回 No throttling | 「网络已断开」不烧重试额度；恢复后 `[net] online` → 从**播放头**续拉，不重取址 |
+| **换网（`onLine` 全程为 true）** | ① Network → Block request **domain**（屏蔽分片的 CDN 域名，请求失败但不离线）撑 3~5s ② 取消屏蔽 ③ 控制台执行 `__netSim()` | `[net] 网络已变化（手动模拟换网）` → 熔断作废、补枪最多 4 次；**8s 窗口内不出现「正在重新获取播放地址」** |
+| 后台 / 回前台 | 切到别的标签页 30s 再回来 | 回前台补一拍心跳、清已播分片，不回填成假卡顿 |
+
+`__netSim` 只在 dev 挂（`engine/netWatch.ts`）：DevTools 的 Offline 只会触发 `online`/`offline`，
+造不出「换网」这类只有 `connection.change` 的信号。Safari / iOS 没有 `navigator.connection`，
+真机上换网只能靠 `online` 或回前台那两路，退化成 fatal 之后常态重试。
 
 ### 内存（`useSegmentCache.ts`）
 

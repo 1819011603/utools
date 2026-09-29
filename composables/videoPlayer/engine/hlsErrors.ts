@@ -11,6 +11,7 @@
  *（典型：源站已被 Cloudflare 下线，换哪条通道都一样）。更要紧的是**它得留在页面上**——
  * toast 会自己消失，用户回过神来想看原因时只剩一句猜的（踩过：「提醒一下就没了」）。
  */
+import { ref } from 'vue'
 import { isOffline, isRecovering, waitForNet } from './netWatch'
 
 export const failMessageOf = (verdict: { severity: string; title: string; detail: string }, fallback: string): string =>
@@ -93,8 +94,18 @@ export function useHlsErrorHandler(deps: HlsErrorDeps) {
     giveUp()
   }
 
+  /**
+   * 从播放头重新开始加载。**必须带位置**（同 netRecovery 那条）：fatal 之后 hls.js 停了 tick，
+   * 它记的 `lastCurrentTime` 就停在出错那一刻；而断网期间画面还在吃手上的缓冲往前播，
+   * 裸 `startLoad()` 会从那个旧位置挑片，恢复的第一拍白下已经播过的东西。
+   */
+  const restartLoad = () => {
+    const hls = getHls()
+    const t = hls?.media?.currentTime
+    hls?.startLoad(typeof t === 'number' && t > 0 ? t : -1)
+  }
   /** 具名（引用稳定）→ `waitForNet` 的幂等去重才起作用：断网期间每秒复发的错误只挂一个等待者 */
-  const resumeAfterNet = () => { getHls()?.startLoad() }
+  const resumeAfterNet = restartLoad
 
   const onHlsError = (data: any) => {
     console.warn('HLS 错误:', data.type, data.details, 'fatal:', data.fatal)
@@ -131,16 +142,19 @@ export function useHlsErrorHandler(deps: HlsErrorDeps) {
          * 接着「重新取址 → 重探通道 → 销毁播放器」每一步都在没网的情况下白跑
          *（这正是切 Wi-Fi 恢复得最慢的原因）。窗口一过自然回到下面那档，死链照样会报。
          */
-        if (isRecovering() && recoverRetries < RECOVER_BACKOFF_MS.length) {
-          const wait = RECOVER_BACKOFF_MS[recoverRetries++]!
+        // 三档退完仍在窗口里 → 按最后一档接着等，**窗口内一律不进慢路径**。
+        // 原来退完就落到下面计额度：300+600+1200 ≈ 2s，再 3×1s，约 5s 就进了「重新取址」
+        // ——而窗口是 8s、一次 Wi-Fi→蜂窝本身就要好几秒，正好在恢复完成前一刻把流拆了重来
+        if (isRecovering()) {
+          const wait = RECOVER_BACKOFF_MS[Math.min(recoverRetries++, RECOVER_BACKOFF_MS.length - 1)]!
           setError('网络已切换，正在重新连接...')
-          setTimeout(() => { getHls()?.startLoad() }, wait)
+          setTimeout(restartLoad, wait)
           break
         }
         hlsRetryCount.value++
         if (hlsRetryCount.value <= MAX_HLS_RETRY) {
           setError(`网络错误，正在重试 (${hlsRetryCount.value}/${MAX_HLS_RETRY})...`)
-          setTimeout(() => { getHls()?.startLoad() }, 1000)
+          setTimeout(restartLoad, 1000)
         } else {
           void recoverFromNetworkFailure(data.details)
         }

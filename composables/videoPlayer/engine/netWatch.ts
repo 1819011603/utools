@@ -96,6 +96,9 @@ const init = () => {
   // NetworkInformation 只有 Chromium 系有；拿不到就只剩 online/offline 那两个信号，
   // 行为退化成改动之前的样子（不会更差）
   try { connOf()?.addEventListener?.('change', onConnChange) } catch { /* iframe 权限策略会拒 */ }
+  // 复现「换网」用（仅 dev）：DevTools 的 Offline 只能模拟真断网，而换 Wi-Fi / 切蜂窝时
+  // `onLine` 全程为 true、只有 connection.change，DevTools 造不出来。复现步骤见 docs/player.md
+  if (import.meta.dev) (window as any).__netSim = () => fire('手动模拟换网')
 }
 
 /** 订阅「网络变了」。返回退订函数（引擎 stopHlsTick 时调） */
