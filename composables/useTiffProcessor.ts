@@ -1,5 +1,3 @@
-import * as UTIF from 'utif2'
-
 export interface TiffProcessOptions {
   quality?: number
   maxWidth?: number
@@ -19,6 +17,8 @@ export function useTiffProcessor() {
   }
 
   const decodeTiff = async (file: File): Promise<{ rgba: Uint8Array; width: number; height: number }> => {
+    // utif2 只在真要解 TIFF 时才拉（静态 import 会拖慢每个用到本组合式的页面）
+    const UTIF = await import('utif2')
     const buffer = await file.arrayBuffer()
     const ifds = UTIF.decode(buffer)
     

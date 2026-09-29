@@ -110,10 +110,3 @@ export async function solvePow(
 
   throw new Error(`工作量证明超过 ${maxTries} 次仍未命中，站点规则可能已变更`)
 }
-
-/** 自测用：已知 c/n1 的基准值应算出 nonce=115961 */
-export function powSelfTest(): boolean {
-  const c = '660B90B9446FA672F41C14B27BC383739AD5F9F1'
-  const h = sha1SingleBlock(c + 115961)
-  return byteAt(h, 6) === 0xb0 && byteAt(h, 7) === 0x0b
-}

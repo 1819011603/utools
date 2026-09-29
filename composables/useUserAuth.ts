@@ -167,7 +167,8 @@ export function useUserAuth() {
   const authFetch = async <T>(url: string, opts: Record<string, any> = {}): Promise<T> => {
     if (!token.value) throw new Error('未登录')
     try {
-      return await $fetch<T>(url, { ...opts, headers: { ...(opts.headers || {}), Authorization: `Bearer ${token.value}` } })
+      // `$fetch<T>` 的返回被 Nuxt 标成 TypedInternalResponse<…>，收窄回调用方要的 T
+      return await $fetch<T>(url, { ...opts, headers: { ...(opts.headers || {}), Authorization: `Bearer ${token.value}` } }) as T
     } catch (e: any) {
       if (e?.status === 401 || e?.statusCode === 401 || e?.response?.status === 401) logout()
       throw e

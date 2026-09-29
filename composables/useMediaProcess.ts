@@ -1,4 +1,4 @@
-import JSZip from 'jszip'
+import type { Ref } from 'vue'
 
 export type ProcessStatus = 'pending' | 'processing' | 'completed' | 'error'
 
@@ -18,7 +18,9 @@ export interface ProcessItem<T = unknown> {
 }
 
 export function useMediaProcess<T = unknown>() {
-  const items = ref<ProcessItem<T>[]>([])
+  // 泛型 `T` 会被 `ref` 深解包成 `UnwrapRef<T>`，跟 `ProcessItem<T>` 对不上（TS 报错）。
+  // 这里显式收成 `Ref<ProcessItem<T>[]>`：内部只做 push / 整体赋值，不需要深层解包。
+  const items = ref([]) as Ref<ProcessItem<T>[]>
 
   const pendingItems = computed(() => items.value.filter(i => i.status === 'pending'))
   const processingItems = computed(() => items.value.filter(i => i.status === 'processing'))
@@ -87,6 +89,8 @@ export function useMediaProcess<T = unknown>() {
   const downloadAllAsZip = async (zipName = 'files.zip', suffix = '_processed') => {
     if (!hasCompleted.value) return
 
+    // jszip 有 300KB+，只有真打包时才拉（静态 import 会拖慢每个用到本组合式的页面）
+    const JSZip = (await import('jszip')).default
     const zip = new JSZip()
     
     for (const item of completedItems.value) {

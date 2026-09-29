@@ -207,18 +207,6 @@ export function usePdfProcessor() {
     }
   }
 
-  // 解析颜色字符串为 RGB
-  const parseColor = (colorStr: string): { r: number; g: number; b: number } => {
-    if (colorStr.startsWith('#')) {
-      const hex = colorStr.slice(1)
-      const r = parseInt(hex.slice(0, 2), 16) / 255
-      const g = parseInt(hex.slice(2, 4), 16) / 255
-      const b = parseInt(hex.slice(4, 6), 16) / 255
-      return { r, g, b }
-    }
-    return { r: 0.5, g: 0.5, b: 0.5 }
-  }
-
   // 创建水印图片（支持中文）
   const createWatermarkImage = (
     text: string,

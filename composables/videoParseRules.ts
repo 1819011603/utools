@@ -371,14 +371,6 @@ export function loadUserParseRules(): ParseRule[] {
   return []
 }
 
-export function saveUserParseRules(rules: ParseRule[]) {
-  try {
-    localStorage.setItem(LS_KEY, JSON.stringify(rules))
-  } catch (e) {
-    console.error('保存解析规则失败:', e)
-  }
-}
-
 /** pattern 与 host 是否匹配。`/xxx/` 视为正则，否则子串。 */
 function patternMatches(pattern: string, host: string, fullUrl: string): boolean {
   if (!pattern) return false
@@ -392,15 +384,6 @@ function patternMatches(pattern: string, host: string, fullUrl: string): boolean
   return host.includes(pattern)
 }
 
-export function matchParseRule(url: string, userRules: ParseRule[] = []): ParseRule | null {
-  const host = hostOf(url)
-  if (!host) return null
-  for (const rule of [...userRules, ...BUILTIN_PARSE_RULES]) {
-    if (patternMatches(rule.pattern, host, url)) return rule
-  }
-  return null
-}
-
 /**
  * 界面用：这个地址能不能解析、命中的是谁。
  * 优先级与服务端 matchParser 保持一致：用户规则 > 代码型站点 > 内置规则。
@@ -412,12 +395,6 @@ export function matchParseSite(url: string, userRules: ParseRule[] = []): { id: 
     if (patternMatches(s.pattern, host, url)) return { id: s.id, name: s.name }
   }
   return null
-}
-
-// ── 服务端也要用这张表，但 Nitro 里没有 localStorage ──
-// 所以解析接口只吃内置表 + 前端随请求带上来的规则（前端负责读 localStorage）。
-export function findRuleById(id: string): ParseRule | null {
-  return BUILTIN_PARSE_RULES.find(r => r.id === id) ?? null
 }
 
 // ── 接口返回的数据形状（前后端共用）──

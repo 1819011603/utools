@@ -10,7 +10,7 @@
  * 内部实现模块，走显式相对 import，不进 `imports.dirs`。
  */
 import { downloadHlsEpisode } from './hlsEpisode'
-import { createSink, safeFileName, supportsDiskSink, BLOB_WARN_BYTES } from './fileSink'
+import { createSink, safeFileName } from './fileSink'
 
 export type DlState = 'queued' | 'running' | 'done' | 'failed' | 'canceled'
 
@@ -210,9 +210,3 @@ const runOne = async (task: DlTask) => {
     task.conn = 0
   }
 }
-
-/** 这个环境下大文件会不会有麻烦（没有流式写盘 → 整集攒内存） */
-export const diskModeInfo = () => ({
-  streaming: supportsDiskSink(),
-  warnBytes: BLOB_WARN_BYTES,
-})

@@ -225,7 +225,7 @@ export default defineEventHandler(async (event) => {
   const lastModified = response.headers.get('last-modified')
 
   if (contentType) setResponseHeader(event, 'Content-Type', contentType)
-  if (contentLength) setResponseHeader(event, 'Content-Length', contentLength)
+  if (contentLength) setResponseHeader(event, 'Content-Length', Number(contentLength))
   if (contentRange) setResponseHeader(event, 'Content-Range', contentRange)
   if (acceptRanges) setResponseHeader(event, 'Accept-Ranges', acceptRanges)
   // 分片是不可变内容（同 URL 永远同字节）：只对「完整 200」让浏览器磁盘缓存 1 天，

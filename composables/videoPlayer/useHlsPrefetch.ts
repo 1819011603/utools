@@ -1,6 +1,6 @@
 import type HlsType from 'hls.js'
 import type { useSegmentCache } from './useSegmentCache'
-import { SERVER_TIERS, DEFAULT_TIER, type ServerTier, type TierParams } from '../videoSiteRules'
+import { SERVER_TIERS, DEFAULT_TIER, type TierParams } from '../videoSiteRules'
 import { useLaneControl } from './prefetch/lanes'
 import { useBandwidthModel } from './prefetch/bandwidth'
 import { createFragLoaderFactory } from './prefetch/fragLoader'
@@ -512,6 +512,17 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   }
 
   /**
+   * 「单条连接够喂当前倍速吗」：够 = 加线程没意义，反而摊薄。
+   *
+   * 门槛按倍速放大（同 FAST_SOLO_CONN_STEPS 那条立论）：3x 播放要三倍吞吐才算「够」。
+   * `solo === 0`（还没测到低并发样本，如冷启动第一集）一律算「不够」——没数据就不敢省。
+   */
+  const soloFeedsRate = (): boolean => {
+    const solo = bw.soloConnKBps()
+    return solo > 0 && solo >= FAST_SOLO_KBPS * Math.max(1, getPlaybackRate())
+  }
+
+  /**
    * 存货阶梯（表见 WALL_CONN_STEPS）：wall = 还够播几秒。保险线填 0/负数 = 关掉整条阶梯。
    *
    * 带**放开方向的迟滞**（见 WALL_STEP_HYST）：降档立刻生效，升档要多攒 25%。
@@ -528,9 +539,19 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
       if (wall < safe * WALL_CONN_STEPS[wallStep]![0] * (1 + WALL_STEP_HYST)) step = wallStep
     }
     wallStep = step
-    return step >= WALL_CONN_STEPS.length
-      ? hostConcurrencyCap
-      : Math.max(WALL_CONN_STEPS[step]![1], catchUpFloor())   // 地板兜住慢源，见 catchUpFloor
+    if (step >= WALL_CONN_STEPS.length) return hostConcurrencyCap
+    /*
+     * **饿区（step 0，存货不足保险线的 40%）且单条够快 → 只留 1 条预取。**
+     *
+     * `soloFastCap` 那条「单条够快就别加线程」怕跟存货阶梯抢方向盘，在放开线以下整条关掉
+     * （见它自己那段），可「刚起播 / 刚拖完进度 / 刚切集」正好落在这一档——于是快源上也固定
+     * 开 2 条预取，跟 hls.js 正在等的那一片抢同源连接槽和带宽（实测：拖完进度有时加载很慢、
+     * 单线程反而快）。这里只补这一格：够快就 1 条，把槽让给眼前那一片。
+     *
+     * 单条慢或还没测到（`solo === 0`）→ 维持原来的 2；真慢源仍由 `catchUpFloor` 顶上去。
+     */
+    if (step === 0 && soloFeedsRate()) return 1
+    return Math.max(WALL_CONN_STEPS[step]![1], catchUpFloor())   // 地板兜住慢源，见 catchUpFloor
   }
 
   /**
@@ -932,20 +953,28 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     evictPrefetchCache()
   }
 
-  // 完成1个分片后补充1个，基于当前播放进度定位下一个未下载分片
-  const startOnePrefetch = () => {
+  // 完成1个分片后补充1个，基于当前播放进度定位下一个未下载分片。
+  //
+  // `countOverride`：调用方（tick / primePrefetch）已经算好目标并发时传进来——它们本来就要
+  // 在循环里反复调这个函数，不传的话每调一次都要把整条策略链（①–⑨）重跑一遍、还重复写
+  // `prefetchInfo`（目标 6 条时一秒 7 遍）。作为 `spawnPrefetch` 的 onDone 回调（无参）时才现算。
+  const startOnePrefetch = (countOverride?: number) => {
     const hls = opts.getHls()
     const video = opts.getVideoEl()
     if (!hls || !video) return
-    const mseAhead = getAheadBuffered(video)
-    const cachedAhead = getCachedAhead(video)
-    let count = getAdaptivePrefetchCount(cachedAhead)
-    if (cachedAhead >= effectivePrefetchTarget()) count = 0   // 已达有效预取深度 → 停止预取
-
-    prefetchInfo.value.bufferSecs = Math.round(mseAhead * 10) / 10
-    prefetchInfo.value.threads = count
-    prefetchInfo.value.cached = segPrefetchCache.size
-    prefetchInfo.value.pending = segPrefetching.size
+    let count: number
+    if (countOverride === undefined) {
+      const mseAhead = getAheadBuffered(video)
+      const cachedAhead = getCachedAhead(video)
+      count = getAdaptivePrefetchCount(cachedAhead)
+      if (cachedAhead >= effectivePrefetchTarget()) count = 0   // 已达有效预取深度 → 停止预取
+      prefetchInfo.value.bufferSecs = Math.round(mseAhead * 10) / 10
+      prefetchInfo.value.threads = count
+      prefetchInfo.value.cached = segPrefetchCache.size
+      prefetchInfo.value.pending = segPrefetching.size
+    } else {
+      count = countOverride   // 读数与 prefetchInfo 由调用方统一写好，这里只负责补片
+    }
 
     if (count === 0 || segPrefetching.size >= count) return
 
@@ -962,6 +991,16 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
       spawnPrefetch(url, frag.duration ?? 0, startOnePrefetch)
       prefetchInfo.value.pending = segPrefetching.size
       break  // 只补1个
+    }
+  }
+
+  /** 把在途预取补足到 `count` 条（`startOnePrefetch` 同步占位，循环安全）。tick / primePrefetch 共用。 */
+  const fillPrefetch = (count: number) => {
+    let guard = 0
+    while (segPrefetching.size < count && guard++ < count) {
+      const before = segPrefetching.size
+      startOnePrefetch(count)
+      if (segPrefetching.size === before) break   // 没有可补的分片了
     }
   }
 
@@ -1019,13 +1058,8 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     prefetchInfo.value.threads = count
     prefetchInfo.value.cached = segPrefetchCache.size
     prefetchInfo.value.pending = segPrefetching.size
-    // 补足到目标并发（startOnePrefetch 同步占位，循环安全）
-    let guard = 0
-    while (segPrefetching.size < count && guard++ < count) {
-      const before = segPrefetching.size
-      startOnePrefetch()
-      if (segPrefetching.size === before) break   // 没有可补的分片了
-    }
+    // 补足到目标并发（count 传下去，别在循环里重算策略链）
+    fillPrefetch(count)
   }
 
   // 起播/seek 预热：并行预取后续分片。
@@ -1034,13 +1068,18 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     const cachedAhead = video ? getCachedAhead(video) : 0
     let count = getAdaptivePrefetchCount(cachedAhead)
     if (cachedAhead >= effectivePrefetchTarget()) count = 0   // 已达有效预取深度 → 停止预取
-    let guard = 0
-    while (segPrefetching.size < count && guard++ < count) {
-      const before = segPrefetching.size
-      startOnePrefetch()
-      if (segPrefetching.size === before) break
-    }
+    fillPrefetch(count)
   }
 
-  return { getAheadBuffered, getCachedAhead, getAdaptivePrefetchCount, createHlsFragLoader, triggerAdaptivePrefetch, startOnePrefetch, strategy, resetStrategy, tick, primePrefetch, getStuckSegment, laneDead, reviveLanes, purgePlayedSegments, getLoaderActivity, isSegCached: (url: string) => getPrefetchedBuf(url) !== null, getSegBuf: (url: string) => getPrefetchedBuf(url) }
+  /**
+   * 只清「并发爬坡 / 沉降」的锁，**不动带宽实测样本**（那是换流才该清的，见 resetStrategy）。
+   *
+   * 用在 seek：拖进度那一刻存货归零，存货阶梯把目标压到 1~2，同时按「刚减过线程」记下
+   * `connDownAt`——于是缓冲补起来之后，升线程还得再等一个沉降期（`avgSegLoadMs`，最长 5s），
+   * 正好卡住「拖完进度要好几秒才把并发拉回来」。位置变了不是「判定多开了」，这道锁对 seek 无意义。
+   * 清掉之后：升线程立刻走 +1、之后仍受 `CONN_RAMP_MS` 一档一档来（不会一步顶格）。
+   */
+  const resetConcurrencyRamp = () => { connDownAt = 0; connUpAt = 0 }
+
+  return { getAheadBuffered, getCachedAhead, getAdaptivePrefetchCount, createHlsFragLoader, triggerAdaptivePrefetch, startOnePrefetch, strategy, resetStrategy, resetConcurrencyRamp, tick, primePrefetch, getStuckSegment, laneDead, reviveLanes, purgePlayedSegments, getLoaderActivity, isSegCached: (url: string) => getPrefetchedBuf(url) !== null, getSegBuf: (url: string) => getPrefetchedBuf(url) }
 }

@@ -1,5 +1,3 @@
-import GIF from 'gif.js'
-
 export interface GifEncoderOptions {
   width: number
   height: number
@@ -38,18 +36,19 @@ export const QUALITY_OPTIONS = [
   { label: '较低清晰度 (文件小)', value: 20 }
 ]
 
-export const COLOR_OPTIONS = [
-  { label: '256 色 (最清晰)', value: 256 },
-  { label: '128 色', value: 128 },
-  { label: '64 色 (较小文件)', value: 64 }
-]
-
 export const REPEAT_OPTIONS = [
   { label: '无限循环', value: 0 },
   { label: '播放 1 次', value: 1 },
   { label: '播放 2 次', value: 2 },
   { label: '播放 3 次', value: 3 }
 ]
+
+// gif.js 只在真要编码 GIF 时才拉（静态 import 会拖慢每个用到本组合式的页面）
+let GifCtor: any = null
+const loadGifCtor = async () => {
+  if (!GifCtor) GifCtor = (await import('gif.js')).default
+  return GifCtor
+}
 
 export function useGifEncoder() {
   const isEncoding = ref(false)
@@ -193,6 +192,7 @@ export function useGifEncoder() {
     options: GifEncoderOptions,
     onProgress?: (p: number) => void
   ): Promise<Blob> => {
+    const GIF = await loadGifCtor()
     const gif = new GIF({
       workers: options.workers,
       quality: options.quality,
@@ -282,7 +282,8 @@ export function useGifEncoder() {
         })
       } catch {}
 
-      const gif = new (GIF as any)({
+      const GIF = await loadGifCtor()
+      const gif = new GIF({
         workers: options.workers,
         quality: options.quality,
         width: options.width,

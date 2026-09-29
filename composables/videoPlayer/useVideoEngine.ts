@@ -116,7 +116,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   })
   const {
     getAheadBuffered, getCachedAhead, createHlsFragLoader, triggerAdaptivePrefetch,
-    startOnePrefetch, strategy, resetStrategy, tick: prefetchTick, primePrefetch, getStuckSegment, laneDead,
+    startOnePrefetch, strategy, resetStrategy, resetConcurrencyRamp, tick: prefetchTick, primePrefetch, getStuckSegment, laneDead,
     reviveLanes, purgePlayedSegments, getLoaderActivity, isSegCached, getSegBuf,
   } = prefetch
 
@@ -855,7 +855,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     // 预取 / 缓存 / 卡顿
     prefetchInfo, strategy, stall,
     getAheadBuffered, getCachedAhead, primePrefetch, startOnePrefetch, prefetchTick,
-    abortAllPrefetches, triggerAdaptivePrefetch, purgePlayedSegments, stageSegments,
+    abortAllPrefetches, triggerAdaptivePrefetch, purgePlayedSegments, stageSegments, resetConcurrencyRamp,
     aggregateKBps, aggregateMbps, deadLaneLabel,
     getSegBuf,
     // 起播锚点 / 起播窄口

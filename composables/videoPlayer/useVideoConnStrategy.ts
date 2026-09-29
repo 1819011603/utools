@@ -199,8 +199,6 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
 
   // 连接配置指纹：后台复验时用来判断「结论有没有变」，没变就绝不动 ref
   //（连接策略只在加载时生效，播放中改它只会让 UI 和实际请求对不上）
-  const connSignature = (c: ConnConfig) =>
-    [c.disguiseAsDownloader, c.requestOrigin, c.requestReferer, c.manifestOnly, c.dualChannel].join('|')
   const currentConnSignature = () =>
     [disguiseAsDownloader.value, requestOrigin.value, requestReferer.value, manifestOnly.value, dualChannel.value].join('|')
 

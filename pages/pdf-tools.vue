@@ -441,7 +441,6 @@
 </template>
 
 <script setup lang="ts">
-import JSZip from 'jszip'
 import type { PdfProcessResult } from '~/composables/usePdfProcessor'
 
 const { 
@@ -693,7 +692,8 @@ const doSplit = async () => {
       if (results.length === 1) {
         downloadResult(results[0])
       } else {
-        // 多个文件打包下载
+        // 多个文件打包下载（jszip 300KB+，用到才拉）
+        const JSZip = (await import('jszip')).default
         const zip = new JSZip()
         for (const result of results) {
           zip.file(result.fileName, result.blob)
@@ -734,7 +734,8 @@ const doSplit = async () => {
         if (results.length === 1) {
           downloadResult(results[0])
         } else {
-          // 多个文件打包下载
+          // 多个文件打包下载（jszip 300KB+，用到才拉）
+          const JSZip = (await import('jszip')).default
           const zip = new JSZip()
           for (const result of results) {
             zip.file(result.fileName, result.blob)

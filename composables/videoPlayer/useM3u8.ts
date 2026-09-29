@@ -209,7 +209,8 @@ export function useM3u8(getProxyUrl: (url: string) => string) {
     const key = await fetchHlsKey(seg.keyUri, signal)
     let iv: ArrayBuffer
     if (seg.keyIv && seg.keyIv.byteLength === 16) {
-      iv = seg.keyIv.buffer.slice(seg.keyIv.byteOffset, seg.keyIv.byteOffset + 16)
+      // keyIv.buffer 的类型是 ArrayBufferLike（含 SharedArrayBuffer），slice 后收窄回 ArrayBuffer
+      iv = seg.keyIv.buffer.slice(seg.keyIv.byteOffset, seg.keyIv.byteOffset + 16) as ArrayBuffer
     } else {
       // 无显式 IV：用序列号填充 16 字节大端整数
       const ivBytes = new Uint8Array(16)

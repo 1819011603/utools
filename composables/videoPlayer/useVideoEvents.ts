@@ -498,7 +498,12 @@ export function useVideoEvents(deps: VideoEventsDeps) {
     }
     isBuffering.value = false
     // 立刻在当前位置并行预取（不等 1s 心跳），尽快把目标分片拉下来
-    if (isHls.value) engine.primePrefetch()
+    if (isHls.value) {
+      engine.primePrefetch()
+      // primePrefetch 刚把目标压低时会记下「刚减过线程」的沉降锁；seek 不是「判定多开了」，
+      // 清掉它，缓冲一补起来就能立刻升并发（否则要白等一个沉降期，最长 5s）
+      engine.resetConcurrencyRamp()
+    }
   }
 
   /**
