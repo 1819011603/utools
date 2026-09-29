@@ -7,6 +7,7 @@
  * 内部实现模块，走显式相对 import，不进 `imports.dirs`。
  */
 import { isOffline, waitForNet } from '../engine/netWatch'
+import { withExternalSlot } from '../prefetch/lanes'
 import { createTsRemuxer, type TsRemuxer } from './tsToMp4'
 import { createMp4Writer, type Mp4Writer } from './mp4Writer'
 import type { FileSink } from './fileSink'
@@ -189,11 +190,15 @@ export const downloadHlsEpisode = async (
       }
       for (const lane of lanesToTry()) {
         try {
-          const res = await fetch(laneUrl(lane, seg.url, origin, referer), {
-            signal, referrerPolicy: 'no-referrer',
+          // 登记为外部在途（含读 body）：播放那边的预取让槽与带宽分档都要看得见下载占的连接
+          const got = await withExternalSlot(async () => {
+            const res = await fetch(laneUrl(lane, seg.url, origin, referer), {
+              signal, referrerPolicy: 'no-referrer',
+            })
+            return { status: res.status, buf: res.ok ? await res.arrayBuffer() : null }
           })
-          if (!res.ok) { lastErr = new Error(`分片 ${res.status}`); continue }
-          const buf = await res.arrayBuffer()
+          const buf = got.buf
+          if (!buf) { lastErr = new Error(`分片 ${got.status}`); continue }
           if (!buf.byteLength) { lastErr = new Error('分片是空的'); continue }
           /*
            * **200 + 一页 HTML 是真实存在的**：实测这个 CDN 对 URL 里多一个 `%0D` 就回

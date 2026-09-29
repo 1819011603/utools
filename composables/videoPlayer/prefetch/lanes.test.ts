@@ -6,7 +6,7 @@
  * 直连槽满或熔断才退回均分。
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { useLaneControl } from './lanes'
+import { useLaneControl, withExternalSlot, getExternalInflight } from './lanes'
 import { MAX_CONN } from './tuning'
 
 const dual = () => useLaneControl(() => ['direct', 'proxy'])
@@ -128,5 +128,56 @@ describe('avgInflightSince：分档用「全程平均在途数」，不是发起
     lc.resetLanes()
     clock += 1000
     expect(lc.avgInflightSince(m)).toBe(2)               // (4×1000 + 0×1000) / 2000
+  })
+})
+
+describe('外部在途（下载队列 / 下一集预热）：同样占连接，要算进总数与分档', () => {
+  let clock = 1000
+  afterEach(() => { vi.restoreAllMocks() })
+  const useClock = () => { clock = 1000; vi.spyOn(performance, 'now').mockImplementation(() => clock) }
+  /** 一个手动放行的外部请求：返回「放行」函数和它的 promise */
+  const hold = () => {
+    let release!: () => void
+    const gate = new Promise<void>(r => { release = r })
+    const p = withExternalSlot(() => gate)
+    return { release, p }
+  }
+
+  it('在途期间算进每个播放器实例的 getInflightTotal，结束归还', async () => {
+    const lc = dual()
+    lc.acquireLane('u')
+    const a = hold(), b = hold()
+    expect(lc.getInflightTotal()).toBe(3)             // 1 条预取 + 2 条下载
+    a.release(); b.release(); await Promise.all([a.p, b.p])
+    expect(lc.getInflightTotal()).toBe(1)
+    expect(getExternalInflight()).toBe(0)
+  })
+
+  it('请求抛错也归还，不泄漏计数', async () => {
+    await expect(withExternalSlot(async () => { throw new Error('403') })).rejects.toThrow('403')
+    expect(getExternalInflight()).toBe(0)
+  })
+
+  it('分档：一片预取全程跟 2 条下载并行 → 记 3，不是 1', async () => {
+    useClock()
+    const lc = dual()
+    lc.acquireLane('u')
+    const m = lc.markInflight()
+    const a = hold(), b = hold()
+    clock += 2000
+    expect(lc.avgInflightSince(m)).toBe(3)
+    a.release(); b.release(); await Promise.all([a.p, b.p])
+  })
+
+  it('分档按时间加权：下载只占了前一半 → 1 + 2×½ = 2', async () => {
+    useClock()
+    const lc = dual()
+    lc.acquireLane('u')
+    const m = lc.markInflight()
+    const a = hold(), b = hold()
+    clock += 1000
+    a.release(); b.release(); await Promise.all([a.p, b.p])
+    clock += 1000
+    expect(lc.avgInflightSince(m)).toBe(2)
   })
 })

@@ -71,7 +71,34 @@ export interface LaneControl {
   avgInflightSince: (mark: InflightMark) => number
 }
 
-export interface InflightMark { at: number; area: number }
+export interface InflightMark { at: number; area: number; extArea: number }
+
+/*
+ * ── 播放链路之外、同样占着这几个 origin 连接的请求：下载队列、下一集预热 ──
+ *
+ * 它们不走 lane（下载有自己的通道粘滞，预热要拿 manifest 原文里的地址），但跟播放抢的是同一批
+ * 每 origin 6 个连接槽和同一份带宽。不算进来的话：① `prefetchSlots` 看不见它们，预取照样补满，
+ * 关键片的对冲又排进浏览器队列；② 带宽样本的并发数偏小，边下载边播时单条基线被记低。
+ * 模块级：下载队列本身是模块级单例，离开播放页还在跑，不能挂在某个播放器的 lanes 实例上。
+ */
+let externalInflight = 0
+let externalArea = 0
+let externalAt = 0
+const accrueExternal = () => {
+  const now = performance.now()
+  if (externalAt) externalArea += externalInflight * (now - externalAt)
+  externalAt = now
+}
+
+/** 把一次「非 lane 的分片级请求」（含读完 body）登记为在途。下载队列与下一集预热用 */
+export const withExternalSlot = async <T>(fn: () => Promise<T>): Promise<T> => {
+  accrueExternal()
+  externalInflight++
+  try { return await fn() } finally { accrueExternal(); externalInflight-- }
+}
+
+/** 当前外部在途数（测试与诊断用） */
+export const getExternalInflight = (): number => externalInflight
 
 export function useLaneControl(getLaneUrls: (url: string) => string[]): LaneControl {
   const laneInflight: number[] = []
@@ -79,12 +106,18 @@ export function useLaneControl(getLaneUrls: (url: string) => string[]): LaneCont
   const laneOks: number[] = []      // 各 lane 的累计成功数
   const laneTrippedAt: number[] = [] // 各 lane 的熔断时刻（观察期到了就放回来试，见 LANE_PROBATION_MS）
   const laneDead = ref<boolean[]>([])
-  // 在途总数对时间的积分（条·ms），只增不减（reset 也不清，否则旧标记换算出负数）
+  // 本实例 lane 在途数对时间的积分（条·ms），只增不减（reset 也不清，否则旧标记换算出负数）。
+  // 外部在途另记一份模块级积分，换算平均时两份相加
   let inflightArea = 0
   let areaAt = 0
+  const laneTotal = (): number => {
+    let n = 0
+    for (const v of laneInflight) n += v ?? 0
+    return n
+  }
   const accrue = () => {
     const now = performance.now()
-    if (areaAt) inflightArea += getInflightTotal() * (now - areaAt)
+    if (areaAt) inflightArea += laneTotal() * (now - areaAt)
     areaAt = now
   }
 
@@ -171,21 +204,20 @@ export function useLaneControl(getLaneUrls: (url: string) => string[]): LaneCont
     if ((laneInflight[lane] ?? 0) > 0) laneInflight[lane]--
   }
 
-  const markInflight = (): InflightMark => { accrue(); return { at: areaAt, area: inflightArea } }
+  const markInflight = (): InflightMark => {
+    accrue(); accrueExternal()
+    return { at: areaAt, area: inflightArea, extArea: externalArea }
+  }
   /** 至少 1：调用方自己就在途。时长为 0（同一拍交货）退回当下读数 */
   const avgInflightSince = (mark: InflightMark): number => {
-    accrue()
+    accrue(); accrueExternal()
     const dt = areaAt - mark.at
-    const avg = dt > 0 ? (inflightArea - mark.area) / dt : getInflightTotal()
+    const avg = dt > 0 ? (inflightArea - mark.area + externalArea - mark.extArea) / dt : getInflightTotal()
     return Math.max(1, Math.round(avg))
   }
 
-  /** 此刻真正在途的分片请求数（预取 + 关键片都在 laneInflight 里）——带宽采样统一用它当「并发」。 */
-  const getInflightTotal = (): number => {
-    let n = 0
-    for (const v of laneInflight) n += v ?? 0
-    return n
-  }
+  /** 此刻真正在途的分片请求数：预取 + 关键片（laneInflight）+ 下载队列与下一集预热（外部在途） */
+  const getInflightTotal = (): number => laneTotal() + externalInflight
 
   // 必须排除熔断掉的 lane：否则直连 lane 已经每发必 403，并发上限还按两个 origin 放到 12，
   // 等于让 6 条连接去挤同一个 origin，浏览器排队反而更慢。

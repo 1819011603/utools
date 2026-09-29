@@ -20,6 +20,7 @@ import type { VideoHandoff } from './useVideoHandoff'
 import type { VideoConnStrategy } from './useVideoConnStrategy'
 import type { VideoEngine } from './useVideoEngine'
 import type { VideoPlaylistCtl } from './useVideoPlaylistCtl'
+import { withExternalSlot } from './prefetch/lanes'
 
 /**
  * 「快播完」的提前量。
@@ -120,9 +121,12 @@ export function useVideoPrewarm(deps: VideoPrewarmDeps) {
     const got: Array<[string, ArrayBuffer]> = []
     await Promise.all(picked.map(async seg => {
       try {
-        const res = await fetch(seg.url, { referrerPolicy: 'no-referrer' })
-        if (!res.ok) return
-        got.push([seg.url, await res.arrayBuffer()])
+        // 登记为外部在途：跟正在播的这一集抢同一批连接槽，预取让槽与带宽分档要看得见
+        const buf = await withExternalSlot(async () => {
+          const res = await fetch(seg.url, { referrerPolicy: 'no-referrer' })
+          return res.ok ? res.arrayBuffer() : null
+        })
+        if (buf) got.push([seg.url, buf])
       } catch { /* 预热失败静默：正常切集那条路会自己重下 */ }
     }))
     if (!got.length) return
