@@ -75,6 +75,20 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
     prefetchInfo.value.pending = segPrefetching.size
   }
 
+  /**
+   * 按未来分片的 host 分布算并发上限：多 CDN 每 host 6 连接、双通道再 +6（都封顶 12）。
+   * 触发与心跳两处都调——原来只在 FRAG_BUFFERED 里算，卡顿期间（没有 FRAG_BUFFERED）会一直用旧值。
+   */
+  const updateHostCap = (frags: any[], fromIdx: number) => {
+    const lookahead = frags.slice(Math.max(0, fromIdx), fromIdx + 24)
+    const hosts = new Set<string>()
+    for (const f of lookahead) { try { hosts.add(new URL(f.url).host) } catch {} }
+    let cap = Math.min(12, Math.max(1, hosts.size) * MAX_CONN)
+    // 双通道：代理是额外一个 origin（本站），再加 6 条
+    if (getLaneCount(lookahead[0]?.url) > 1) cap = Math.min(12, cap + MAX_CONN)
+    runtime.hostConcurrencyCap = cap
+  }
+
   // 发起一个分片预取请求（带 1 次轻量重试，减少「空洞」导致的临播卡顿）
   // durationSec = 该分片代表的视频秒数，用于实测码率
   const PREFETCH_TIMEOUT_MS = 300000   // 单分片下载上限(5分钟)：无此保护会导致个别卡死连接永久占位，形成永不填补的「缓冲缺口」
@@ -139,13 +153,8 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
     // （它就是「最长的一片」，用来算上限正合适），拿不到就退回真实分片的 duration
     runtime.segDurSecs = levelDetails.targetduration || frags[startIdx]?.duration || runtime.segDurSecs
 
-    // 探测未来分片的 host 分布：多 CDN 时放宽并发上限（每 host 6 连接，封顶 12）
-    const lookahead = frags.slice(startIdx, startIdx + 24)
-    const hosts = new Set<string>()
-    for (const f of lookahead) { try { hosts.add(new URL(f.url).host) } catch {} }
-    runtime.hostConcurrencyCap = Math.min(12, Math.max(1, hosts.size) * MAX_CONN)
-    // 双通道：代理是额外一个 origin（本站），再加 6 条（封顶 12）
-    if (getLaneCount(lookahead[0]?.url) > 1) runtime.hostConcurrencyCap = Math.min(12, runtime.hostConcurrencyCap + MAX_CONN)
+    // 探测未来分片的 host 分布：多 CDN / 双通道时放宽并发上限
+    updateHostCap(frags, startIdx)
 
     // 双指标：mseAhead（真实可播）驱动健康区/降速/跳片；cachedAhead（含预取缓存）驱动并发与停取。
     const mseAhead = getAheadBuffered(video)
@@ -177,9 +186,8 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
     }
 
     prefetchInfo.value.pending = segPrefetching.size
-
-    // 按内存上限 LRU 淘汰（在新分片加入后检查）
-    evictPrefetchCache()
+    // 收尾不再 evict：真正入缓存发生在 spawnPrefetch 完成时（那边每个分片落地都 evict），
+    // 此刻还没有新分片进缓存，再扫一遍纯属白跑。
   }
 
   // 完成1个分片后补充1个，基于当前播放进度定位下一个未下载分片。
@@ -274,6 +282,12 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
     const mseAhead = getAheadBuffered(video)
     const cachedAhead = getCachedAhead(video)
     updateHealthZone(mseAhead, cachedAhead)
+    // 心跳也刷一次并发上限：卡顿期间没有 FRAG_BUFFERED，否则会一直用旧值
+    const cf = currentFrags(getHls())
+    if (cf?.frags.length) {
+      const idx = cf.frags.findIndex((f: any) => f.end > anchorTime(video))
+      updateHostCap(cf.frags, idx >= 0 ? idx : 0)
+    }
     let count = getAdaptivePrefetchCount(cachedAhead)
     count = capAtTarget(cachedAhead, count)   // 已达有效预取深度 → 停止预取
     writePrefetchInfo(mseAhead, count)

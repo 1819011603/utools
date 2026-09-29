@@ -3,6 +3,8 @@
  *
  * 「lane」= 同一个分片的多种取法（直连 CDN / 经 `/api/proxy`）。浏览器对**每个 origin**
  * 只给 6 条并发连接，所以把请求分摊到两个 origin 就能把聚合并发提到 ~12（见 CLAUDE.md 的双通道）。
+ * **lane 的顺序由 `getLaneUrls` 决定：双通道时是 `[直连, 代理]`，即 lane 0 = 直连**——
+ * `acquireLane(url, true)`（关键片用）据此优先直连。
  *
  * 从 `useHlsPrefetch` 里拆出来的两件事：
  *   · 每条新连接分给「在途最少」的 lane，各 origin 都不超过 6 条；
@@ -16,7 +18,8 @@
  * 内部实现模块，走显式相对 import，不进 `nuxt.config.ts` 的 `imports.dirs`——
  * 它不该出现在全局自动导入的命名空间里。
  */
-import type { Ref } from 'vue'
+import { ref, type Ref } from 'vue'
+import { MAX_CONN } from './tuning'
 
 const LANE_TRIP_FAILS = 3   // 连续失败到这个数就熔断（首片偶发失败不算数）
 /**
@@ -39,7 +42,7 @@ export interface LaneAllocation {
 export interface LaneControl {
   /** 已熔断的 lane（响应式，供 UI 显示「已降为单通道」） */
   laneDead: Ref<boolean[]>
-  acquireLane: (url: string) => LaneAllocation
+  acquireLane: (url: string, preferDirect?: boolean) => LaneAllocation
   releaseLane: (lane: number) => void
   markLaneOk: (lane: number) => void
   markLaneFail: (lane: number, laneCount: number) => void
@@ -113,15 +116,25 @@ export function useLaneControl(getLaneUrls: (url: string) => string[]): LaneCont
     laneDead.value = []
   }
 
-  const acquireLane = (url: string): LaneAllocation => {
+  /**
+   * 取一条 lane。默认「在途最少」——均分，把两个 origin / 两份出口 IP 配额都吃上（预取用）。
+   * `preferDirect=true`（关键片用）时优先 lane 0（直连，见文件头的顺序约定）：代理多一跳，
+   * 关键片能不白吃就不吃。直连槽满（≥ 浏览器 6 条，再发只会排队）或直连被熔断 → 退回均分。
+   */
+  const acquireLane = (url: string, preferDirect = false): LaneAllocation => {
     releaseProbation()
     const urls = getLaneUrls(url)
     // 熔断过的 lane 直接排除；万一全被熔断（不该发生，markLaneFail 保底留一条）就退回全体
     let pool = urls.map((_, i) => i).filter(laneAlive)
     if (!pool.length) pool = urls.map((_, i) => i)
-    let lane = pool[0]
-    for (const i of pool) {
-      if ((laneInflight[i] ?? 0) < (laneInflight[lane] ?? 0)) lane = i
+    let lane: number
+    if (preferDirect && pool.includes(0) && (laneInflight[0] ?? 0) < MAX_CONN) {
+      lane = 0
+    } else {
+      lane = pool[0]
+      for (const i of pool) {
+        if ((laneInflight[i] ?? 0) < (laneInflight[lane] ?? 0)) lane = i
+      }
     }
     laneInflight[lane] = (laneInflight[lane] ?? 0) + 1
     return { lane, laneUrl: urls[lane], laneCount: urls.length }

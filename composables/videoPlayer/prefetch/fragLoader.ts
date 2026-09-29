@@ -188,7 +188,7 @@ export function createFragLoaderFactory(deps: FragLoaderDeps) {
           if (settled || this.stats.aborted || racers >= tp.maxRacers) return
           racers++
           const ctrl = new AbortController(); ctrls.push(ctrl)
-          const { lane, laneUrl, laneCount } = acquireLane(url)
+          const { lane, laneUrl, laneCount } = acquireLane(url, true)   // 关键片优先直连（低延迟），直连满/熔断才退回均分
           const t = performance.now()
           if (!segInflightStart.has(url)) segInflightStart.set(url, t)   // 计时：登记在途（诊断用）
           const conc = racers   // 采样时的并发（竞速条数），供聚合可并行探针分档
