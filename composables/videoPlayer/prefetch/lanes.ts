@@ -60,7 +60,18 @@ export interface LaneControl {
    * 带宽采样统一用它当「并发」——两个路径各自用「预取线程数」「竞速条数」会污染分档账本。
    */
   getInflightTotal: () => number
+  /**
+   * 请求发起时打一个标记，交货时用 `avgInflightSince` 换出**这段时间里平均有几条在途**。
+   *
+   * 带宽分档要的是「这一片是在几条并行下跑出这个速度的」，只读发起那一刻的在途数是错的：
+   * `fillPrefetch` 同步连发一批，第 1、2 条发起时在途只有 1、2，可它们全程是跟后面几条一起下完的
+   * → 每一批的头两片都被记进低并发档，把单条基线（`perConnLow`）污染成被摊薄后的速度。
+   */
+  markInflight: () => InflightMark
+  avgInflightSince: (mark: InflightMark) => number
 }
+
+export interface InflightMark { at: number; area: number }
 
 export function useLaneControl(getLaneUrls: (url: string) => string[]): LaneControl {
   const laneInflight: number[] = []
@@ -68,6 +79,14 @@ export function useLaneControl(getLaneUrls: (url: string) => string[]): LaneCont
   const laneOks: number[] = []      // 各 lane 的累计成功数
   const laneTrippedAt: number[] = [] // 各 lane 的熔断时刻（观察期到了就放回来试，见 LANE_PROBATION_MS）
   const laneDead = ref<boolean[]>([])
+  // 在途总数对时间的积分（条·ms），只增不减（reset 也不清，否则旧标记换算出负数）
+  let inflightArea = 0
+  let areaAt = 0
+  const accrue = () => {
+    const now = performance.now()
+    if (areaAt) inflightArea += getInflightTotal() * (now - areaAt)
+    areaAt = now
+  }
 
   const laneAlive = (i: number) => !laneDead.value[i]
 
@@ -107,6 +126,7 @@ export function useLaneControl(getLaneUrls: (url: string) => string[]): LaneCont
   }
 
   const resetLanes = () => {
+    accrue()   // 先把清零前的在途记进积分，别让跨 reset 的标记少算
     laneFails.length = 0
     laneOks.length = 0
     laneInflight.length = 0
@@ -141,12 +161,23 @@ export function useLaneControl(getLaneUrls: (url: string) => string[]): LaneCont
         if ((laneInflight[i] ?? 0) < (laneInflight[lane] ?? 0)) lane = i
       }
     }
+    accrue()
     laneInflight[lane] = (laneInflight[lane] ?? 0) + 1
     return { lane, laneUrl: urls[lane], laneCount: urls.length }
   }
 
   const releaseLane = (lane: number) => {
+    accrue()
     if ((laneInflight[lane] ?? 0) > 0) laneInflight[lane]--
+  }
+
+  const markInflight = (): InflightMark => { accrue(); return { at: areaAt, area: inflightArea } }
+  /** 至少 1：调用方自己就在途。时长为 0（同一拍交货）退回当下读数 */
+  const avgInflightSince = (mark: InflightMark): number => {
+    accrue()
+    const dt = areaAt - mark.at
+    const avg = dt > 0 ? (inflightArea - mark.area) / dt : getInflightTotal()
+    return Math.max(1, Math.round(avg))
   }
 
   /** 此刻真正在途的分片请求数（预取 + 关键片都在 laneInflight 里）——带宽采样统一用它当「并发」。 */
@@ -161,5 +192,8 @@ export function useLaneControl(getLaneUrls: (url: string) => string[]): LaneCont
   const getLaneCount = (sampleUrl?: string): number =>
     sampleUrl ? Math.max(1, getLaneUrls(sampleUrl).filter((_, i) => laneAlive(i)).length) : 1
 
-  return { laneDead, acquireLane, releaseLane, markLaneOk, markLaneFail, resetLanes, reviveLanes, getLaneCount, getInflightTotal }
+  return {
+    laneDead, acquireLane, releaseLane, markLaneOk, markLaneFail, resetLanes, reviveLanes, getLaneCount,
+    getInflightTotal, markInflight, avgInflightSince,
+  }
 }

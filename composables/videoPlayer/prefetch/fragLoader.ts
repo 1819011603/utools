@@ -41,7 +41,7 @@ export interface FragLoaderDeps {
 
 export function createFragLoaderFactory(deps: FragLoaderDeps) {
   const { segPrefetchCache, segPrefetching, prefetchInfo, getPrefetchedBuf, evictPrefetchCache } = deps.cache
-  const { acquireLane, releaseLane, markLaneOk, markLaneFail, getInflightTotal } = deps.lanes
+  const { acquireLane, releaseLane, markLaneOk, markLaneFail, markInflight, avgInflightSince } = deps.lanes
   const { tier, sampleSpeed, segInflightStart, skipSegment } = deps
 
   /*
@@ -191,10 +191,15 @@ export function createFragLoaderFactory(deps: FragLoaderDeps) {
           const { lane, laneUrl, laneCount } = acquireLane(url, true)   // 关键片优先直连（低延迟），直连满/熔断才退回均分
           const t = performance.now()
           if (!segInflightStart.has(url)) segInflightStart.set(url, t)   // 计时：登记在途（诊断用）
-          const conc = getInflightTotal()   // 采样时的在途总数（预取 + 关键片），供聚合可并行探针分档
+          const mark = markInflight()   // 分档用全程平均在途数（预取 + 关键片），同预取那边的口径
           fetch(laneUrl, { signal: ctrl.signal, referrerPolicy: 'no-referrer' })
             .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); if (!this.stats.loading.first) this.stats.loading.first = performance.now(); return r.arrayBuffer() })
-            .then(buf => { releaseLane(lane); markLaneOk(lane); sampleSpeed(buf.byteLength, performance.now() - t, conc, t); win(buf) })
+            .then(buf => {
+              const conc = avgInflightSince(mark)
+              releaseLane(lane); markLaneOk(lane)
+              sampleSpeed(buf.byteLength, performance.now() - t, conc, t)
+              win(buf)
+            })
             .catch(() => {
               releaseLane(lane)
               racers--   // 归还并发额度：额度是「同时几条」，别被顺序重试烧光（见上）

@@ -50,7 +50,8 @@ export function useBandwidthModel() {
 
   /**
    * 采样一次下载。只认真实网络传输：缓存命中（极快）、过小分片、离谱值一律丢。
-   * `concurrency` = **采样那一刻真正在途的连接总数**（预取 + 关键片，统一取 `lanes.getInflightTotal()`）。
+   * `concurrency` = **这一片下载全程的平均在途连接数**（预取 + 关键片，统一取 `lanes.avgInflightSince()`；
+   * 只读发起那一刻会把同步连发一批里的头两片错记进低并发档）。
    * 两个下载路径（预取 / fLoader）必须用同一个口径，否则「分档账本」会被两种语义污染。
    * `startedAt` 是请求发起时刻（`performance.now()`）：跨越并发变更点的样本不进分档账本。
    */

@@ -5,7 +5,7 @@
  * **关键片 preferDirect 优先 lane 0 = 直连**（代理多一跳，能不白吃就不吃），
  * 直连槽满或熔断才退回均分。
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { useLaneControl } from './lanes'
 import { MAX_CONN } from './tuning'
 
@@ -70,5 +70,63 @@ describe('getInflightTotal：统一的并发口径（预取 + 关键片共用一
     lc.acquireLane('u'); lc.acquireLane('u')
     lc.resetLanes()
     expect(lc.getInflightTotal()).toBe(0)
+  })
+})
+
+describe('avgInflightSince：分档用「全程平均在途数」，不是发起那一刻的', () => {
+  let clock = 1000
+  afterEach(() => { vi.restoreAllMocks() })
+  const useClock = () => { clock = 1000; vi.spyOn(performance, 'now').mockImplementation(() => clock) }
+
+  it('同步连发一批 6 条：第 1 条发起时在途只有 1，但全程跟另外 5 条并行 → 记 6', () => {
+    useClock()
+    const lc = dual()
+    lc.acquireLane('u')
+    const first = lc.markInflight()
+    expect(lc.getInflightTotal()).toBe(1)                // 旧口径会把它记进低并发档
+    for (let i = 0; i < 5; i++) lc.acquireLane('u')
+    clock += 2000
+    expect(lc.avgInflightSince(first)).toBe(6)
+  })
+
+  it('中途别的连接陆续交货 → 按时间加权（6 条 1s + 2 条 1s = 平均 4）', () => {
+    useClock()
+    const lc = dual()
+    for (let i = 0; i < 6; i++) lc.acquireLane('u')
+    const m = lc.markInflight()
+    clock += 1000
+    for (let i = 0; i < 4; i++) lc.releaseLane(i % 2)
+    clock += 1000
+    expect(lc.avgInflightSince(m)).toBe(4)
+  })
+
+  it('全程只有自己 → 1（进低并发档，单条基线的真样本）', () => {
+    useClock()
+    const lc = dual()
+    lc.acquireLane('u')
+    const m = lc.markInflight()
+    clock += 1500
+    expect(lc.avgInflightSince(m)).toBe(1)
+  })
+
+  it('同一拍交货（时长 0）→ 退回当下读数，且至少 1', () => {
+    useClock()
+    const lc = dual()
+    const m = lc.markInflight()
+    expect(lc.avgInflightSince(m)).toBe(1)
+    lc.acquireLane('u'); lc.acquireLane('u'); lc.acquireLane('u')
+    const m2 = lc.markInflight()
+    expect(lc.avgInflightSince(m2)).toBe(3)
+  })
+
+  it('跨 resetLanes 的标记：reset 前的在途照记，reset 后按 0 计，不出负数', () => {
+    useClock()
+    const lc = dual()
+    for (let i = 0; i < 4; i++) lc.acquireLane('u')
+    const m = lc.markInflight()
+    clock += 1000
+    lc.resetLanes()
+    clock += 1000
+    expect(lc.avgInflightSince(m)).toBe(2)               // (4×1000 + 0×1000) / 2000
   })
 })

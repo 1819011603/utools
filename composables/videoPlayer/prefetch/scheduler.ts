@@ -17,6 +17,16 @@ import { MAX_CONN } from './tuning'
 import { currentFrags } from '../engine/hlsFrags'
 import { fetchBodyWithStallWatch } from './fetchBody'
 
+/**
+ * 这一拍还能再发几条预取：既不超过目标并发，也**不挤占关键片的连接槽**。
+ *
+ * `inflightTotal` 含 fragLoader 为 hls.js 正在等的那一片起的竞速连接。只看「预取自己几条」时，
+ * 预取补满 hostCap 之后关键片的对冲再起一条，就超出浏览器每 origin 的 6 条 → 那一条在浏览器里
+ * 排队、排在一堆远处分片后面，对冲等于白开。所以总在途到顶时预取让路，关键片先走。
+ */
+export const prefetchSlots = (target: number, prefetching: number, inflightTotal: number, hostCap: number): number =>
+  Math.max(0, Math.min(target - prefetching, hostCap - inflightTotal))
+
 export interface PrefetchSchedulerDeps {
   getHls: () => HlsType | null
   getVideoEl: () => HTMLVideoElement | undefined
@@ -34,7 +44,7 @@ export interface PrefetchSchedulerDeps {
 export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
   const { getHls, getVideoEl, cache, bw, lanes, strategy, runtime, anchorTime, getAheadBuffered, getCachedAhead } = deps
   const { getAdaptivePrefetchCount, effectivePrefetchTarget, updateHealthZone } = strategy
-  const { getLaneCount, acquireLane, releaseLane, markLaneOk, markLaneFail, getInflightTotal } = lanes
+  const { getLaneCount, acquireLane, releaseLane, markLaneOk, markLaneFail, getInflightTotal, markInflight, avgInflightSince } = lanes
   const { sampleSpeed, sampleBitrate } = bw
 
   const {
@@ -102,9 +112,15 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
       const aStart = performance.now()
       const { lane, laneUrl, laneCount } = acquireLane(url)   // 直连/代理分流：取在途最少的 lane
       segInflightStart.set(url, aStart)            // 计时：登记在途（重试则刷新起点）
-      const conc = getInflightTotal()           // 采样时的在途总数（预取 + 关键片），供聚合可并行探针分档
+      const mark = markInflight()               // 分档用全程平均在途数（预取 + 关键片），不是发起那一刻的
       return fetchBodyWithStallWatch(ctrl, laneUrl, PREFETCH_STALL_MS)
-        .then(buf => { clearTimeout(timer); releaseLane(lane); markLaneOk(lane); sampleSpeed(buf.byteLength, performance.now() - aStart, conc, aStart); return buf })
+        .then(buf => {
+          clearTimeout(timer)
+          const conc = avgInflightSince(mark)
+          releaseLane(lane); markLaneOk(lane)
+          sampleSpeed(buf.byteLength, performance.now() - aStart, conc, aStart)
+          return buf
+        })
         .catch(e => {
           clearTimeout(timer); releaseLane(lane)
           // 中止（seek/竞速已有赢家）不算 lane 的账；**卡死（StallError）算**——那条 lane 该被避开
@@ -169,8 +185,7 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
 
     if (count === 0) return
 
-    // 计算还能发起几个新请求（不超过并发上限）
-    const canStart = Math.max(0, count - segPrefetching.size)
+    const canStart = prefetchSlots(count, segPrefetching.size, getInflightTotal(), runtime.hostConcurrencyCap)
     if (canStart === 0) return
 
     // 候选窗口：从 startIdx 往后扫描，最多看 count*3 个，足以跳过已缓存/下载中的。
@@ -212,7 +227,7 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
       count = countOverride   // 读数与 prefetchInfo 由调用方统一写好，这里只负责补片
     }
 
-    if (count === 0 || segPrefetching.size >= count) return
+    if (prefetchSlots(count, segPrefetching.size, getInflightTotal(), runtime.hostConcurrencyCap) === 0) return
 
     const cur = currentFrags(getHls())
     if (!cur || !cur.frags.length) return
