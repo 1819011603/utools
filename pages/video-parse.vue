@@ -486,7 +486,7 @@ import type { WatchRecord } from '~/composables/useWatchHistory'
 // 普通导出显式 import（不是 use* 组合式，靠自动导入会被数组常量那个坑吃掉，见 CLAUDE.md）
 import { onSyncApplied } from '~/composables/cloudSyncLocal'
 import type { ParsedEpisode, ParseResult, ParseRule } from '~/composables/videoParseRules'
-import type { ProbeVerdict } from '~/composables/videoPlayer/useReachabilityProbe'
+import type { ProbeVerdict } from '~/composables/videoPlayer/probeDiagnose'
 
 const toast = useToast()
 

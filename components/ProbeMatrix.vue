@@ -41,7 +41,7 @@
  * 可达性探测矩阵（两轴 × 四通道）的纯展示。播放器折叠区和解析页的「可达性检测」共用——
  * ✓/✗/?/– 四态各自的含义（尤其 skip 的「没测」不是「不通」）只该有一处说法。
  */
-import type { ProbeMatrixRow } from '~/composables/videoPlayer/useReachabilityProbe'
+import type { ProbeMatrixRow } from '~/composables/videoPlayer/probeDiagnose'
 
 defineProps<{
   rows: ProbeMatrixRow[]

@@ -73,81 +73,15 @@ export function useVideoConnStrategy(deps: VideoConnStrategyDeps) {
   const ladderMode = ref(false)
   let lastStrategyUrl = ''
 
-  // ── 「代理 Manifest」/「双通道」的可用性判定 ──
+  // ── 「代理 Manifest」/「双通道」的可用性判定（实现见 ./connDualChannel.ts）──
+  const { manifestOnlyDisabled, dualChannelUnavailable, dualChannelHint } =
+    useConnDualChannel({ useProxy, requestOrigin, requestReferer, manifestOnly, disguiseAsDownloader, dualChannel, probeResult })
 
-  // 「代理 Manifest」需要代理确实介入才有意义：伪装模式下它表示「代理 manifest 补 CORS + 分片直连」，
-  // 注入头模式下表示「manifest 走防盗链 + 分片直连」。两者都没有时代理压根不会介入，勾了无效 → 禁用。
-  const manifestOnlyDisabled = computed(() =>
-    !disguiseAsDownloader.value && !requestOrigin.value.trim() && !requestReferer.value.trim())
 
-  // 双通道需要分片「直连」和「经代理」两条路都通。有实测就用实测，否则按当前配置推断。
-  const dualChannelUnavailable = computed(() => {
-    // 已经开着就别再说「不可用」：那条 lane 可能是靠**迟到判定**开的（两条通道各自实测 ok，
-    // 只是有一条没在预算内回来 → 矩阵里留着 'skip'）。此时按矩阵读会得出相反的结论，
-    // 界面上就是「灯亮着、提示说不可用」（踩过）
-    if (dualChannel.value) return false
-    const r = probeResult.value
-    if (r && !r.degraded && axisMeasured(r.segment)) {
-      // **只把 'fail'/'unknown' 当不可用**：'skip' 是「没等到」，不是「测过不通」
-      return r.segment.direct !== 'ok' || (r.segment.disguise !== 'ok' && r.segment.disguise !== 'skip')
-    }
-    // 无探测数据（分片轴没测到 / 走了兜底阶梯）：跟 getProxyUrl 对分片(.ts)的判定保持一致——
-    // 分片走代理时直连 lane 必 403/CORS，没有分流可言。
-    if (disguiseAsDownloader.value) return !manifestOnly.value
-    const hasHeaders = !!requestOrigin.value.trim() || !!requestReferer.value.trim()
-    if (hasHeaders) return !manifestOnly.value
-    return useProxy.value
-  })
+  // ── Origin/Referer 输入历史（实现见 ./connHeaderHistory.ts）──
+  const { originHistory, refererHistory, loadHeaderHistory, rememberHeaders, originSuggestions, refererSuggestions } =
+    useConnHeaderHistory({ originHint, refererHint, getVideoUrl: () => videoUrl.value || videoUrlInput.value })
 
-  const dualChannelHint = computed(() => {
-    if (!dualChannelUnavailable.value) {
-      return '分片在直连 CDN 与本站代理两个 origin 间分流，把并发从 6 提到 ~12（代价：占用服务器出口流量）'
-    }
-    const r = probeResult.value
-    if (r && !r.degraded && axisMeasured(r.segment)) {
-      if (r.segment.direct !== 'ok') return '实测分片无法直连（须走代理）→ 直连通道会失败'
-      if (r.segment.disguise === 'skip') return '分片的代理通道这一轮没等到结论（起播不为它多等）→ 等它回来会自动开'
-      return '实测分片无法经代理获取（如源站端口非标被 CF 吞、服务器 IP 被封）→ 代理通道会失败'
-    }
-    return '需分片直连可达才有效：分片走代理时直连通道会 403'
-  })
-
-  // ── Origin/Referer 输入历史（localStorage 永久保存，供输入框下拉复用） ──
-  const ORIGIN_HISTORY_KEY = 'video-player-origin-history'
-  const REFERER_HISTORY_KEY = 'video-player-referer-history'
-  const originHistory = ref<string[]>([])
-  const refererHistory = ref<string[]>([])
-
-  const loadHeaderHistory = () => {
-    try { originHistory.value = JSON.parse(localStorage.getItem(ORIGIN_HISTORY_KEY) || '[]') } catch {}
-    try { refererHistory.value = JSON.parse(localStorage.getItem(REFERER_HISTORY_KEY) || '[]') } catch {}
-  }
-  const rememberOne = (listRef: Ref<string[]>, key: string, value: string) => {
-    const v = value.trim()
-    if (!v) return
-    listRef.value = [v, ...listRef.value.filter(x => x !== v)].slice(0, 30)  // 去重、置顶、上限 30
-    try { localStorage.setItem(key, JSON.stringify(listRef.value)) } catch {}
-  }
-  const rememberHeaders = () => {
-    rememberOne(originHistory, ORIGIN_HISTORY_KEY, originHint.value)
-    rememberOne(refererHistory, REFERER_HISTORY_KEY, refererHint.value)
-  }
-
-  // 下拉建议：当前视频域名置顶 + 历史
-  //（自动策略下用户很少手填，历史常为空，故用当前域名兜底保证有可选项）
-  const currentVideoOrigin = computed(() => {
-    const u = (videoUrl.value || videoUrlInput.value || '').trim()
-    if (!u) return ''
-    try { return new URL(u.startsWith('//') ? 'https:' + u : u).origin } catch { return '' }
-  })
-  const originSuggestions = computed(() => {
-    const host = currentVideoOrigin.value
-    return host ? [host, ...originHistory.value.filter(x => x !== host)] : originHistory.value
-  })
-  const refererSuggestions = computed(() => {
-    const r = currentVideoOrigin.value ? currentVideoOrigin.value + '/' : ''
-    return r ? [r, ...refererHistory.value.filter(x => x !== r)] : refererHistory.value
-  })
 
   // ── 阶梯 / 结论套用 ──
 
