@@ -5,6 +5,7 @@
  * `playingIndex` 由调用方通过 getter 提供（它是「媒体元素当前真装着的那一集」，见 useVideoPlaylistCtl）。
  */
 import type { Ref } from 'vue'
+import { ref, computed, watch, onScopeDispose } from 'vue'
 import type { VideoMediaState } from '../useVideoMediaState'
 import type { VideoHandoff } from '../useVideoHandoff'
 import { onSyncApplied } from '../../cloudSyncLocal'

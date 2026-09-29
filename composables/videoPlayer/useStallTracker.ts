@@ -8,6 +8,7 @@
  * 暴露：isStalling / stallCount / stallMsTotal / lastStallAt / smoothSecs（响应式，供面板展示），
  * getSmoothSecs()（连续流畅秒数）/ stallCountInWindow(ms)（窗口内卡顿次数，供自愈判据）。
  */
+import { ref } from 'vue'
 
 /** 短于此值的停顿一律不算卡顿：肉眼基本无感，计进去反而污染自愈判据（见 endStall） */
 const MIN_STALL_MS = 500

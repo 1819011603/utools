@@ -6,6 +6,7 @@
  * 前者是一次性流程，后者是每秒跑一次的闭环，混在一起两边都难读。
  * 引擎的心跳会调 selfHeal（由装配层登记，见 registerTickHook）。
  */
+import { ref, computed, watch } from 'vue'
 import type { VideoMediaState } from './useVideoMediaState'
 import type { VideoServerTier } from './useVideoServerTier'
 import type { VideoConnStrategy } from './useVideoConnStrategy'

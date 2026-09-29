@@ -9,6 +9,7 @@
  *
  * 内部实现模块，走显式相对 import，不进 `imports.dirs`。
  */
+import { reactive, ref } from 'vue'
 import { downloadHlsEpisode } from './hlsEpisode'
 import { createSink, safeFileName } from './fileSink'
 

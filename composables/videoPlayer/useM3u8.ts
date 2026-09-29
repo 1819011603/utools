@@ -111,12 +111,7 @@ export function useM3u8(getProxyUrl: (url: string) => string) {
       const isEncrypted = seg.key?.method === 'AES-128'
       let keyIv: Uint8Array | null = null
       if (isEncrypted && seg.key?.iv) {
-        // m3u8-parser 可能返回数组或十六进制字符串
-        const ivSrc = seg.key.iv
-        const ivHex = Array.isArray(ivSrc)
-          ? (ivSrc as number[]).map(b => b.toString(16).padStart(2, '0')).join('')
-          : String(ivSrc).replace(/^0x/i, '').padStart(32, '0')
-        keyIv = new Uint8Array(ivHex.match(/.{2}/g)!.map((b: string) => parseInt(b, 16)))
+        keyIv = ivBytesOf(seg.key.iv)
       }
 
       result.push({

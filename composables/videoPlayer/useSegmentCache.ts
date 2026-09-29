@@ -8,6 +8,8 @@
  *
  * 只管「存/取/淘汰/取消」，不涉及决定预取哪些分片（那是 useHlsPrefetch 的职责）。
  */
+import { ref } from 'vue'
+
 interface PrefetchEntry { buf: ArrayBuffer; ts: number }   // 带时间戳，用于 TTL 过期
 // bytes = 缓存占的字节数。分片数看不出内存压力（各站分片大小差一个量级），
 // 而这个缓存正是播放页发卡时最该先看的那个数
