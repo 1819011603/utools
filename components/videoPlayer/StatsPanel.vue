@@ -130,16 +130,32 @@
       <span class="text-gray-500">播放状态：</span>
       <span class="font-medium">{{ playbackDiag }}</span>
     </div>
+
+    <!-- 本机播放记录：调参前后对比用的尺子（只存本机、不上传），见 engine/playMetrics.ts -->
+    <div
+      class="flex flex-wrap items-center gap-2 text-sm border-t border-gray-200 dark:border-gray-700 pt-2"
+      title="每集结束（切集 / 重载 / 离开）时记一条：起播耗时、卡顿、跳片、换网后恢复耗时、平均并发。最近 50 集，只存在这台设备上。"
+    >
+      <span class="text-gray-500">本机记录：</span>
+      <span v-if="metrics.count" class="font-medium">
+        最近 {{ metrics.count }} 集 · 起播中位 {{ metrics.startupP50Ms === null ? '—' : (metrics.startupP50Ms / 1000).toFixed(1) + 's' }}
+        · 每小时卡顿 {{ metrics.stallsPerHour }} 次 · 跳片 {{ metrics.skips }}
+      </span>
+      <span v-else class="text-gray-400">还没有（看完或切走一集后生成）</span>
+      <UButton size="2xs" variant="soft" color="gray" icon="i-heroicons-clipboard-document" :disabled="!metrics.count" @click="onCopyMetrics">复制 JSON</UButton>
+      <UButton size="2xs" variant="ghost" color="gray" icon="i-heroicons-trash" :disabled="!metrics.count" @click="onClearMetrics">清空</UButton>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { MSE_CEILING_SECS } from '~/composables/videoPlayer/types'
+import { summarizeRecords } from '~/composables/videoPlayer/engine/playMetrics'
 const {
   hlsConfig, hlsStats, bufferedPercent, progressPercent, playbackRate, playbackDiag,
   tierLabel, tierBadgeColor, tierIsAuto, guardRateCeiling, effectiveTierParams,
   strategy, stall, prefetchInfo, aggregateKBps, aggregateMbps,
-  dualChannel, dualChannelUnavailable, purgePlayedSegments,
+  dualChannel, dualChannelUnavailable, purgePlayedSegments, getPlayRecords, clearPlayRecords,
 } = useVideoPlayerCtx()
 
 // MSE 窗口上限：就是 engine/hlsConfig.ts 交给 hls.js 的 maxMaxBufferLength（append 的硬闸）。
@@ -154,6 +170,25 @@ const droppedPercent = computed(() => {
 })
 
 const toast = useToast()
+
+// 记录只在一集结束时才变，面板每次打开读一次就够（它是 v-if 挂载的），复制/清空后再刷
+const metrics = ref(summarizeRecords([]))
+const refreshMetrics = () => { metrics.value = summarizeRecords(getPlayRecords()) }
+onMounted(refreshMetrics)
+
+const onCopyMetrics = async () => {
+  try {
+    await navigator.clipboard.writeText(JSON.stringify(getPlayRecords(), null, 2))
+    toast.add({ title: `已复制 ${metrics.value.count} 条播放记录`, color: 'green' })
+  } catch {
+    toast.add({ title: '复制失败', description: '浏览器没给剪贴板权限', color: 'red' })
+  }
+}
+const onClearMetrics = () => {
+  clearPlayRecords()
+  refreshMetrics()
+  toast.add({ title: '本机播放记录已清空', color: 'gray' })
+}
 
 // 清理完必须给回执：释放 0 的时候尤其要说话，否则用户分不清「点了没反应」和「本来就没得清」
 const onPurge = () => {

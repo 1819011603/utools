@@ -8,7 +8,8 @@
 `video-player-origin-history` / `-referer-history` · `video-parse-rules` /
 `-embed-sandbox` / `video-parse-last-result`（1 小时）· `video-watch-history`（**看到第几集**，按剧名存）·
 `video-show-prefs`（**倍速与片头片尾**，按剧名存）· `video-favorites`（**收藏影片**，按剧名存）·
-`video-cover-miss`（封面补不到的剧，24 小时内不再试）· 各页 `*-settings` · `utools-history-<page>`。
+`video-cover-miss`（封面补不到的剧，24 小时内不再试）· `video-player-metrics`（**本机播放记录**，每集一条、最近 50 条，
+只存本机不上云，见 player.md「本机播放记录」）· 各页 `*-settings` · `utools-history-<page>`。
 
 同步账号那侧：`cloud-sync-token` / `cloud-sync-user`（令牌与用户名）· `cloud-sync-meta`（见下）。
 

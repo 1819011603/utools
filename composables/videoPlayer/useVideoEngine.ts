@@ -22,6 +22,7 @@ import { useNetRecovery } from './engine/netRecovery'
 import { useHlsStats } from './engine/hlsStats'
 import { useStartAnchor } from './engine/startAnchor'
 import { useVideoLoader } from './engine/videoLoader'
+import { createPlayMetrics } from './engine/playMetrics'
 
 export interface VideoEngineDeps {
   media: VideoMediaState
@@ -57,6 +58,9 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     getStartPosition, beginAnchor, setAppliedStartPos, setRelocating,
   } = startAnchor
 
+  // 本机播放记录（每集一条，见 ./engine/playMetrics.ts）：边界由 loadVideo（arm）与 destroyHls（结算 + 开集）给
+  const playMetrics = createPlayMetrics()
+
   // ── 预取缓存 + 自适应预取 + 卡顿记录 ──
   const segmentCache = useSegmentCache({ getMaxBufferSizeMB: () => hlsConfig.value.maxBufferSizeMB })
   const {
@@ -91,6 +95,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     },
     // 服务器档位参数（好/中/差预设 + 页面覆盖）：抗卡阈值/超时/安全系数/并发下限/预取深度全从这里读
     getTierParams: () => tier.effectiveTierParams.value,
+    onSegmentSkipped: () => playMetrics.noteSkip(),
   })
   const {
     getAheadBuffered, getCachedAhead, createHlsFragLoader, triggerAdaptivePrefetch,
@@ -193,6 +198,9 @@ export function useVideoEngine(deps: VideoEngineDeps) {
    *
    * 挂在 `document` 捕获阶段：`resize` 不冒泡，而 `<video>` 会被 `videoKey++` 整个换掉。
    */
+  /** 起播耗时的终点：同 onIntrinsicResize 挂 document 捕获阶段（`playing` 不冒泡、元素会被重建） */
+  const onPlayingForMetrics = (e: Event) => { if (e.target === videoEl.value) playMetrics.notePlaying() }
+
   const onIntrinsicResize = (e: Event) => {
     const v = e.target as HTMLVideoElement | null
     if (!v || !v.videoWidth || v !== videoEl.value) return
@@ -206,9 +214,10 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     if (hlsTickTimer) return
     document.addEventListener('visibilitychange', onVisibilityChange)
     // 「网络变了」的三个信号（断网恢复 / 换网 / 回前台）统一由 netWatch 归并成一个
-    unsubscribeNet = onNetChange(onNetChanged)
+    unsubscribeNet = onNetChange(() => { playMetrics.noteNetChange(); onNetChanged() })
     unsubscribePiP = startPiPTracking()   // 小窗尺寸只能在「进入那一刻」拿到，得先挂上
     document.addEventListener('resize', onIntrinsicResize, true)
+    document.addEventListener('playing', onPlayingForMetrics, true)
     window.addEventListener('offline', onNetworkOffline)   // 断网只用来写那句提示，不是恢复动作
     hlsTickTimer = setInterval(() => {
       dropSpinnerIfPlaying()   // 转圈兜底熄灯（见它自己那段注释）
@@ -219,6 +228,8 @@ export function useVideoEngine(deps: VideoEngineDeps) {
       refreshCacheStats()   // 面板上的「预取缓存 N 片 / X MB」
       updateHlsStats()
       tickHooks.forEach(fn => fn())
+      const v = videoEl.value
+      if (v) playMetrics.tick({ currentTime: v.currentTime, paused: v.paused, targetConn: strategy.value.targetConn })
     }, 1000)
   }
   const stopHlsTick = () => {
@@ -227,6 +238,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     unsubscribeNet?.(); unsubscribeNet = null
     unsubscribePiP?.(); unsubscribePiP = null
     document.removeEventListener('resize', onIntrinsicResize, true)
+    document.removeEventListener('playing', onPlayingForMetrics, true)
     window.removeEventListener('offline', onNetworkOffline)
   }
 
@@ -267,6 +279,8 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   const registerDestroyHook = (fn: () => void) => { onDestroyHooks.push(fn) }
 
   const destroyHls = () => {
+    // 先结算上一集：下面的 stall.reset() 会把卡顿读数清零
+    playMetrics.end(stall.stallCount.value, stall.stallMsTotal.value)
     clearLoadTimeout()
     cancelBufferingGate()   // 别让上一个流的闸门在新流身上到点
     onDestroyHooks.forEach(fn => fn())
@@ -288,6 +302,8 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     stall.reset()
     stallRecovery.reset()   // 上一集的播放头时间点不能拿来判「冻住」
     tier.guardRateCeiling.value = Infinity   // 解除抗卡降速守卫
+    // loadVideo 里那次 destroyHls 就是新一集的起点（arm 过才开；卸载/报错放弃那几次不开）
+    playMetrics.beginArmed(deps.progressKey(), videoUrl.value)
   }
 
   /** 上一次挂的画中画重开监听（切集可能连着来，别叠着挂） */
@@ -357,7 +373,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     setAppliedStartPos,
     setRelocating,
   })
-  const loadVideo = loader.loadVideo
+  const loadVideo = () => { playMetrics.arm(); return loader.loadVideo() }
 
   /** 「应用配置」：重载并回到原播放位置 */
   const applyHlsConfig = async () => {
@@ -396,6 +412,8 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     // 统计。getHls 只给「读一眼当前档位的编码/帧率/声明码率」这类展示用（见 useVideoContextMenu）——
     // 别拿它去外部驱动 hls.js 的生命周期，那一律走上面几个方法
     updateHlsStats, getHls: () => hls,
+    // 本机播放记录（面板导出用）
+    getPlayRecords: playMetrics.loadRecords, clearPlayRecords: playMetrics.clearRecords,
   }
 }
 

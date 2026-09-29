@@ -60,6 +60,8 @@ export interface HlsPrefetchOptions {
    * 所以卡顿守卫排在缺口/聚合那些「省流量」的判据前面（见 stallGuard）。
    */
   getLastStallAt?: () => number
+  /** 关键片拿不到、真的跳过了一片（本机播放记录用） */
+  onSegmentSkipped?: () => void
 }
 
 export function useHlsPrefetch(opts: HlsPrefetchOptions) {
@@ -115,6 +117,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     const target = (frag.start ?? video.currentTime) + (frag.duration ?? 2) + 0.1
     if (target > video.currentTime && (!video.duration || target < video.duration - 0.5)) {
       video.currentTime = target
+      opts.onSegmentSkipped?.()
       return true
     }
     return false
