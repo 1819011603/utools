@@ -83,22 +83,16 @@ describe('probeUrl：绝不能加 Range 头或任何自定义头', () => {
 })
 
 describe('pickChannel：恒按 CHANNEL_ORDER 优先级取，不按到达顺序 / 对象键序', () => {
-  // BUG: composables/videoPlayer/probe/probeHttp.ts:5 只 `import type { AxisProbe, Channel, Reach }`（类型导入），
-  // 但 probeHttp.ts:120 的 pickChannel 在运行期引用了值 `CHANNEL_ORDER`（来自 useReachabilityProbe.ts），
-  // 该值从未被真正 import 进本文件。真实 Nuxt 应用里能跑通，是因为 `composables/` 目录下的具名导出会被
-  // unimport 插件自动注入为全局标识符；脱离这层 Nuxt 编译期 transform（本测试的纯 vitest/node 环境、
-  // 或任何未来把这个文件单独打包/在 Node 脚本里 import 的场景）直接触发
-  // `ReferenceError: CHANNEL_ORDER is not defined`——已用下面三个 it.skip 实测复现（改成 it 会全部失败并报此错）。
-  // 正确行为应是：pickChannel 按 CHANNEL_ORDER 声明的优先级（direct > disguise > headers）挑第一个 'ok' 通道。
-  it.skip('disguise ok、direct fail → 选 disguise（唯一可达的）', () => {
+  // 曾是 bug：CHANNEL_ORDER 定义在上层、这里靠自动导入当全局用，离开 Nuxt 编译即 ReferenceError（已下沉到 probeHttp）
+  it('disguise ok、direct fail → 选 disguise（唯一可达的）', () => {
     expect(pickChannel(axis({ direct: 'fail', disguise: 'ok', headers: 'skip' }))).toBe('disguise')
   })
 
-  it.skip('direct 与 disguise 都 ok → 选优先级更高的 direct，不是随便一个', () => {
+  it('direct 与 disguise 都 ok → 选优先级更高的 direct，不是随便一个', () => {
     expect(pickChannel(axis({ direct: 'ok', disguise: 'ok', headers: 'ok' }))).toBe('direct')
   })
 
-  it.skip('全 unknown / skip（没有一条实测 ok）→ null，unknown 不算可达', () => {
+  it('全 unknown / skip（没有一条实测 ok）→ null，unknown 不算可达', () => {
     expect(pickChannel(axis({ direct: 'unknown', disguise: 'skip', headers: 'unknown' }))).toBeNull()
   })
 })

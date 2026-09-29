@@ -1,7 +1,7 @@
 import { useM3u8 } from './useM3u8'
 import { isDirectDead, markDirectDead, clearDirectDead } from './probeStore'
 import { describeLevel } from './videoDiag'
-import { makeAxisWaiter, emptyAxis, needsHeadersChannel, isMixedContent, probeUrl, pickChannel, SOURCE_GONE_STATUS, DEFAULT_TIMEOUT, OVERALL_TIMEOUT, HEDGE_DELAY, PRIORITY_BUDGET } from './probe/probeHttp'
+import { CHANNEL_ORDER, makeAxisWaiter, emptyAxis, needsHeadersChannel, isMixedContent, probeUrl, pickChannel, SOURCE_GONE_STATUS, DEFAULT_TIMEOUT, OVERALL_TIMEOUT, HEDGE_DELAY, PRIORITY_BUDGET } from './probe/probeHttp'
 
 /**
  * 连接可达性探测：起播前用几个小请求实测出「manifest 轴」与「分片轴」各自能走哪条通道，
@@ -21,7 +21,8 @@ import { makeAxisWaiter, emptyAxis, needsHeadersChannel, isMixedContent, probeUr
  * ddys.ai 当年就是这么发现的。
  */
 export type Channel = 'direct' | 'disguise' | 'headers'
-export const CHANNEL_ORDER: Channel[] = ['direct', 'disguise', 'headers']
+// 定义在 probe/probeHttp（下层），这里原样转出，保持对外（probeDiagnose / 自动导入）的名字不变
+export { CHANNEL_ORDER }
 export const CHANNEL_LABEL: Record<Channel, string> = {
   direct: '直连',
   disguise: '代理·伪装',

@@ -115,6 +115,13 @@ export async function probeUrl(
   }
 }
 
+/**
+ * 通道优先级。**定义在这一层**（被 useReachabilityProbe 转出）：原来定义在上层、这里靠 Nuxt 自动导入
+ * 当全局变量用——上层又 import 了本文件，等于藏了一个反向依赖，离开 Nuxt 的编译（vitest / 单独打包）
+ * 直接 `ReferenceError: CHANNEL_ORDER is not defined`
+ */
+export const CHANNEL_ORDER: Channel[] = ['direct', 'disguise', 'headers']
+
 // 按优先级取第一条可达通道（unknown 不算可达，但也不阻止后面的通道胜出）
 export function pickChannel(axis: AxisProbe): Channel | null {
   for (const c of CHANNEL_ORDER) if (axis[c] === 'ok') return c

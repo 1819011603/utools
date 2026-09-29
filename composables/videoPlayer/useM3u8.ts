@@ -12,6 +12,30 @@ export interface HlsSegment {
 }
 
 /**
+ * `#EXT-X-KEY` 的 `IV=0x...` → 16 字节。
+ *
+ * **m3u8-parser 给的是 `Uint32Array(4)`（4 个大端 32 位字）**，不是字节数组也不是十六进制串。
+ * 这里原来只认 `Array.isArray`，Uint32Array 落进「当字符串」那条：`String()` 出来是逗号拼的十进制
+ * （`16909060,84281096,…`），再按十六进制两两切 → 18 个字节、还夹一个 NaN。解密不报错，
+ * 下出来的文件静默花屏——只影响下载（播放那条由 hls.js 自己解密）。
+ */
+export const ivBytesOf = (src: unknown): Uint8Array | null => {
+  if (src instanceof Uint32Array && src.length === 4) {
+    const out = new Uint8Array(16)
+    const dv = new DataView(out.buffer)
+    src.forEach((w, i) => dv.setUint32(i * 4, w, false))
+    return out
+  }
+  if ((src instanceof Uint8Array || Array.isArray(src)) && src.length === 16) return Uint8Array.from(src as ArrayLike<number>)
+  if (typeof src === 'string') {
+    const hex = src.replace(/^0x/i, '')
+    if (!/^[0-9a-f]{1,32}$/i.test(hex)) return null
+    return new Uint8Array(hex.padStart(32, '0').match(/.{2}/g)!.map(b => parseInt(b, 16)))
+  }
+  return null   // 认不出的形态：退回「按 sn 推导」，也比拿一串错字节去解好
+}
+
+/**
  * M3U8 解析 + AES-128 解密
  *
  * 纯逻辑，通过注入的 getProxyUrl 走服务端代理（注入 Origin/Referer）。

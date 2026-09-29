@@ -7,7 +7,7 @@
  * fetch 用 vi.stubGlobal 打桩；不依赖真实网络。
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { useM3u8 } from './useM3u8'
+import { useM3u8, ivBytesOf } from './useM3u8'
 
 afterEach(() => { vi.unstubAllGlobals() })
 
@@ -132,23 +132,11 @@ describe('extractMediaSegmentsWithMeta：加密元数据 + init map', () => {
     const m3u8 = useM3u8(identityProxy)
     const segs = await m3u8.getM3u8SegmentsWithMeta('https://cdn.example.com/a/index.m3u8')
     expect(segs[0]!.keyUri).toBe('https://cdn.example.com/a/key.bin')
-    // 正确行为应当是这样：见下方 BUG 回归钉子，当前实现解不出这个值。
-    // expect(segs[0]!.keyIv).toEqual(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]))
-    expect(segs[0]!.keyIv).not.toBeNull()
+    expect(segs[0]!.keyIv).toEqual(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]))
   })
 
-  // BUG: useM3u8.ts:113-119。m3u8-parser（真实依赖，package.json ^7.2.0）对
-  // `#EXT-X-KEY:...,IV=0x...` 解析出的 seg.key.iv 实测是 **Uint32Array(4)**（4 个
-  // 32 位大端整数拼成 16 字节 IV），不是数组也不是十六进制字符串。而 useM3u8.ts
-  // 的分支只判断 `Array.isArray(ivSrc)`，Uint32Array 走不进这条分支，落到
-  // `else` 分支对它调用 `String(ivSrc)`——Uint32Array 的 String() 是逗号拼接的十进制
-  // 字符串（如 "16909060,84281096,151653132,219025168"，长 37 且含逗号），
-  // 再按两字符一组当十六进制解析，逗号会让某一字节解出 NaN，其余字节也与真实
-  // IV 完全不同。也就是说：任何用 `IV=0x...` 显式指定 IV 的 AES-128 HLS 流，
-  // 解密时用的 IV 全是错的，会导致该流解密失败/花屏，而不是走「无显式 IV，按
-  // sn 推导」这条已验证正确的兜底路径。用真实 m3u8-parser 实测得到的错误字节：
-  // [22,144,144,96,NaN,66,129,9,6,21,22,83,19,2,33,144,37,22]（含 NaN，且长度 18 不是 16）。
-  it.skip('BUG 回归钉子：m3u8-parser 给的 Uint32Array 形式 IV 应该正确解析成 16 字节，而不是被 String() 糊成十进制逗号串再误读', async () => {
+  // 曾是 bug：m3u8-parser 给的 IV 是 Uint32Array(4)，旧代码把它 String() 成十进制逗号串再当十六进制读（见 ivBytesOf）
+  it('m3u8-parser 给的 Uint32Array 形式 IV 正确解析成 16 字节（不被 String() 糊成十进制逗号串）', async () => {
     const media = [
       '#EXTM3U',
       '#EXT-X-KEY:METHOD=AES-128,URI="key.bin",IV=0x0102030405060708090a0b0c0d0e0f10',
@@ -282,5 +270,23 @@ describe('parseManifestText：已拿到手的原文直接解析（预热用）�
     const r = m3u8.parseManifestText(text, 'https://cdn.example.com/a/index.m3u8')
     expect(r.segments).toEqual([{ url: 'https://cdn.example.com/a/seg0.ts', duration: 5 }])
     expect(r.keyUrl).toBe('https://cdn.example.com/a/key.bin')
+  })
+})
+
+describe('ivBytesOf：各种 IV 形态', () => {
+  it('Uint32Array(4) 按大端展开', () => {
+    expect(ivBytesOf(new Uint32Array([0x01020304, 0x05060708, 0x090a0b0c, 0x0d0e0f10])))
+      .toEqual(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]))
+  })
+  it('十六进制串（含 0x 前缀、不足 32 位左补零）', () => {
+    expect(ivBytesOf('0x1')).toEqual(new Uint8Array([...Array(15).fill(0), 1]))
+  })
+  it('16 字节数组原样', () => {
+    expect(ivBytesOf(Array.from({ length: 16 }, (_, i) => i))).toEqual(Uint8Array.from({ length: 16 }, (_, i) => i))
+  })
+  it('认不出的形态 → null（退回按 sn 推导），不产出乱码字节', () => {
+    expect(ivBytesOf('16909060,84281096')).toBeNull()
+    expect(ivBytesOf(new Uint32Array(3))).toBeNull()
+    expect(ivBytesOf(42)).toBeNull()
   })
 })
