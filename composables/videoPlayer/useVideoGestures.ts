@@ -42,7 +42,7 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
   const { media, controls, autoTune } = deps
   // isLocked / showLockBtn / brightness 都在裸状态里（controls 与设置面板也要读写）
   const {
-    videoEl, duration, volume, isMuted, showControls, isPlaying, isFullscreen,
+    videoEl, duration, volume, isMuted, showControls, isFullscreen,
     isLocked, showLockBtn, brightness,
   } = media
 
@@ -70,7 +70,6 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
   let lastTapAt = 0
   let lastTapX = 0
   let activePointer: number | null = null
-  let pointerKind = 'mouse'
   let lastTouchAt = 0    // 最近一次触摸的时刻，用来滤掉浏览器补发的兼容鼠标事件
   let tapWasShown = false  // 按下那一刻控制栏是不是开着（单击的目标态由它定，见 onTap）
   let tapX = 0.5           // 这一下点在横向哪个位置（0~1）；单击要等双击窗口过完才执行，得先存下来
@@ -176,7 +175,6 @@ export function useVideoGestures(deps: VideoGesturesDeps) {
     controls.restoreSound()   // 静音兜底起播过的话，这一下把声音还回来
 
     activePointer = e.pointerId
-    pointerKind = e.pointerType
     if (e.pointerType !== 'mouse') lastTouchAt = performance.now()
     tapWasShown = showControls.value
     const rect = rectOf(e)

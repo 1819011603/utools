@@ -56,7 +56,7 @@ export interface LaneControl {
   /** 当前流的**可用** lane 数（排除熔断的），用于放宽并发上限 */
   getLaneCount: (sampleUrl?: string) => number
   /**
-   * 此刻真正在途的分片请求总数（预取 + 关键片都在 `laneInflight` 里）。
+   * 此刻真正在途的分片请求总数：预取 + 关键片（`laneInflight`）+ 下载队列与下一集预热（`withExternalSlot`）。
    * 带宽采样统一用它当「并发」——两个路径各自用「预取线程数」「竞速条数」会污染分档账本。
    */
   getInflightTotal: () => number
@@ -97,13 +97,9 @@ export const withExternalSlot = async <T>(fn: () => Promise<T>): Promise<T> => {
   try { return await fn() } finally { accrueExternal(); externalInflight-- }
 }
 
-/** 当前外部在途数（测试与诊断用） */
-export const getExternalInflight = (): number => externalInflight
-
 export function useLaneControl(getLaneUrls: (url: string) => string[]): LaneControl {
   const laneInflight: number[] = []
   const laneFails: number[] = []    // 各 lane 的连续失败数（成功即清零）
-  const laneOks: number[] = []      // 各 lane 的累计成功数
   const laneTrippedAt: number[] = [] // 各 lane 的熔断时刻（观察期到了就放回来试，见 LANE_PROBATION_MS）
   const laneDead = ref<boolean[]>([])
   // 本实例 lane 在途数对时间的积分（条·ms），只增不减（reset 也不清，否则旧标记换算出负数）。
@@ -140,10 +136,7 @@ export function useLaneControl(getLaneUrls: (url: string) => string[]): LaneCont
     return changed
   }
 
-  const markLaneOk = (lane: number) => {
-    laneFails[lane] = 0
-    laneOks[lane] = (laneOks[lane] ?? 0) + 1
-  }
+  const markLaneOk = (lane: number) => { laneFails[lane] = 0 }
 
   const markLaneFail = (lane: number, laneCount: number) => {
     laneFails[lane] = (laneFails[lane] ?? 0) + 1
@@ -161,7 +154,6 @@ export function useLaneControl(getLaneUrls: (url: string) => string[]): LaneCont
   const resetLanes = () => {
     accrue()   // 先把清零前的在途记进积分，别让跨 reset 的标记少算
     laneFails.length = 0
-    laneOks.length = 0
     laneInflight.length = 0
     laneTrippedAt.length = 0
     laneDead.value = []

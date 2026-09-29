@@ -6,7 +6,7 @@
  * 直连槽满或熔断才退回均分。
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { useLaneControl, withExternalSlot, getExternalInflight } from './lanes'
+import { useLaneControl, withExternalSlot } from './lanes'
 import { MAX_CONN } from './tuning'
 
 const dual = () => useLaneControl(() => ['direct', 'proxy'])
@@ -150,12 +150,12 @@ describe('外部在途（下载队列 / 下一集预热）：同样占连接，�
     expect(lc.getInflightTotal()).toBe(3)             // 1 条预取 + 2 条下载
     a.release(); b.release(); await Promise.all([a.p, b.p])
     expect(lc.getInflightTotal()).toBe(1)
-    expect(getExternalInflight()).toBe(0)
   })
 
   it('请求抛错也归还，不泄漏计数', async () => {
+    const lc = dual()
     await expect(withExternalSlot(async () => { throw new Error('403') })).rejects.toThrow('403')
-    expect(getExternalInflight()).toBe(0)
+    expect(lc.getInflightTotal()).toBe(0)
   })
 
   it('分档：一片预取全程跟 2 条下载并行 → 记 3，不是 1', async () => {

@@ -71,7 +71,7 @@ export function createFragLoaderFactory(deps: FragLoaderDeps) {
       }
       private ctrl: AbortController | null = null
 
-      load(context: any, config: any, callbacks: any): void {
+      load(context: any, _config: any, callbacks: any): void {
         this.context = context
         const url: string = context.url
         const t0 = performance.now()

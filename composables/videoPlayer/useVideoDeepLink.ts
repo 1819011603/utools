@@ -27,7 +27,7 @@ export interface VideoDeepLinkDeps {
 }
 
 export function useVideoDeepLink(deps: VideoDeepLinkDeps) {
-  const { media, conn, handoff, playlist } = deps
+  const { media, handoff, playlist } = deps
 
   /**
    * 从原始 `window.location.search` 手工解析。

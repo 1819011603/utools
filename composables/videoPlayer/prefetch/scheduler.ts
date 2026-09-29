@@ -100,6 +100,20 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
     runtime.hostConcurrencyCap = cap
   }
 
+  /**
+   * 一拍的「量 → 判 → 记」：读两个缓冲指标、刷新健康区、算目标并发、到目标即停取、写面板读数。
+   * 四个入口（FRAG_BUFFERED 触发 / 补片回调 / 心跳 / 起播预热）共用，别各写一份再漂开。
+   * 双指标：mseAhead（真实可播）驱动健康区/降速/跳片；cachedAhead（含预取缓存）驱动并发与停取。
+   */
+  const evaluateCount = (video: HTMLVideoElement): number => {
+    const mseAhead = getAheadBuffered(video)
+    const cachedAhead = getCachedAhead(video)
+    updateHealthZone(mseAhead, cachedAhead)   // 健康区（只驱动抗卡动作，不参与并发）
+    const count = capAtTarget(cachedAhead, getAdaptivePrefetchCount(cachedAhead))
+    writePrefetchInfo(mseAhead, count)
+    return count
+  }
+
   // 发起一个分片预取请求（带 1 次轻量重试，减少「空洞」导致的临播卡顿）
   // durationSec = 该分片代表的视频秒数，用于实测码率
   const PREFETCH_TIMEOUT_MS = 300000   // 单分片总上限(5分钟)：兜底，防「卡死连接永久占位」
@@ -175,14 +189,7 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
     // 探测未来分片的 host 分布：多 CDN / 双通道时放宽并发上限
     updateHostCap(frags, startIdx)
 
-    // 双指标：mseAhead（真实可播）驱动健康区/降速/跳片；cachedAhead（含预取缓存）驱动并发与停取。
-    const mseAhead = getAheadBuffered(video)
-    const cachedAhead = getCachedAhead(video)
-    updateHealthZone(mseAhead, cachedAhead)        // 健康区（只驱动抗卡动作，不参与并发）
-    let count = getAdaptivePrefetchCount(cachedAhead)
-    count = capAtTarget(cachedAhead, count)   // 已达有效预取深度 → 停止预取
-    writePrefetchInfo(mseAhead, count)
-
+    const count = evaluateCount(video)
     if (count === 0) return
 
     const canStart = prefetchSlots(count, segPrefetching.size, getInflightTotal(), runtime.hostConcurrencyCap)
@@ -216,16 +223,8 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
   const startOnePrefetch = (countOverride?: number) => {
     const video = getVideoEl()
     if (!video) return
-    let count: number
-    if (countOverride === undefined) {
-      const mseAhead = getAheadBuffered(video)
-      const cachedAhead = getCachedAhead(video)
-      updateHealthZone(mseAhead, cachedAhead)   // 与 tick/trigger 一致：现算读数就把健康区刷新，别滞后一拍
-      count = capAtTarget(cachedAhead, getAdaptivePrefetchCount(cachedAhead))
-      writePrefetchInfo(mseAhead, count)
-    } else {
-      count = countOverride   // 读数与 prefetchInfo 由调用方统一写好，这里只负责补片
-    }
+    // 传了 countOverride：读数与 prefetchInfo 由调用方统一写好，这里只负责补片
+    const count = countOverride ?? evaluateCount(video)
 
     if (prefetchSlots(count, segPrefetching.size, getInflightTotal(), runtime.hostConcurrencyCap) === 0) return
 
@@ -298,28 +297,20 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
       lastAutoPurge = now
       purgePlayedSegments()
     }
-    const mseAhead = getAheadBuffered(video)
-    const cachedAhead = getCachedAhead(video)
-    updateHealthZone(mseAhead, cachedAhead)
     // 心跳也刷一次并发上限：卡顿期间没有 FRAG_BUFFERED，否则会一直用旧值
     const cf = currentFrags(getHls())
     if (cf?.frags.length) {
       const idx = cf.frags.findIndex((f: any) => f.end > anchorTime(video))
       updateHostCap(cf.frags, idx >= 0 ? idx : 0)
     }
-    let count = getAdaptivePrefetchCount(cachedAhead)
-    count = capAtTarget(cachedAhead, count)   // 已达有效预取深度 → 停止预取
-    writePrefetchInfo(mseAhead, count)
     // 补足到目标并发（count 传下去，别在循环里重算策略链）
-    fillPrefetch(count)
+    fillPrefetch(evaluateCount(video))
   }
 
   // 起播/seek 预热：并行预取后续分片。
   const primePrefetch = () => {
     const video = getVideoEl()
-    const cachedAhead = video ? getCachedAhead(video) : 0
-    const count = capAtTarget(cachedAhead, getAdaptivePrefetchCount(cachedAhead))
-    fillPrefetch(count)
+    fillPrefetch(video ? evaluateCount(video) : capAtTarget(0, getAdaptivePrefetchCount(0)))
   }
 
   /** 换视频/CDN 时重置调度状态（只清在途计时表；每小时自动清理的计时跨流保留，同原实现）。 */

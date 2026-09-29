@@ -23,10 +23,10 @@ export interface VideoUiControlsDeps {
 export function useVideoUiControls(deps: VideoUiControlsDeps) {
   const { media, autoTune, playlist } = deps
   const {
-    videoEl, playerContainer, progressBar, isPlaying, isVideoLoaded, duration,
-    volume, isMuted, desiredRate, autoBestRate, turboRate, autoFullscreen, isFullscreen, showControls, showPlayIcon, showSpeedMenu,
-    showEpisodes, showSettings, showLines, showDownloads, showLockBtn, isLocked,
-    pendingAutoFullscreen, autoMuted, bgPlay,
+    videoEl, progressBar, isPlaying, isVideoLoaded, duration,
+    volume, isMuted, desiredRate, autoBestRate, turboRate, autoFullscreen, showControls, showPlayIcon, showSpeedMenu,
+    showEpisodes, showSettings, showLines, showDownloads,
+    autoMuted,
     seekPreviewTime, seekPreviewPercent, isSeeking, hoverTime, hoverPercent, preloadStrategy,
   } = media
 

@@ -170,7 +170,7 @@ export function useVideoPlayerController() {
   // ── 地址栏 ──
 
   const query = useVideoDeepLink({ media, conn, handoff, playlist })
-  const { parseQueryVideoParams, syncUrlToQuery, copyDeepLink, deepLinkCopied } = query
+  const { parseQueryVideoParams, syncUrlToQuery } = query
 
   // ── 生命周期 ──
 

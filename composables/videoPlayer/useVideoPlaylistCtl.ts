@@ -7,7 +7,7 @@ import { useLazyUrlResolver } from './playlist/lazyUrlResolver'
 import { usePlaylistProgress } from './playlist/progress'
 import { usePlaylistRefresh } from './playlist/refresh'
 // 只依赖最底层的本机账本，不认识同步引擎本身（方向见 cloudSyncLocal 文件头）
-import { onSyncApplied, requestSyncFlush } from '../cloudSyncLocal'
+import { requestSyncFlush } from '../cloudSyncLocal'
 
 export interface VideoPlaylistDeps {
   media: VideoMediaState
@@ -43,7 +43,7 @@ export function useVideoPlaylistCtl(deps: VideoPlaylistDeps) {
   // 媒体元素当前真装着的那一集：只在真正换流的前一刻更新（见 doPlayByIndex），存进度按它。
   let playingIndex = 0
   const {
-    progressKey, playingKey, currentVideoName,
+    progressKey, currentVideoName,
     saveCurrentProgress, dropSavedProgress, getSavedProgress, clearAllProgress,
     resumeHint, resumeToHint, dismissResumeHint,
   } = usePlaylistProgress({

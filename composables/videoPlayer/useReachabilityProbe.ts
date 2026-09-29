@@ -1,7 +1,7 @@
 import { useM3u8 } from './useM3u8'
 import { isDirectDead, markDirectDead, clearDirectDead } from './probeStore'
 import { describeLevel } from './videoDiag'
-import { sleep, makeAxisWaiter, emptyAxis, needsHeadersChannel, isMixedContent, probeUrl, pickChannel, SOURCE_GONE_STATUS, DEFAULT_TIMEOUT, OVERALL_TIMEOUT, HEDGE_DELAY, PRIORITY_BUDGET, GRACE_TICK } from './probe/probeHttp'
+import { makeAxisWaiter, emptyAxis, needsHeadersChannel, isMixedContent, probeUrl, pickChannel, SOURCE_GONE_STATUS, DEFAULT_TIMEOUT, OVERALL_TIMEOUT, HEDGE_DELAY, PRIORITY_BUDGET } from './probe/probeHttp'
 
 /**
  * 连接可达性探测：起播前用几个小请求实测出「manifest 轴」与「分片轴」各自能走哪条通道，

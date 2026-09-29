@@ -13,7 +13,6 @@ export interface NetRecoveryDeps {
   getVideoEl: () => HTMLVideoElement | undefined
   getHls: () => HlsType | null
   getAheadBuffered: (v: HTMLVideoElement) => number
-  getVideoUrl: () => string
   errorMessage: Ref<string>
   /**
    * 网络变了要作废的那些结论：lane 熔断记录 + 可达性结论 + 「直连是黑洞」缓存。
@@ -50,7 +49,7 @@ export interface NetRecoveryDeps {
  * 所以三道闩：至少隔 `RECOVER_SHOT_GAP_MS`、缓冲和播放头都没动过、总共不超过 4 枪。
  */
 export function useNetRecovery(deps: NetRecoveryDeps) {
-  const { getVideoEl, getHls, getAheadBuffered, getVideoUrl, errorMessage, invalidateNetworkState, primePrefetch } = deps
+  const { getVideoEl, getHls, getAheadBuffered, errorMessage, invalidateNetworkState, primePrefetch } = deps
 
   let recoverShots = 0
   let lastShotAt = 0

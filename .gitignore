@@ -24,3 +24,6 @@ logs
 package-lock.json
 # Wrangler
 .wrangler
+
+# vitest 报告（rtk 代理生成），测试产物不入库
+.vitest/

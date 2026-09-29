@@ -7,7 +7,6 @@
  * 二是靠失败反应式升级，最多黑屏重载 3 次。现在改成起播前几个小请求把矩阵测出来，一次到位；
  * 线性阶梯只保留为「探测拿不到结论」（断网/全超时）时的兜底。
  */
-import type { Ref } from 'vue'
 import type { ProbeResult, ConnConfig } from './useReachabilityProbe'
 import type { VideoMediaState } from './useVideoMediaState'
 import type { VideoServerTier } from './useVideoServerTier'

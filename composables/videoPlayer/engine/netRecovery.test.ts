@@ -26,7 +26,6 @@ function setup() {
     getVideoEl: () => video,
     getHls: () => hls as any,
     getAheadBuffered: () => ahead,
-    getVideoUrl: () => 'https://x/y.m3u8',
     errorMessage,
     invalidateNetworkState,
     primePrefetch,

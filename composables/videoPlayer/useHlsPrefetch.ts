@@ -23,7 +23,8 @@ export type { HealthZone, StrategySnapshot } from './prefetch/strategy'
  *
  * 实现按职责拆到 `./prefetch/`：
  *  - `tuning.ts`   并发调参常量
- *  - `strategy.ts` 并发策略（九级帽子 + 策略快照）
+ *  - `strategy.ts` 并发策略（基值 desiredConn + 九级调度顺序 + 策略快照）
+ *  - `caps.ts`     各级帽子与地板的算式（存货阶梯 / 卡顿守卫 / 摊薄 / 单条够快 / 拐点 / 地板）
  *  - `scheduler.ts` 预取调度（取哪一片 / 心跳 / 预热 / 清理）
  *  - `bandwidth.ts` / `lanes.ts` / `bufferMeter.ts` / `fragLoader.ts` 量测与取数
  * 本文件只做装配：把 opts、共享状态（runtime）与上面几块接起来。
@@ -54,7 +55,7 @@ export interface HlsPrefetchOptions {
   // 抗卡阈值(panicSecs/lowSecs)、安全系数、对冲/跳片超时、并发下限、预取深度全从这里读。
   getTierParams?: () => TierParams
   /**
-   * 上一次**真实卡顿**的时间戳（`Date.now()`，0=没卡过）。来自 useStallTracker——
+   * 上一次**真实卡顿**的时间戳（`performance.now()`，0=没卡过；**不是** `Date.now()`，见 stallGuard）。来自 useStallTracker——
    * 它以 `<video>` 的实际停顿为地面真值（排除 seek 与用户 pause），比任何带宽估算都可信，
    * 所以卡顿守卫排在缺口/聚合那些「省流量」的判据前面（见 stallGuard）。
    */

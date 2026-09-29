@@ -42,8 +42,8 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   const { media, conn, tier } = deps
   const {
     videoUrl, videoEl, isHls, isFlv, isLoading, isBuffering, isPlaying, isVideoLoaded,
-    errorMessage, currentTime, duration, bufferedPercent, videoKey,
-    hlsConfig, hlsStats, playbackDiag, playbackRate, desiredRate, autoBestRate, volume, isMuted,
+    errorMessage, currentTime,
+    hlsConfig, hlsStats, playbackDiag, playbackRate,
   } = media
 
   let hls: HlsType | null = null
@@ -175,7 +175,6 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     getVideoEl: () => videoEl.value,
     getHls: () => hls,
     getAheadBuffered,
-    getVideoUrl: () => videoUrl.value,
     errorMessage,
     // 网络变了：lane 熔断记录 + 可达性结论 + 「直连是黑洞」缓存都是**上一个网络**测出来的，整份作废
     invalidateNetworkState: () => {

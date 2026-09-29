@@ -21,7 +21,7 @@ export interface VideoEventsDeps {
 export function useVideoEvents(deps: VideoEventsDeps) {
   const { media, engine, conn, playlist } = deps
   const {
-    videoEl, playerContainer, isHls, isPlaying, isBuffering, isLoading, isVideoLoaded,
+    videoEl, isHls, isPlaying, isBuffering, isLoading, isVideoLoaded,
     currentTime, duration, bufferedPercent, volume, isMuted, playbackRate,
     skipIntro, skipOutro, hasSkippedIntro, autoFullscreen, errorMessage,
     hlsStats, decodedRes,
