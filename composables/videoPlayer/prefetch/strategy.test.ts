@@ -5,7 +5,7 @@
  * 钉成断言：冷启动帽、存货阶梯、摊薄帽、单条够快帽、卡顿守卫的两个分岔、爬升一档一档。
  * 带宽模型用桩（完全可控），这样每条用例只验一级、失败时能直接点名是哪一级。
  */
-import { describe, it, expect, afterEach, vi } from 'vitest'
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import type { TierParams } from '../../videoSiteRules'
 import type { BandwidthModel } from './bandwidth'
 import { useConcurrencyStrategy } from './strategy'
@@ -72,6 +72,7 @@ function setup(o: SetupOpts) {
   return { ctl, runtime }
 }
 
+beforeEach(() => { vi.spyOn(console, 'info').mockImplementation(() => {}) })   // 静音 [conn] 点名日志
 afterEach(() => { vi.restoreAllMocks() })
 
 describe('effectivePrefetchTarget：把「够播几秒」换算成视频秒', () => {
@@ -250,6 +251,29 @@ describe('健康区 / reset', () => {
     expect(ctl.strategy.value.targetConn).not.toBe(4)
     ctl.reset()
     expect(ctl.strategy.value.targetConn).toBe(4)
+  })
+})
+
+describe('「缓冲卡住」兜底（消费 ≈ 填充 → 死卡 4 条的自锁）', () => {
+  it('观察窗内缓冲没涨 → 放开一档破自锁（再受爬升 +1 限制）', () => {
+    let clock = 1000
+    vi.spyOn(performance, 'now').mockImplementation(() => clock)
+    const { ctl } = setup({ bw: { hasSamples: true, required: 8, aggFeeds: true, soloKBps: 0 }, hostCap: 6 })
+    // 墙钟 6s → 存货阶梯第 2 档（上限 4）；模型想要 8，被阶梯压到 4
+    expect(ctl.getAdaptivePrefetchCount(6)).toBe(4)
+    clock = 6000                                     // 缓冲 5s 没涨 → 卡住
+    expect(ctl.getAdaptivePrefetchCount(6)).toBe(5)  // 放开一档（再受爬升 +1）
+    clock = 8000
+    expect(ctl.getAdaptivePrefetchCount(6)).toBe(6)  // 再到 6
+  })
+
+  it('缓冲在涨 → 不触发兜底，阶梯照常生效', () => {
+    let clock = 1000
+    vi.spyOn(performance, 'now').mockImplementation(() => clock)
+    const { ctl } = setup({ bw: { hasSamples: true, required: 8, aggFeeds: true, soloKBps: 0 }, hostCap: 6 })
+    expect(ctl.getAdaptivePrefetchCount(5)).toBe(4)
+    clock = 6000
+    expect(ctl.getAdaptivePrefetchCount(6.5)).toBe(4)   // 一窗涨了 1.5s（≥1）→ 没卡住
   })
 })
 

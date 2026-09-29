@@ -15,6 +15,7 @@ import {
   FILL_HORIZON_SECS, COAST_WALL_SECS, COAST_GAP_WALL_SECS, HEADROOM_RESUME_FRAC,
   COLD_START_CONN_CAP, FAST_SOLO_KBPS, FAST_SOLO_CONN_STEPS, DILUTION_RETAIN_STEPS,
   CONN_SETTLE_MIN_MS, CONN_SETTLE_MAX_MS, CONN_RAMP_MS_SLOW, CONN_RAMP_MS_FAST, STALL_WINDOW_MS,
+  BUFFER_STUCK_MS, BUFFER_GROW_MIN,
 } from './tuning'
 
 export type HealthZone = 'panic' | 'low' | 'healthy'
@@ -98,6 +99,13 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
    * 跟「3→12 一步顶格」是同一个毛病。
    */
   let hasEvaluated = false
+  /**
+   * 「缓冲卡住」探测的观察窗状态（见 BUFFER_STUCK_MS）：窗口起点时刻 + 起点时的有效可播 + 上一窗结论。
+   * 用来打破「消费 ≈ 填充 → 缓冲原地不动 → 存货阶梯不给更多线程 → 更涨不动」的自锁。
+   */
+  let stuckWinAt = 0
+  let stuckWinAhead = 0
+  let bufferStuck = false
   let connDownAt = 0                      // 上次**下调**并发的时刻：沉降期内只许再降不许升
   let connUpAt = 0                        // 上次**上调**并发的时刻：爬升按 CONN_RAMP_MS_SLOW/FAST 一档一档来
   let wallStep = WALL_CONN_STEPS.length   // 存货阶梯当前所在档（= length 表示放开）：迟滞用
@@ -171,7 +179,7 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
    * 它本身就是当时的目标并发，不再翻倍。学过的慢站第二次进来即刻高并发，不用先卡一片。
    * 都没有（生面孔第一片）就交给阶梯：先按 2 条把第一片让过去，一有样本立刻按实测放开，代价是一片。
    */
-  const catchUpFloor = (): number => {
+  const catchUpFloor = (force = false): number => {
     if (!bw.hasSamples()) return Math.min(runtime.hostConcurrencyCap, Math.max(0, getColdStartConn()))
     const rate = getPlaybackRate()
     const safety = tier().safety
@@ -179,7 +187,9 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
     // 聚合是码率的好几倍时那个前提根本不成立，此时抬地板只会把摊薄推得更狠。
     // 不加这道闸就是正反馈：线程多 → 单条被摊薄 → requiredConn 变大 → 地板变高 → 线程更多。
     // 实测截图（单条 369KB/s、被摊到 222KB/s、聚合 20.8Mbps vs 码率 5.2Mbps）就是它顶到 12 的。
-    if (bw.aggregateFeeds(rate, safety)) return 0
+    // `force=true`（「缓冲卡住」时用）跳过这道闸：卡住恰恰说明「聚合够喂」与「存货原地不涨」同时成立，
+    // 闸的立论（够喂 = 不需要更多）不成立——这时才需要地板把线程顶上去攒存货。
+    if (!force && bw.aggregateFeeds(rate, safety)) return 0
     // 分母用**单条基线**（solo=true），不用被摊薄的混合均值——同一个正反馈的另一半
     return Math.min(saturationLimit(), Math.max(0, bw.requiredConn(rate, safety, true) * 2))
   }
@@ -201,7 +211,7 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
    * 带**放开方向的迟滞**（见 WALL_STEP_HYST）：降档立刻生效，升档要多攒 25%。
    * 下标越大 = 存货越多 = 上限越高；`WALL_CONN_STEPS.length` 表示彻底放开。
    */
-  const wallConnCap = (wall: number, safe: number): number => {
+  const wallConnCap = (wall: number, safe: number, stuck = false): number => {
     if (safe <= 0) { wallStep = WALL_CONN_STEPS.length; return runtime.hostConcurrencyCap }
     let step = WALL_CONN_STEPS.length
     for (let i = 0; i < WALL_CONN_STEPS.length; i++) {
@@ -224,6 +234,12 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
      * 单条慢或还没测到（`solo === 0`）→ 维持原来的 2；真慢源仍由 `catchUpFloor` 顶上去。
      */
     if (step === 0 && soloFeedsRate()) return 1
+    // **缓冲卡住**（见 BUFFER_STUCK_MS）：往上放开一档（已是最高档就放开到 hostCap）+ 让地板跳过
+    // 「聚合喂得动就不抬」那道闸生效，打破「少开线程换不来存货」的自锁。正常在涨的流 stuck=false。
+    if (stuck) {
+      const nextCap = step + 1 < WALL_CONN_STEPS.length ? WALL_CONN_STEPS[step + 1]![1] : runtime.hostConcurrencyCap
+      return Math.max(nextCap, catchUpFloor(true))
+    }
     return Math.max(WALL_CONN_STEPS[step]![1], catchUpFloor())   // 地板兜住慢源，见 catchUpFloor
   }
 
@@ -450,19 +466,36 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
      *   顶到 hostCap、真正拍板的是这些帽子。已把 ⑦ 提成基值 `desiredConn`、删掉积分器：
      *   模型现算、响应更快，也少了 `ctrlConn`/`lastAhead` 两处状态与 `computeTargetConcurrency`。）
      */
+    const now = performance.now()
     let target = cachedAhead === undefined ? runtime.hostConcurrencyCap : desiredConn(cachedAhead)
-    if (!bw.hasSamples()) target = Math.min(target, COLD_START_CONN_CAP)     // ①
+    // 「咬人的那一级」：目标每变一次就记下是哪一级把它定成这个数（排查用，见下面的 [conn] 日志）
+    let biter = '值 desiredConn'
+    const levels: string[] = []
+    const clamp = (name: string, v: number) => { levels.push(`${name}=${v}`); if (v < target) { target = v; biter = name } }
+
+    if (!bw.hasSamples()) clamp('①冷启动帽', COLD_START_CONN_CAP)
     if (cachedAhead !== undefined) {
       const wall = cachedAhead / Math.max(1, getPlaybackRate())
-      target = Math.min(target, wallConnCap(wall, getSafeWallSecs()))        // ②（内含 catchUpFloor 地板）
+      const targetSecs = effectivePrefetchTarget()
+      // ── 「缓冲卡住」探测：目标没到、而有效可播一个观察窗内没明显增长 → 少开线程换不来存货 ──
+      if (stuckWinAt === 0) { stuckWinAt = now; stuckWinAhead = cachedAhead }
+      else if (now - stuckWinAt >= BUFFER_STUCK_MS) {
+        bufferStuck = cachedAhead < stuckWinAhead + BUFFER_GROW_MIN
+        stuckWinAt = now
+        stuckWinAhead = cachedAhead
+      }
+      const notAtTarget = Number.isFinite(targetSecs)
+        && targetSecs - cachedAhead > (runtime.segDurSecs || FALLBACK_SEG_SECS)
+      clamp('②存货阶梯', wallConnCap(wall, getSafeWallSecs(), bufferStuck && notAtTarget))
       const guard = stallGuard()                                            // ③
-      target = Math.min(target, guard.cap)
-      target = Math.min(target, dilutionCap())                              // ④
-      target = Math.min(target, soloFastCap(wall))                          // ⑤
-      target = Math.min(target, aggregateKneeCap())                         // ⑥
+      clamp('③卡顿帽', guard.cap)
+      clamp('④摊薄帽', dilutionCap())                                        // ④
+      clamp('⑤单条够快', soloFastCap(wall))                                  // ⑤
+      clamp('⑥聚合拐点', aggregateKneeCap())                                 // ⑥
       // ⑧ 地板只在「真慢型卡顿」时抬——它要压过上面所有的收紧，否则慢源永远补不回来。
       //    冷启动帽不受它影响：那时没样本，stallGuard 直接返回不咬人的值
-      target = Math.max(target, Math.min(runtime.hostConcurrencyCap, guard.floor))
+      const floor = Math.min(runtime.hostConcurrencyCap, guard.floor)
+      if (floor > target) { target = floor; biter = '⑧地板' }
     }
     /*
      * ⑨ 沉降期：刚减过线程就**只许再降不许升**。
@@ -476,7 +509,6 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
      * 同一处顺便通知带宽模型「并发变了」：跨越变更点的那些采样不能进分档账本，
      * 否则低并发档会被高并发时的低速度污染（见 bandwidth 的 markConcChange）。
      */
-    const now = performance.now()
     const settleMs = Math.min(CONN_SETTLE_MAX_MS, Math.max(CONN_SETTLE_MIN_MS, bw.avgSegLoadMs()))
     if (hasEvaluated && target > lastTargetConn) {
       // 爬升间隔：**默认慢档**（线程涨太快会把紧邻播放头那一片摊薄——用户反馈）；但
@@ -484,14 +516,16 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
       // 场合，回快档——那里慢爬会把恢复拖很久。
       const urgent = lastHealthZone !== 'healthy' || catchUpFloor() > 0
       const rampMs = urgent ? CONN_RAMP_MS_FAST : CONN_RAMP_MS_SLOW
-      if (now - connDownAt < settleMs) target = lastTargetConn              // 刚减过：等在途排空，读数还不可信
-      else if (now - connUpAt < rampMs) target = lastTargetConn             // 上一档还没站稳，这一拍不动
-      else target = Math.min(target, lastTargetConn + 1)                    // 一档一档来（地板顶格也走这条路）
+      if (now - connDownAt < settleMs) { target = lastTargetConn; biter = '⑨沉降期' }      // 刚减过：等在途排空
+      else if (now - connUpAt < rampMs) { target = lastTargetConn; biter = '⑨爬升间隔' }   // 上一档还没站稳
+      else { const v = Math.min(target, lastTargetConn + 1); if (v < target) { target = v; biter = '⑨爬升+1' } }
     }
     if (target !== lastTargetConn) {
       if (lastTargetConn > 0 && target < lastTargetConn) connDownAt = now
       if (target > lastTargetConn) connUpAt = now
       bw.markConcChange()
+      // 九级点名：只在目标变化时打一行，一眼看出是「值」还是哪一级帽子咬的（排查并发决策用）
+      console.info(`[conn] ${lastTargetConn} → ${target}（咬人：${biter}） ${levels.join(' ')}`)
     }
     lastTargetConn = target
     hasEvaluated = true
@@ -503,6 +537,9 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
   const reset = () => {
     lastTargetConn = 0
     hasEvaluated = false
+    stuckWinAt = 0
+    stuckWinAhead = 0
+    bufferStuck = false
     connDownAt = 0
     connUpAt = 0
     wallStep = WALL_CONN_STEPS.length
