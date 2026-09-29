@@ -204,6 +204,30 @@ describe('⑨ 爬升：一档一档来，不跳级', () => {
     clock = 3000
     expect(ctl.getAdaptivePrefetchCount(50)).toBe(3)
   })
+
+  it('首拍直接给基值（不从 1 慢慢爬）', () => {
+    const { ctl } = setup({ bw: { hasSamples: true, required: 6, aggFeeds: true, soloKBps: 0 }, hostCap: 6 })
+    expect(ctl.getAdaptivePrefetchCount(50)).toBe(6)
+  })
+
+  it('从 0 恢复（到目标停取后又掉下来）也一档一档，不跳回目标', () => {
+    let clock = 1000
+    vi.spyOn(performance, 'now').mockImplementation(() => clock)
+    const { ctl } = setup({ bw: { hasSamples: true, required: 6, aggFeeds: true, soloKBps: 0 }, hostCap: 6 })
+    expect(ctl.getAdaptivePrefetchCount(50)).toBe(6)    // 首拍基值
+    expect(ctl.getAdaptivePrefetchCount(100)).toBe(0)   // 到目标 → 停取（lastTargetConn 归 0）
+    clock = 5000
+    expect(ctl.getAdaptivePrefetchCount(80)).toBe(1)    // 恢复：从 0 只 +1，不是直接 6
+    clock = 7000
+    expect(ctl.getAdaptivePrefetchCount(80)).toBe(2)    // 再 +1
+  })
+
+  it('reset 后首拍又直接给基值（重新起算）', () => {
+    const { ctl } = setup({ bw: { hasSamples: true, required: 6, aggFeeds: true, soloKBps: 0 }, hostCap: 6 })
+    ctl.getAdaptivePrefetchCount(50)
+    ctl.reset()
+    expect(ctl.getAdaptivePrefetchCount(50)).toBe(6)
+  })
 })
 
 describe('健康区 / reset', () => {

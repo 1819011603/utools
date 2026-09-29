@@ -90,6 +90,14 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
   // 并发控制的持久状态。**没有「受控并发」这个积分器了**：目标值每拍由 desiredConn 的
   // 吞吐模型现算（见 getAdaptivePrefetchCount），这里只留爬坡/沉降/迟滞需要的几个时间戳与档位。
   let lastTargetConn = 0                  // 上一拍算出的目标并发（卡顿守卫拿它判「带宽够不够」）
+  /**
+   * 是否已经出过至少一拍目标。
+   * **首拍直接给基值**（冷启动/切集要 2~3 条把第一片让过去，不是从 1 慢慢爬）；
+   * 之后一律一档一档——**包括「已到目标停取（0）之后又掉下来」的恢复**：以前判据是
+   * `lastTargetConn > 0`，于是从 0 恢复会**直接跳到目标**（慢源上可能是 6~12），
+   * 跟「3→12 一步顶格」是同一个毛病。
+   */
+  let hasEvaluated = false
   let connDownAt = 0                      // 上次**下调**并发的时刻：沉降期内只许再降不许升
   let connUpAt = 0                        // 上次**上调**并发的时刻：爬升按 CONN_RAMP_MS_SLOW/FAST 一档一档来
   let wallStep = WALL_CONN_STEPS.length   // 存货阶梯当前所在档（= length 表示放开）：迟滞用
@@ -470,7 +478,7 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
      */
     const now = performance.now()
     const settleMs = Math.min(CONN_SETTLE_MAX_MS, Math.max(CONN_SETTLE_MIN_MS, bw.avgSegLoadMs()))
-    if (lastTargetConn > 0 && target > lastTargetConn) {
+    if (hasEvaluated && target > lastTargetConn) {
       // 爬升间隔：**默认慢档**（线程涨太快会把紧邻播放头那一片摊薄——用户反馈）；但
       // 「存货吃紧/濒卡」或「源站真慢（地板被顶起来，`catchUpFloor`>0）」是真需要更多连接的
       // 场合，回快档——那里慢爬会把恢复拖很久。
@@ -486,6 +494,7 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
       bw.markConcChange()
     }
     lastTargetConn = target
+    hasEvaluated = true
     refreshStrategy(target)
     return target
   }
@@ -493,6 +502,7 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
   /** 换视频/CDN 时重置本模块的状态（带宽样本与 lane 由装配层一并重置）。 */
   const reset = () => {
     lastTargetConn = 0
+    hasEvaluated = false
     connDownAt = 0
     connUpAt = 0
     wallStep = WALL_CONN_STEPS.length

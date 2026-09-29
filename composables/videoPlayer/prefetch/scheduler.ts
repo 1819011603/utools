@@ -15,6 +15,7 @@ import type { LaneControl } from './lanes'
 import type { ConcurrencyStrategy, PrefetchRuntime } from './strategy'
 import { MAX_CONN } from './tuning'
 import { currentFrags } from '../engine/hlsFrags'
+import { fetchBodyWithStallWatch } from './fetchBody'
 
 export interface PrefetchSchedulerDeps {
   getHls: () => HlsType | null
@@ -91,7 +92,8 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
 
   // 发起一个分片预取请求（带 1 次轻量重试，减少「空洞」导致的临播卡顿）
   // durationSec = 该分片代表的视频秒数，用于实测码率
-  const PREFETCH_TIMEOUT_MS = 300000   // 单分片下载上限(5分钟)：无此保护会导致个别卡死连接永久占位，形成永不填补的「缓冲缺口」
+  const PREFETCH_TIMEOUT_MS = 300000   // 单分片总上限(5分钟)：兜底，防「卡死连接永久占位」
+  const PREFETCH_STALL_MS = 20000      // 无进展看门狗(20s)：连接挂着不吐数据 → 判死，别干等到总上限
   const spawnPrefetch = (url: string, durationSec: number, onDone: () => void) => {
     const attemptFetch = (attempt: number): Promise<ArrayBuffer> => {
       const ctrl = new AbortController()
@@ -101,12 +103,13 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
       const { lane, laneUrl, laneCount } = acquireLane(url)   // 直连/代理分流：取在途最少的 lane
       segInflightStart.set(url, aStart)            // 计时：登记在途（重试则刷新起点）
       const conc = getInflightTotal()           // 采样时的在途总数（预取 + 关键片），供聚合可并行探针分档
-      return fetch(laneUrl, { signal: ctrl.signal, referrerPolicy: 'no-referrer' })
-        .then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      return fetchBodyWithStallWatch(ctrl, laneUrl, PREFETCH_STALL_MS)
         .then(buf => { clearTimeout(timer); releaseLane(lane); markLaneOk(lane); sampleSpeed(buf.byteLength, performance.now() - aStart, conc, aStart); return buf })
         .catch(e => {
           clearTimeout(timer); releaseLane(lane)
-          if (e?.name !== 'AbortError') markLaneFail(lane, laneCount)   // 超时/中止不算 lane 的账
+          // 中止（seek/竞速已有赢家）不算 lane 的账；**卡死（StallError）算**——那条 lane 该被避开
+          if (e?.name !== 'AbortError') markLaneFail(lane, laneCount)
+          // 卡死可以换条 lane 再试一次；总超时(AbortError)不重试（换个 lane 也是白等）
           if (e?.name === 'AbortError' || attempt >= 1) throw e
           return new Promise<ArrayBuffer>((resolve, reject) => {
             setTimeout(() => {
