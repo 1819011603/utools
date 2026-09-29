@@ -62,6 +62,19 @@ export function useVideoLoader(deps: VideoLoaderDeps) {
   } = media
   const { setHls, setFlv, destroyHls, beginAnchor, setAppliedStartPos, setRelocating, getAutoPlayHook } = deps
 
+  /** 等 `<video>` 挂上来（元素被 `videoKey++` 重建的那条路）。 */
+  const awaitMount = async (ms: number) => {
+    await nextTick()
+    await new Promise(resolve => setTimeout(resolve, ms))
+  }
+  /** 等元素挂好并断言存在（FLV / 原生那条路，元素一定是刚重建的），返回该元素。 */
+  const awaitVideoEl = async (ms: number): Promise<HTMLVideoElement> => {
+    await awaitMount(ms)
+    const el = videoEl.value
+    if (!el) throw new Error('视频元素未初始化，请刷新页面重试')
+    return el
+  }
+
   const loadVideo = async () => {
     if (!videoUrl.value.trim()) return
 
@@ -160,8 +173,7 @@ export function useVideoLoader(deps: VideoLoaderDeps) {
     // 那期间出错路径可能把 isVideoLoaded 关掉、Stage 连同 <video> 一起卸掉，
     // 这时候还是得等它挂回来，而不是当场抛「视频元素未初始化」。
     if (!reuseEl || !videoEl.value) {
-      await nextTick()
-      await new Promise(resolve => setTimeout(resolve, 50))
+      await awaitMount(50)
     }
 
     if (!HlsLib.isSupported()) {
@@ -330,12 +342,9 @@ export function useVideoLoader(deps: VideoLoaderDeps) {
       ? [{ label: '代理', url: viaProxy }]
       : [{ label: '直连', url }, { label: '代理', url: viaProxy }]
     isVideoLoaded.value = true
-    // 元素是刚 videoKey++ 重建的，等它挂上来（同 loadNativeVideo）
-    await nextTick()
-    await new Promise(resolve => setTimeout(resolve, 100))
-    if (!videoEl.value) throw new Error('视频元素未初始化，请刷新页面重试')
+    const el = await awaitVideoEl(100)   // 元素是刚 videoKey++ 重建的，等它挂上来（同 loadNativeVideo）
     deps.startFlvTick()
-    setFlv(await createFlvStream(videoEl.value, channels, url, msg => {
+    setFlv(await createFlvStream(el, channels, url, msg => {
       // 期间可能已经切走了，别把上一条流的错误盖到新的上面
       if (videoUrl.value.trim() !== url) return
       errorMessage.value = msg
@@ -348,12 +357,9 @@ export function useVideoLoader(deps: VideoLoaderDeps) {
     const finalUrl = conn.getProxyUrl(url)
     console.log('加载原生视频:', finalUrl)
     isVideoLoaded.value = true
-    // 等待 DOM 更新（video 元素重新创建需要更多时间）
-    await nextTick()
-    await new Promise(resolve => setTimeout(resolve, 100))
-    if (!videoEl.value) throw new Error('视频元素未初始化，请刷新页面重试')
-    videoEl.value.src = finalUrl
-    videoEl.value.load()
+    const el = await awaitVideoEl(100)   // 等 DOM 更新（video 元素重新创建需要更多时间）
+    el.src = finalUrl
+    el.load()
 
     /**
      * 顺手自己读一次真实时长与平均码率（约 2.5KB 两发小请求，见 engine/mp4Duration.ts）。

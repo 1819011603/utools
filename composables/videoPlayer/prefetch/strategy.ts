@@ -7,6 +7,7 @@
  * 收在一个 `runtime` 对象里，由装配层创建后同时交给策略与调度。
  * 内部实现模块，走显式相对 import，不进 `nuxt.config.ts` 的 `imports.dirs`。
  */
+import { ref } from 'vue'
 import type { TierParams } from '../../videoSiteRules'
 import type { BandwidthModel } from './bandwidth'
 import {

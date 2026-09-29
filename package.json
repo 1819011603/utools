@@ -11,6 +11,7 @@
     "generate": "nuxt generate",
     "preview": "nuxt preview",
     "postinstall": "patch-package && (npx nuxi prepare || true)",
+    "test": "vitest run",
     "deploy": "npm run generate && wrangler pages deploy .output/public"
   },
   "dependencies": {
@@ -45,6 +46,7 @@
     "@types/gif.js": "^0.2.5",
     "patch-package": "^8.0.1",
     "typescript": "^5.5.0",
+    "vitest": "^5.0.2",
     "wrangler": "^3.60.0"
   },
   "overrides": {

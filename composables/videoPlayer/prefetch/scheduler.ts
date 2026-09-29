@@ -14,6 +14,7 @@ import type { BandwidthModel } from './bandwidth'
 import type { LaneControl } from './lanes'
 import type { ConcurrencyStrategy, PrefetchRuntime } from './strategy'
 import { MAX_CONN } from './tuning'
+import { currentFrags } from '../engine/hlsFrags'
 
 export interface PrefetchSchedulerDeps {
   getHls: () => HlsType | null
@@ -54,6 +55,24 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
     let worstUrl = '', worst = -1
     for (const [u, t] of segInflightStart) { const el = now - t; if (el > worst) { worst = el; worstUrl = u } }
     return { name: shortName(worstUrl), elapsedMs: worst, count: segInflightStart.size }
+  }
+
+  /** 已缓存或下载中 → 不重复下载。 */
+  const isHandled = (url: string): boolean => getPrefetchedBuf(url) !== null || segPrefetching.has(url)
+
+  /** 已达有效预取深度 → 停取（0）。四个入口共用同一判据。 */
+  const capAtTarget = (cachedAhead: number, count: number): number =>
+    cachedAhead >= effectivePrefetchTarget() ? 0 : count
+
+  /**
+   * 把要展示的四个读数一次写好。`bytes` 由 refreshCacheStats 单独刷（遍历一遍缓存，不值得在这条
+   * 热路径上重算），这里不碰它——**用「逐字段改」而不是「换整个对象」**，就不会像以前那样漏带 bytes。
+   */
+  const writePrefetchInfo = (mseAhead: number, count: number) => {
+    prefetchInfo.value.bufferSecs = Math.round(mseAhead * 10) / 10
+    prefetchInfo.value.threads = count
+    prefetchInfo.value.cached = segPrefetchCache.size
+    prefetchInfo.value.pending = segPrefetching.size
   }
 
   // 发起一个分片预取请求（带 1 次轻量重试，减少「空洞」导致的临播卡顿）
@@ -109,16 +128,10 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
 
   // 触发自适应预取（每次 FRAG_BUFFERED 后调用）
   const triggerAdaptivePrefetch = (lastFragSn: number) => {
-    const hls = getHls()
     const video = getVideoEl()
-    if (!hls || !video) return
-
-    // 取当前画质的分片列表
-    const level = hls.currentLevel >= 0 ? hls.currentLevel : 0
-    const levelDetails = (hls as any).levels?.[level]?.details
-    if (!levelDetails) return
-
-    const frags: any[] = levelDetails.fragments
+    const cur = currentFrags(getHls())
+    if (!video || !cur) return
+    const { frags, details: levelDetails } = cur
     const startIdx = frags.findIndex((f: any) => f.sn === lastFragSn) + 1
     if (startIdx <= 0) return
 
@@ -139,17 +152,8 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
     const cachedAhead = getCachedAhead(video)
     updateHealthZone(mseAhead, cachedAhead)        // 健康区（只驱动抗卡动作，不参与并发）
     let count = getAdaptivePrefetchCount(cachedAhead)
-    if (cachedAhead >= effectivePrefetchTarget()) count = 0   // 已达有效预取深度 → 停止预取
-
-    prefetchInfo.value = {
-      bufferSecs: Math.round(mseAhead * 10) / 10,   // 「缓冲健康」仍展示 MSE 即时窗口
-      threads: count,
-      cached: segPrefetchCache.size,
-      pending: segPrefetching.size,
-      // bytes 由每秒的 refreshCacheStats 算（遍历一遍缓存，不值得在这条热路径上重算）。
-      // 但**必须原样带上**：整个对象是被替换掉的，漏了它「预取缓存 X MB」会闪回 0
-      bytes: prefetchInfo.value.bytes,
-    }
+    count = capAtTarget(cachedAhead, count)   // 已达有效预取深度 → 停止预取
+    writePrefetchInfo(mseAhead, count)
 
     if (count === 0) return
 
@@ -167,7 +171,7 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
       if (started >= canStart) break
       if (frag.start < ct - 1) continue   // 跳过锚点之前的旧分片（seek 后 lastFragSn 可能是旧位置）
       const url: string = frag.url
-      if (!url || getPrefetchedBuf(url) !== null || segPrefetching.has(url)) continue   // 已缓存/下载中 → 不重复下载
+      if (!url || isHandled(url)) continue   // 已缓存/下载中 → 不重复下载
       spawnPrefetch(url, frag.duration ?? 0, startOnePrefetch)
       started++
     }
@@ -184,35 +188,30 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
   // 在循环里反复调这个函数，不传的话每调一次都要把整条策略链（①–⑨）重跑一遍、还重复写
   // `prefetchInfo`（目标 6 条时一秒 7 遍）。作为 `spawnPrefetch` 的 onDone 回调（无参）时才现算。
   const startOnePrefetch = (countOverride?: number) => {
-    const hls = getHls()
     const video = getVideoEl()
-    if (!hls || !video) return
+    if (!video) return
     let count: number
     if (countOverride === undefined) {
       const mseAhead = getAheadBuffered(video)
       const cachedAhead = getCachedAhead(video)
-      count = getAdaptivePrefetchCount(cachedAhead)
-      if (cachedAhead >= effectivePrefetchTarget()) count = 0   // 已达有效预取深度 → 停止预取
-      prefetchInfo.value.bufferSecs = Math.round(mseAhead * 10) / 10
-      prefetchInfo.value.threads = count
-      prefetchInfo.value.cached = segPrefetchCache.size
-      prefetchInfo.value.pending = segPrefetching.size
+      count = capAtTarget(cachedAhead, getAdaptivePrefetchCount(cachedAhead))
+      writePrefetchInfo(mseAhead, count)
     } else {
       count = countOverride   // 读数与 prefetchInfo 由调用方统一写好，这里只负责补片
     }
 
     if (count === 0 || segPrefetching.size >= count) return
 
-    const level = hls.currentLevel >= 0 ? hls.currentLevel : 0
-    const frags: any[] = (hls as any).levels?.[level]?.details?.fragments ?? []
-    if (!frags.length) return
+    const cur = currentFrags(getHls())
+    if (!cur || !cur.frags.length) return
+    const frags = cur.frags
 
     // 从锚点（起播定位期间=pendingStartPos，否则=播放头）往后找第一个未缓存、未下载中的分片
     const currentTime = anchorTime(video)
     for (const frag of frags) {
       if (frag.start < currentTime) continue
       const url: string = frag.url
-      if (!url || getPrefetchedBuf(url) !== null || segPrefetching.has(url)) continue   // 已缓存/下载中 → 不重复下载
+      if (!url || isHandled(url)) continue   // 已缓存/下载中 → 不重复下载
       spawnPrefetch(url, frag.duration ?? 0, startOnePrefetch)
       prefetchInfo.value.pending = segPrefetching.size
       break  // 只补1个
@@ -241,12 +240,10 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
    */
   const PURGE_KEEP_BACK_SECS = 30
   const purgePlayedSegments = (keepBackSecs = PURGE_KEEP_BACK_SECS) => {
-    const hls = getHls()
     const video = getVideoEl()
-    if (!hls || !video) return { removed: 0, freedBytes: 0 }
-    const level = hls.currentLevel >= 0 ? hls.currentLevel : 0
-    const frags: any[] = (hls as any).levels?.[level]?.details?.fragments ?? []
-    if (!frags.length) return { removed: 0, freedBytes: 0 }
+    const cur = currentFrags(getHls())
+    if (!video || !cur || !cur.frags.length) return { removed: 0, freedBytes: 0 }
+    const frags = cur.frags
 
     const ct = anchorTime(video)
     const keep = new Set<string>()
@@ -278,11 +275,8 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
     const cachedAhead = getCachedAhead(video)
     updateHealthZone(mseAhead, cachedAhead)
     let count = getAdaptivePrefetchCount(cachedAhead)
-    if (cachedAhead >= effectivePrefetchTarget()) count = 0   // 已达有效预取深度 → 停止预取
-    prefetchInfo.value.bufferSecs = Math.round(mseAhead * 10) / 10
-    prefetchInfo.value.threads = count
-    prefetchInfo.value.cached = segPrefetchCache.size
-    prefetchInfo.value.pending = segPrefetching.size
+    count = capAtTarget(cachedAhead, count)   // 已达有效预取深度 → 停止预取
+    writePrefetchInfo(mseAhead, count)
     // 补足到目标并发（count 传下去，别在循环里重算策略链）
     fillPrefetch(count)
   }
@@ -291,8 +285,7 @@ export function usePrefetchScheduler(deps: PrefetchSchedulerDeps) {
   const primePrefetch = () => {
     const video = getVideoEl()
     const cachedAhead = video ? getCachedAhead(video) : 0
-    let count = getAdaptivePrefetchCount(cachedAhead)
-    if (cachedAhead >= effectivePrefetchTarget()) count = 0   // 已达有效预取深度 → 停止预取
+    const count = capAtTarget(cachedAhead, getAdaptivePrefetchCount(cachedAhead))
     fillPrefetch(count)
   }
 

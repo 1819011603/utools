@@ -22,6 +22,8 @@ HTTPS_PROXY=http://127.0.0.1:7897 MEDIA_NO_PROXY=1 npm run dev   # 端口固定 
 - **Nuxt 3.15**（SPA）+ **@nuxt/ui 2.x**，Tailwind 锁 `3.4.17`；**Nitro preset `cloudflare-pages`** →
   服务端不能静态 `import` 任何 `node:*`
 - 图标 `i-heroicons-xxx`；文案中文；**注释写「为什么」不写「做什么」**；重依赖动态 import
+- **测试**：`npm test`（vitest）。纯逻辑模块的单测放同目录 `*.test.ts`（如 `prefetch/strategy.test.ts`）——
+  带宽模型用桩，一条用例只验一级，失败时能直接点名是哪一级
 - 新增工具页要改三处：`pages/新页.vue`、`pages/index.vue` 的 `categories`、`layouts/default.vue` 的 `toolCategories`
 - **单文件不超过 500 行**，页面只留装配（播放器是样板）。两个配套动作：
   **`composables/` 的子目录要在 `nuxt.config.ts` 的 `imports.dirs` 里登记**（漏登记 =「一堆 xxx is not defined」）；

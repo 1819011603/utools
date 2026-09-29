@@ -12,6 +12,7 @@
  * 内部实现模块，走显式相对 import，不进 `imports.dirs`。
  */
 import type HlsType from 'hls.js'
+import { currentFragList } from '../engine/hlsFrags'
 
 export interface BufferMeterDeps {
   getHls: () => HlsType | null
@@ -42,9 +43,7 @@ export function useBufferMeter(deps: BufferMeterDeps) {
   // 两者都不需要再下载。逐片累加，直到遇到第一个「还需要下载」的分片（既不在 MSE 也没预取）为止。
   const getCachedAhead = (video: HTMLVideoElement): number => {
     const ct = anchorTime(video)   // 起播定位期间从 pendingStartPos 量起，反映恢复位置的真实缓冲
-    const hls = opts.getHls()
-    const level = hls && hls.currentLevel >= 0 ? hls.currentLevel : 0
-    const frags: any[] = (hls as any)?.levels?.[level]?.details?.fragments ?? []
+    const frags = currentFragList(opts.getHls())
     if (!frags.length) return getAheadBuffered(video)
 
     // 某时间点是否已落在 MSE 已缓冲区间内（已下载进播放器，无需再取）

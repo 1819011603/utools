@@ -28,6 +28,7 @@
  *
  * 内部实现模块，走显式相对 import，不进 `imports.dirs`。
  */
+import { currentFragList, currentFrags } from './hlsFrags'
 
 /** 洞小于这个值就直接跳过去（秒）。再大就不跳了——那不像「一片没 append 上」，跳过去要丢的内容太多 */
 const HOLE_JUMP_MAX = 3
@@ -73,8 +74,7 @@ export function useStallRecovery(deps: StallRecoveryDeps) {
 
   /** 某个时间点落在哪一片上（拿不到分片表就返回 null） */
   const fragAt = (hls: any, t: number): any => {
-    const level = hls?.currentLevel >= 0 ? hls.currentLevel : 0
-    const frags: any[] = hls?.levels?.[level]?.details?.fragments ?? []
+    const frags = currentFragList(hls)
     return frags.find(f => f.start <= t + 0.1 && t < f.end + 0.1) ?? null
   }
 
@@ -160,8 +160,9 @@ export function useStallRecovery(deps: StallRecoveryDeps) {
     const ct = v.currentTime
     const ranges: string[] = []
     for (let i = 0; i < v.buffered.length; i++) ranges.push(`${v.buffered.start(i).toFixed(1)}~${v.buffered.end(i).toFixed(1)}`)
-    const level = hls?.currentLevel >= 0 ? hls.currentLevel : 0
-    const frags: any[] = hls?.levels?.[level]?.details?.fragments ?? []
+    const cf = currentFrags(hls)
+    const frags = cf?.frags ?? []
+    const level = cf?.level ?? 0
     const curIdx = frags.findIndex(f => f.start <= ct + 0.1 && ct < f.end + 0.1)
     const cur = curIdx >= 0 ? frags[curIdx] : null
     // **下一片才是关键**：播放头这一片已经在 MSE 里（所以还有 0.x 秒），
