@@ -9,8 +9,6 @@
  *
  * 内部实现模块，走显式相对 import，不进 `imports.dirs`。
  */
-import { FLUENT_RATE_WINDOW_MAX_SECS, FLUENT_RATE_WINDOW_MIN_SECS } from '../display'
-
 const ewma = (prev: number, cur: number) => (prev ? prev * 0.7 + cur * 0.3 : cur)
 
 export function useBandwidthModel() {
@@ -234,24 +232,18 @@ export function useBandwidthModel() {
   const lastPositiveDelivered = (): number => delivPositiveBps
 
   /*
-   * 「最高流畅倍速」的**观察窗**：瞬时值每秒都在抖（EWMA 跟着采样走），用户没法照着一个
-   * 一直跳的数字决定开几倍速。每拍记一个样本，对外只给**窗口内最差**的那个——
-   * 「窗口内每一刻都撑得动 X 倍」才是能拿来做决策的承诺。这个 min 天然不对称：
-   * 变差立刻反映（新样本当场就是 min），变好要等旧的低样本滚出窗口（确认了才敢承诺）。
-   * **窗口长度 = 预加载时长**（调用方夹好传入）：存货能兜底多久，倍速就只需在那段时间内可持续
-   * ——带宽抖一下有存货扛着，只有「持续一个兜底周期都撑不住」才需要降速，所以决策窗口就该是它。
-   * 换流/换网（resetSamples）清空重攒——上一个网络的结论对新流没有意义。
+   * 「最高流畅倍速」的数据源：**预取活跃期**交付吞吐的 EWMA（strategy 每拍喂）。
+   *
+   * 不做「秒桶 + 窗口最差值」（前三版的方案）：分片交货是成簇的，单秒桶抖得厉害，
+   * 窗口 min 专挑噪声、把显示钉死在失真低位（实测先后出现过 11.75x / 75x / 0.75x）。
+   * EWMA 本身就是平滑器，加上 0.25 档取整足够稳；变差时几拍内跟跌，不会捂住真相。
+   * 换流/换网（resetSamples）清零重攒。
    */
-  const fluentHist: Array<{ t: number; r: number }> = []
-  const noteFluentRate = (r: number, windowSecs: number) => {
-    const t = performance.now()
-    fluentHist.push({ t, r })
-    const winMs = Math.min(FLUENT_RATE_WINDOW_MAX_SECS, Math.max(FLUENT_RATE_WINDOW_MIN_SECS, windowSecs)) * 1000
-    while (fluentHist.length && t - fluentHist[0]!.t > winMs) fluentHist.shift()
-  }
-  /** 窗口内最差值。0 = 还没记过（首拍，调用方退回瞬时值） */
-  const windowedFluentRate = (): number =>
-    fluentHist.length ? fluentHist.reduce((m, x) => Math.min(m, x.r), Infinity) : 0
+  let activeDelivBps = 0
+  /** 喂一笔「预取活跃时」的交付读数（bps）。0 不喂——那是停取/没交货完，不是能力 */
+  const noteActiveDelivery = (bps: number) => { if (bps > 0) activeDelivBps = ewma(activeDelivBps, bps) }
+  /** 预取活跃期交付的平滑读数。0 = 还没有活跃样本 */
+  const activeDeliveryBps = (): number => activeDelivBps
 
   const perConnKBps = () => Math.round(perConnBps / 8 / 1024)
   const segMbps = () => Math.round((segBitrate / 1e6) * 10) / 10
@@ -265,15 +257,15 @@ export function useBandwidthModel() {
     aggByConn.length = 0
     segLoadMs = 0
     concChangedAt = 0
-    fluentHist.length = 0
     delivBytes = 0; delivBucketAt = 0; delivBps = 0; delivPositiveBps = 0
+    activeDelivBps = 0
   }
 
   return {
     sampleSpeed, sampleBitrate, markConcChange,
     getAggregateScales, bestAggConn, soloConnKBps, soloRetainRatio, avgSegLoadMs,
     hasSamples, requiredConn, aggregateFeeds, peakAggBps, saturationConn, segBps,
-    noteFluentRate, windowedFluentRate, deliveredBps, lastPositiveDelivered,
+    deliveredBps, noteActiveDelivery, activeDeliveryBps,
     perConnKBps, segMbps, resetSamples,
   }
 }

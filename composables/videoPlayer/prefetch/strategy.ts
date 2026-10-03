@@ -10,7 +10,7 @@
  */
 import { ref } from 'vue'
 import type { TierParams } from '../../videoSiteRules'
-import { FLUENT_RATE_WINDOW_DEFAULT_SECS, FLUENT_RATE_WINDOW_MAX_SECS, FLUENT_RATE_WINDOW_MIN_SECS, MAX_PLAYBACK_RATE } from '../display'
+import { MAX_PLAYBACK_RATE } from '../display'
 import type { BandwidthModel } from './bandwidth'
 import { useConcurrencyCaps } from './caps'
 import {
@@ -34,7 +34,6 @@ export interface StrategySnapshot {
   playableSecs: number    // 有效可播秒数（MSE + 预取缓存），倍速决策的经验依据
   avgSegLoadMs: number    // 一片平均下载耗时（ms）：判「每连接够不够快」比看瞬时速度直观
   aggKneeConn: number     // 实测到的聚合拐点并发（0=还没见到拐点）
-  fluentWindowSecs: number // 最高流畅倍速的观察窗（秒）：展示的是窗口内最差时刻的值
 }
 
 /** 策略与调度共享的少量可变状态（装配层创建，两边读写同一份）。 */
@@ -89,7 +88,7 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
   const strategy = ref<StrategySnapshot>({
     perConnKBps: 0, soloKBps: 0, soloRetain: 0, satConn: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0,
     aggregateScales: true, healthZone: 'healthy', playableSecs: 0,
-    avgSegLoadMs: 0, aggKneeConn: 0, fluentWindowSecs: 0,
+    avgSegLoadMs: 0, aggKneeConn: 0,
   })
 
   // 并发控制的持久状态。**没有「受控并发」这个积分器了**：目标值每拍由 desiredConn 的
@@ -114,8 +113,6 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
   let connUpAt = 0                        // 上次**上调**并发的时刻：爬升按 CONN_RAMP_MS_SLOW/FAST 一档一档来
   let headroomIdle = false                // 缺口已到目标、停取中：恢复要等缺口张开到 5%（迟滞）
   let lastHealthZone: HealthZone = 'healthy'  // 健康区（驱动 UI 与降速守卫）
-  /** 最近一次「预取活跃且真的在交付」的秒桶读数（停取期沿用，见 refreshStrategy） */
-  let lastActiveDelivered = 0
   let lastPlayable = 0                    // 上次量到的有效可播秒数（MSE + 预取缓存）
 
   // 刷新对外策略快照（供 UI 展示与倍速可行性判断）
@@ -128,28 +125,21 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
      * 拿它当能力会把展示钉死在 1x（实测踩过：稳态下恒 1x）。所以：
      *   · 目标并发 > 0：用本拍交付，并记为「最近活跃读数」；本拍桶还空着 → 沿用它；
      *   · 目标并发 = 0：一律沿用最近活跃读数（网络真变差由卡顿守卫/健康区兜，那里看的是地面真值）。
-     * 首拍什么都没有 → 按当前倍速显示（摆 0 会让人以为连 1x 都撑不住）。
-     * 封在播放器最高档：倍速菜单最高就 5 档，更高的数无法兑现，只会误导。
+     * **但只有「系统真的在抢带宽」（目标并发 > 0）的拍才喂 EWMA**——停取期（缓存到目标、
+     * 预取主动停工）那一秒的真实流量是「播放消耗」（≈码率本身），喂了就把读数污染成 1x
+     *（实测踩过：稳态恒 1x）；停取拍不喂，EWMA 冻结。单秒交货成簇，靠 EWMA 平滑 +
+     * 0.25 档取整保稳，不再叠「窗口最差值」（那专挑噪声，钉死过 0.75x）。
+     * 显示 = max(1, min(5, EWMA ÷ (码率×安全) 向下取 0.25 档))。**下限 1 必须在计算分支也有**——
+     * 对着 3x 零卡顿的播放显示 0.75x 毫无意义（实测踩过）。
+     * 首拍没有活跃样本 → 按当前倍速显示（摆 0 会让人以为连 1x 都撑不住）。
      */
     const live = bw.deliveredBps()
-    // 只在活跃拍记「最近活跃读数」——停取拍 live>0 也只是播放消耗，记了就把沿用值污染成 1x（回归钉抓过）
-    if (targetConn > 0 && live > 0) lastActiveDelivered = live
-    const delivered = targetConn > 0 ? (live || lastActiveDelivered) : lastActiveDelivered
+    if (targetConn > 0) bw.noteActiveDelivery(live)
     const segBps = bw.segBps()
-    const sustainable = !bw.hasSamples() || delivered <= 0 || segBps <= 0
+    const activeBps = bw.activeDeliveryBps()
+    const sustainable = !bw.hasSamples() || activeBps <= 0 || segBps <= 0
       ? Math.max(1, Math.round(getPlaybackRate() / 0.25) * 0.25)
-      : Math.min(MAX_PLAYBACK_RATE, Math.floor(delivered / (segBps * tier().safety) / 0.25) * 0.25)
-    // 展示与「自动倍速的上限证据」都用**窗口最差值**：瞬时值每秒在抖，没法照着做决策；
-    // 自动倍速拿到保守值也顺带变成「提前降速」而不是「卡了才降」。首拍窗口还空着 → 退瞬时值
-    // 窗口 = 预加载时长（墙钟）：存货能兜底多久，倍速承诺就管多久；不限预加载 → 默认 3 分钟。
-    // 展示与「自动倍速的上限证据」都用窗口最差值——瞬时值每秒在抖，没法照着做决策；
-    // 自动倍速拿到保守值也顺带变成「提前降速」而不是「卡了才降」。首拍窗口还空着 → 退瞬时值
-    const targetWall = getPrefetchTargetSecs()
-    const windowSecs = Number.isFinite(targetWall)
-      ? Math.min(FLUENT_RATE_WINDOW_MAX_SECS, Math.max(FLUENT_RATE_WINDOW_MIN_SECS, targetWall))
-      : FLUENT_RATE_WINDOW_DEFAULT_SECS
-    bw.noteFluentRate(sustainable, windowSecs)
-    const windowed = bw.windowedFluentRate()
+      : Math.max(1, Math.min(MAX_PLAYBACK_RATE, Math.floor(activeBps / (segBps * tier().safety) / 0.25) * 0.25))
     strategy.value = {
       perConnKBps: bw.perConnKBps(),
       soloKBps: bw.soloConnKBps(),
@@ -157,8 +147,7 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
       satConn: bw.saturationConn(),
       segMbps: bw.segMbps(),
       targetConn,
-      maxFluentRate: windowed || sustainable,
-      fluentWindowSecs: windowSecs,
+      maxFluentRate: sustainable,
       aggregateScales: bw.getAggregateScales(),
       healthZone: lastHealthZone,
       playableSecs: Math.round(lastPlayable),
@@ -361,10 +350,9 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
     headroomIdle = false
     lastHealthZone = 'healthy'
     lastPlayable = 0
-    lastActiveDelivered = 0
     strategy.value = {
       perConnKBps: 0, soloKBps: 0, soloRetain: 0, satConn: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0,
-      aggregateScales: true, healthZone: 'healthy', playableSecs: 0, avgSegLoadMs: 0, aggKneeConn: 0, fluentWindowSecs: 0,
+      aggregateScales: true, healthZone: 'healthy', playableSecs: 0, avgSegLoadMs: 0, aggKneeConn: 0,
     }
   }
 

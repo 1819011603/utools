@@ -121,28 +121,15 @@ describe('requiredConn / aggregateFeeds', () => {
   })
 })
 
-describe('noteFluentRate / windowedFluentRate：观察窗取最差值', () => {
-  it('窗口内取 min；低样本滚出窗口后读数回升；窗口长度由调用方给（=预加载时长）', () => {
-    let clock = 1000
-    vi.spyOn(performance, 'now').mockImplementation(() => clock)
+describe('noteActiveDelivery / activeDeliveryBps：活跃期交付的 EWMA', () => {
+  it('多次喂按 0.7/0.3 平滑；0 不喂（停取/没交货完不是能力）', () => {
     const bw = useBandwidthModel()
-    bw.noteFluentRate(4, 60)
-    bw.noteFluentRate(3, 60)
-    bw.noteFluentRate(3.5, 60)
-    expect(bw.windowedFluentRate()).toBe(3)          // 3 还在窗内 → 承诺 3
-    clock += 61_000                                   // 3 滚出去（窗口 60s）
-    bw.noteFluentRate(3.5, 60)
-    expect(bw.windowedFluentRate()).toBe(3.5)
-  })
-
-  it('窗口变短时按新窗口裁旧样本', () => {
-    let clock = 1000
-    vi.spyOn(performance, 'now').mockImplementation(() => clock)
-    const bw = useBandwidthModel()
-    bw.noteFluentRate(2, 600)
-    clock += 100_000
-    bw.noteFluentRate(5, 30)                          // 窗口缩到 30s → 100s 前的 2 出窗
-    expect(bw.windowedFluentRate()).toBe(5)
+    bw.noteActiveDelivery(24e6)
+    expect(bw.activeDeliveryBps()).toBe(24e6)
+    bw.noteActiveDelivery(0)
+    expect(bw.activeDeliveryBps()).toBe(24e6)        // 0 被忽略，冻结
+    bw.noteActiveDelivery(4e6)
+    expect(bw.activeDeliveryBps()).toBeCloseTo(24e6 * 0.7 + 4e6 * 0.3, -3)
   })
 })
 
@@ -157,7 +144,7 @@ describe('deliveredBps / lastPositiveDelivered：实测交付吞吐（1 秒桶�
     expect(bw.deliveredBps()).toBe(8_000_000)   // 1MB/1s = 8Mbps
   })
 
-  it('空桶（一片没下）→ 0；最近正读数由 lastPositiveDelivered 记住', () => {
+  it('空桶（一片没下）→ 0', () => {
     let clock = 1000
     vi.spyOn(performance, 'now').mockImplementation(() => clock)
     const bw = useBandwidthModel()
@@ -166,7 +153,6 @@ describe('deliveredBps / lastPositiveDelivered：实测交付吞吐（1 秒桶�
     expect(bw.deliveredBps()).toBe(4_000_000)
     clock += 1000                            // 这一秒什么都没下
     expect(bw.deliveredBps()).toBe(0)
-    expect(bw.lastPositiveDelivered()).toBe(4_000_000)
   })
 
   it('缓存命中类的假字节（<100KB / >500Mbps）不进交付', () => {

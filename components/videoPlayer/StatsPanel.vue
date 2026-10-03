@@ -117,9 +117,8 @@
           :class="strategy.targetConn > strategy.satConn ? 'text-red-500' : 'text-gray-400'"
         > / 饱和 {{ strategy.satConn }}</span>
       </div>
-      <div :title="`过去约 ${Math.round(strategy.fluentWindowSecs / 60)} 分钟（= 预加载时长）内，按实际下载速度最差的那一刻`
-        + `也能撑住的倍速（实测交付 ${strategy.targetConn >= 0 ? '' : ''}——不看模型估算，限速/摊薄已经体现在真实下载里）。`
-        + '变差立刻反映；变好要等窗口里最差的一秒滚出去，所以升档是慢慢来的。照着它开倍速，不会开完就卡。'">
+      <div :title="'预取活跃期间实际下载速度的平滑值 ÷ 码率（不看模型估算，限速/摊薄已经体现在真实下载里）。'
+        + '缓存攒满、预取停工时数字冻结（那段时间没有在抢带宽的样本）。0.25 档取整，变差几秒内跟跌。'">
         <span class="text-gray-500">最高流畅倍速：</span>
         <span class="font-medium" :class="strategy.maxFluentRate < playbackRate ? 'text-red-500' : 'text-green-500'">
           {{ strategy.maxFluentRate }}x

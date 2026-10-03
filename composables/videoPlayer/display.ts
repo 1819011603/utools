@@ -55,8 +55,3 @@ export function formatBytes(bytes: number): string {
 export const TURBO_PLAYBACK_RATES = [3.5, 4, 4.5, 5]
 /** 播放器能给的最高倍速（超快档最后一格）。再往上没有可操作的档位，估算/提示封到这里为止 */
 export const MAX_PLAYBACK_RATE = TURBO_PLAYBACK_RATES[TURBO_PLAYBACK_RATES.length - 1]!
-/** 「最高流畅倍速」的观察窗 = 预加载时长（存货能兜底多久，倍速就只需在那段时间内可持续），
- * 夹在这个范围里；不限预加载时用默认值 */
-export const FLUENT_RATE_WINDOW_MIN_SECS = 30
-export const FLUENT_RATE_WINDOW_MAX_SECS = 600
-export const FLUENT_RATE_WINDOW_DEFAULT_SECS = 180

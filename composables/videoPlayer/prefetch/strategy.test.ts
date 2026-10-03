@@ -16,9 +16,11 @@ interface BwKnobs {
   delivered?: number
   /** 逐拍可变的交付读数（优先于 delivered） */
   deliveredFn?: () => number
+  /** activeDeliveryBps()（活跃期交付 EWMA）；缺省 = delivered */
+  activeE?: number
+  /** 记录 strategy 喂给 noteActiveDelivery 的值（验「只有活跃拍才喂」） */
+  noteActiveFn?: (b: number) => void
   maxRate?: number
-  /** windowedFluentRate() 的返回值（0 = 没窗口，策略退回瞬时值） */
-  windowed?: number
   hasSamples?: boolean
   soloKBps?: number
   retain?: number
@@ -45,12 +47,12 @@ function makeBw(k: BwKnobs): BandwidthModel {
     perConnKBps: () => 0,
     segMbps: () => 0,
     deliveredBps: () => k.deliveredFn?.() ?? k.delivered ?? 0,
-    lastPositiveDelivered: () => k.deliveredFn?.() ?? k.delivered ?? 0,
+    noteActiveDelivery: (b: number) => k.noteActiveFn?.(b),
+    activeDeliveryBps: () => k.activeE ?? k.deliveredFn?.() ?? k.delivered ?? 0,
     segBps: () => 8e6,
     getAggregateScales: () => true,
     markConcChange: () => {},
     noteFluentRate: () => {},
-    windowedFluentRate: () => k.windowed ?? 0,   // 默认没窗口 → 退瞬时值，多数用例直接验 maxFluentRate 桩值
   }
   return stub as unknown as BandwidthModel
 }
@@ -293,13 +295,29 @@ describe('sanity：FAST_SOLO_KBPS 与用例口径一致', () => {
 })
 
 describe('maxFluentRate：停取期的「播放消耗」不算能力（实测踩过：稳态恒 1x）', () => {
-  it('首拍活跃交付 24Mbps → 3x；第二拍停取（流量只剩消耗 1.7Mbps）→ 仍是 3x，不跌回 1x', () => {
-    let liveBps = 24e6
-    const { ctl } = setup({ bw: { hasSamples: true, required: 10, deliveredFn: () => liveBps } })
-    ctl.getAdaptivePrefetchCount(10)    // 活跃拍：在补缓存，真实交付 24Mbps
-    liveBps = 1.7e6                     // 停取后流量只剩播放消耗
-    ctl.getAdaptivePrefetchCount(100)   // 停取拍：缓存到目标
+  it('活跃期 EWMA 24Mbps → 3x；停取拍（交付只剩消耗 1.7Mbps）不喂 EWMA → 仍是 3x', () => {
+    const fed: number[] = []
+    const { ctl } = setup({ bw: {
+      hasSamples: true, required: 10,
+      deliveredFn: () => 1.7e6,
+      noteActiveFn: (b: number) => { fed.push(b) },
+      activeE: 24e6,                        // EWMA 已被活跃期喂成 24Mbps
+    } })
+    ctl.getAdaptivePrefetchCount(100)       // 停取拍：缓存到目标
+    expect(fed).toEqual([])                 // 停取拍不喂
     expect(ctl.strategy.value.maxFluentRate).toBe(3)
+  })
+  it('活跃拍把交付喂进 EWMA；计算分支也有下限 1（低 EWMA 不显示 <1x）', () => {
+    const fed: number[] = []
+    const { ctl } = setup({ bw: {
+      hasSamples: true, required: 10,
+      deliveredFn: () => 2.4e6,
+      noteActiveFn: (b: number) => { fed.push(b) },
+      activeE: 2.16e6,                      // 平滑后 ≈ 码率 → 粗算 0.75 → 必须托底 1
+    } })
+    ctl.getAdaptivePrefetchCount(10)
+    expect(fed).toEqual([2.4e6])
+    expect(ctl.strategy.value.maxFluentRate).toBe(1)
   })
 })
 
@@ -322,9 +340,4 @@ describe('maxFluentRate：实测交付吞吐 ÷ 码率，窗口最差值，封 5
     expect(ctl.strategy.value.maxFluentRate).toBe(1.5)
   })
 
-  it('窗口最差值优先：窗口里有过更低的读数 → 展示更低的', () => {
-    const { ctl } = setup({ bw: { hasSamples: true, required: 10, delivered: 24e6, windowed: 2 } })
-    ctl.getAdaptivePrefetchCount(50)
-    expect(ctl.strategy.value.maxFluentRate).toBe(2)
-  })
 })
