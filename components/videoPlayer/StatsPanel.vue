@@ -107,8 +107,7 @@
       <div><span class="text-gray-500">视频码率：</span><span class="font-medium">{{ strategy.segMbps }} Mbps</span></div>
       <!-- 「饱和」是「为什么只开这么几条」最直接的答案：峰值聚合 ÷ 单条基线，
            超过它的每一条都只能从别人嘴里抢带宽 -->
-      <div :title="'饱和并发 = 实测峰值聚合 ÷ 单条基线：源站给这个 IP 的总量摊给「每条都能跑满」的连接数。'
-        + '开超过它的每一条都只是分摊，最需要的那一片反而更晚到。'">
+      <div :title="'这一拍的逐级判定（⚡ = 咬人的那一级）：' + getConnTrace()">
         <span class="text-gray-500">目标并发：</span>
         <span class="font-medium">{{ strategy.targetConn }}</span>
         <span
@@ -130,6 +129,7 @@
     <div class="text-sm border-t border-gray-200 dark:border-gray-700 pt-2">
       <span class="text-gray-500">播放状态：</span>
       <span class="font-medium">{{ playbackDiag }}</span>
+      <div class="text-xs text-gray-400 font-mono break-all mt-1">{{ getConnTrace() }}</div>
     </div>
 
     <!-- 本机播放记录：调参前后对比用的尺子（只存本机、不上传），见 engine/playMetrics.ts -->
@@ -156,7 +156,7 @@ const {
   hlsConfig, hlsStats, bufferedPercent, progressPercent, playbackRate, playbackDiag,
   tierLabel, tierBadgeColor, tierIsAuto, guardRateCeiling, effectiveTierParams,
   strategy, stall, prefetchInfo, aggregateKBps, aggregateMbps,
-  dualChannel, dualChannelUnavailable, purgePlayedSegments, getPlayRecords, clearPlayRecords,
+  dualChannel, dualChannelUnavailable, purgePlayedSegments, getPlayRecords, clearPlayRecords, getConnTrace,
 } = useVideoPlayerCtx()
 
 // MSE 窗口上限：就是 engine/hlsConfig.ts 交给 hls.js 的 maxMaxBufferLength（append 的硬闸）。
