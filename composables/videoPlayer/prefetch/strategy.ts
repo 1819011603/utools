@@ -118,9 +118,22 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
 
   // 刷新对外策略快照（供 UI 展示与倍速可行性判断）
   const refreshStrategy = (targetConn: number) => {
-    // 带宽模型只答「物理上撑得动几倍」，封在播放器最高档：算出 11x 也是个无法兑现的数字，
-    // 面板显示和「可能卡顿」提示都会被它误导
-    const sustainable = Math.min(MAX_PLAYBACK_RATE, bw.maxFluentRate(runtime.hostConcurrencyCap, tier().safety, getPlaybackRate()))
+    /*
+     * 「最高流畅倍速」用**实测交付吞吐**，不再用带宽模型外推——外推模型不了每 IP 限速/摊薄，
+     * 虚成十来倍是实测过的（面板先后出现过 11.75x / 75x）。每片下载都是真实交付，限速、
+     * 摊薄、硬顶已经全在这个数里。三档：
+     *   · 这一拍有交付 → 用它；
+     *   · 没交付但健康区 healthy → 停取期（缓存满、主动不下载），沿用最近正读数；
+     *   · 没交付且不健康 → 真在卡，记 0（窗口 min 把承诺打下来）。
+     * 首拍什么都没有 → 按当前倍速显示（摆 0 会让人以为连 1x 都撑不住）。
+     * 封在播放器最高档：倍速菜单最高就 5 档，更高的数无法兑现，只会误导。
+     */
+    const live = bw.deliveredBps()
+    const delivered = live > 0 ? live : (lastHealthZone === 'healthy' ? bw.lastPositiveDelivered() : 0)
+    const segBps = bw.segBps()
+    const sustainable = !bw.hasSamples() || delivered <= 0 || segBps <= 0
+      ? Math.max(1, Math.round(getPlaybackRate() / 0.25) * 0.25)
+      : Math.min(MAX_PLAYBACK_RATE, Math.floor(delivered / (segBps * tier().safety) / 0.25) * 0.25)
     // 展示与「自动倍速的上限证据」都用**窗口最差值**：瞬时值每秒在抖，没法照着做决策；
     // 自动倍速拿到保守值也顺带变成「提前降速」而不是「卡了才降」。首拍窗口还空着 → 退瞬时值
     // 窗口 = 预加载时长（墙钟）：存货能兜底多久，倍速承诺就管多久；不限预加载 → 默认 3 分钟。

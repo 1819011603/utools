@@ -12,6 +12,8 @@ import { useConcurrencyStrategy } from './strategy'
 import { COLD_START_CONN_CAP, FAST_SOLO_KBPS } from './tuning'
 
 interface BwKnobs {
+  /** deliveredBps()（实测交付吞吐，bps）；0 = 无交付 */
+  delivered?: number
   maxRate?: number
   /** windowedFluentRate() 的返回值（0 = 没窗口，策略退回瞬时值） */
   windowed?: number
@@ -40,7 +42,9 @@ function makeBw(k: BwKnobs): BandwidthModel {
     peakAggBps: () => k.peakAgg ?? 0,
     perConnKBps: () => 0,
     segMbps: () => 0,
-    maxFluentRate: () => k.maxRate ?? 1,
+    deliveredBps: () => k.delivered ?? 0,
+    lastPositiveDelivered: () => k.delivered ?? 0,
+    segBps: () => 8e6,
     getAggregateScales: () => true,
     markConcChange: () => {},
     noteFluentRate: () => {},
@@ -281,31 +285,33 @@ describe('「缓冲卡住」兜底（消费 ≈ 填充 → 死卡 4 条的自锁
   })
 })
 
+
 describe('sanity：FAST_SOLO_KBPS 与用例口径一致', () => {
   it('FAST_SOLO_KBPS=500', () => { expect(FAST_SOLO_KBPS).toBe(500) })
 })
 
-describe('maxFluentRate 窗口（展示窗口内最差时刻，不是瞬时值）', () => {
-  it('窗口有数 → 用窗口最差值；窗口空 → 退瞬时值', () => {
-    const { ctl } = setup({ bw: { hasSamples: true, required: 10, maxRate: 4 } })
+describe('maxFluentRate：实测交付吞吐 ÷ 码率，窗口最差值，封 5x', () => {
+  it('交付 24Mbps、码率 8Mbps、安全 1 → 3x', () => {
+    const { ctl } = setup({ bw: { hasSamples: true, required: 10, delivered: 24e6 } })
     ctl.getAdaptivePrefetchCount(50)
-    expect(ctl.strategy.value.maxFluentRate).toBe(4)      // 桩窗口返回 0 → 退瞬时
-    const { ctl: ctl2 } = setup({ bw: { hasSamples: true, required: 10, maxRate: 4, windowed: 2 } })
-    ctl2.getAdaptivePrefetchCount(50)
-    expect(ctl2.strategy.value.maxFluentRate).toBe(2)     // 窗口最差值优先于瞬时值
-    expect(ctl2.strategy.value.fluentWindowSecs).toBeGreaterThan(0)
+    expect(ctl.strategy.value.maxFluentRate).toBe(3)
   })
-})
 
-describe('maxFluentRate 封顶（面板显示与「可能卡顿」提示共用这个数）', () => {
-  it('带宽模型算出虚高（如 11.75x）→ 封在播放器最高档 5x', () => {
-    const { ctl } = setup({ bw: { hasSamples: true, required: 10, maxRate: 11.75 } })
+  it('封顶：交付再大也 ≤ 5x', () => {
+    const { ctl } = setup({ bw: { hasSamples: true, required: 10, delivered: 500e6 } })
     ctl.getAdaptivePrefetchCount(50)
     expect(ctl.strategy.value.maxFluentRate).toBe(5)
   })
-  it('算出 3x → 原样展示，不受封顶影响', () => {
-    const { ctl } = setup({ bw: { hasSamples: true, required: 10, maxRate: 3 } })
+
+  it('无交付（冷启动）→ 按当前倍速展示', () => {
+    const { ctl } = setup({ bw: { hasSamples: true, required: 10, delivered: 0 }, rate: 1.5 })
     ctl.getAdaptivePrefetchCount(50)
-    expect(ctl.strategy.value.maxFluentRate).toBe(3)
+    expect(ctl.strategy.value.maxFluentRate).toBe(1.5)
+  })
+
+  it('窗口最差值优先：窗口里有过更低的读数 → 展示更低的', () => {
+    const { ctl } = setup({ bw: { hasSamples: true, required: 10, delivered: 24e6, windowed: 2 } })
+    ctl.getAdaptivePrefetchCount(50)
+    expect(ctl.strategy.value.maxFluentRate).toBe(2)
   })
 })

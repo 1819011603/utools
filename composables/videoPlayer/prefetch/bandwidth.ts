@@ -4,9 +4,8 @@
  * 全是 EWMA 采样加几个纯算式，跟「预取哪一片」「用哪条 lane」都无关，
  * 所以从 `useHlsPrefetch` 里拆出来单独放（那边只留调度）。
  *
- * 「最高流畅倍速」为什么是纯带宽模型：早期靠「缓冲增长率」反推，
- * 但预取到「预加载时长」封顶之后缓冲不再增长、增长率≈0，会把可持续倍速误判成 1x。
- * 改成「满并发聚合带宽 ÷ 码率」直接算，与并发模型（useHlsPrefetch 的 desiredConn）同源。
+ * 「最高流畅倍速」的数据源是**实测交付吞吐**（deliveredBps，见下面那块）：
+ * 早期用带宽模型外推（每连接 × 并发 ÷ 码率），每 IP 限速/摊薄模型不了，虚成十来倍（实测 11.75x / 75x）。
  *
  * 内部实现模块，走显式相对 import，不进 `imports.dirs`。
  */
@@ -61,6 +60,7 @@ export function useBandwidthModel() {
     if (bytes < 100_000 || ms < 50) return
     const bps = (bytes * 8) / (ms / 1000)
     if (bps > 500_000_000) return   // >500Mbps 基本是缓存/异常，丢弃
+    noteDelivered(bytes)   // 交付吞吐与速度采样同一门槛（过滤缓存命中等假字节）
     perConnBps = ewma(perConnBps, bps)
     segLoadMs = ewma(segLoadMs, ms)
     // 这一片是在「上一个并发档」里发起的 → 记进当前档会把两个档都判错，只留混合均值
@@ -201,20 +201,37 @@ export function useBandwidthModel() {
     return need > 0 && peakAggBps() >= need
   }
 
-  /**
-   * 当前带宽最高能撑几倍速：聚合带宽 ÷ (码率 × 安全系数)，向下对齐 0.25 档（保守，不过度承诺）。
-   * 还没测出数时按「当前倍速」展示而不是 0——面板上摆个 0 会让人以为连 1x 都撑不住。
+  /** 实测码率原值（bps）。segMbps() 是给面板看的 1 位小数版，算式用这个 */
+  const segBps = (): number => segBitrate
+
+  /*
+   * ── 实测交付吞吐（「最高流畅倍速」的数据源）──
    *
-   * **聚合基数不能一律「每连接 × cap」**（实测面板出现过 11.75x）：每 IP 限总量的源
-   * （`getAggregateScales() === false`）加线程不涨吞吐，6 条各自都慢，乘出来高估好几倍。
-   * 可并行才按满并发估；不可并行用**实测峰值聚合**（按并发档记的最好成绩，见 aggByConn），
-   * 分档样本还没攒到时退单条——宁可偏低，不给用户一个做不到的倍速。
+   * 不再用「每连接速度 × 并发」外推总带宽——每 IP 限速、摊薄、排队全都模型不了，
+   * 外推虚成十来倍是实测过的（面板先后出现过 11.75x / 75x）。每个分片下载都是真实交付，
+   * 按 1 秒桶累计它的字节数，就是系统此刻**真实**的供给能力，不存在模型误差。
    */
-  const maxFluentRate = (cap: number, safety: number, currentRate: number): number => {
-    if (!hasSamples()) return Math.max(1, Math.round(currentRate / 0.25) * 0.25)
-    const agg = getAggregateScales() ? perConnBps * cap : (peakAggBps() || perConnBps)
-    return Math.max(1, Math.floor(agg / (segBitrate * safety) / 0.25) * 0.25)
+  let delivBytes = 0
+  let delivBucketAt = 0
+  let delivBps = 0
+  let delivPositiveBps = 0
+  const noteDelivered = (bytes: number) => {
+    if (!delivBucketAt) delivBucketAt = performance.now()   // 首片起桶
+    delivBytes += bytes
   }
+  /** 最近一秒的实测交付（bps）。读时惰性结算到期桶；期间一片都没下完 → 0 */
+  const deliveredBps = (): number => {
+    const now = performance.now()
+    if (delivBucketAt && now - delivBucketAt >= 1000) {
+      delivBps = (delivBytes * 8 * 1000) / (now - delivBucketAt)
+      if (delivBps > 0) delivPositiveBps = delivBps
+      delivBytes = 0
+      delivBucketAt = now
+    }
+    return delivBps
+  }
+  /** 最近一次非 0 的秒桶读数：停取期（缓存满、主动不下载）沿用，别把「选择不下载」当成「下载不动」 */
+  const lastPositiveDelivered = (): number => delivPositiveBps
 
   /*
    * 「最高流畅倍速」的**观察窗**：瞬时值每秒都在抖（EWMA 跟着采样走），用户没法照着一个
@@ -249,13 +266,14 @@ export function useBandwidthModel() {
     segLoadMs = 0
     concChangedAt = 0
     fluentHist.length = 0
+    delivBytes = 0; delivBucketAt = 0; delivBps = 0; delivPositiveBps = 0
   }
 
   return {
     sampleSpeed, sampleBitrate, markConcChange,
     getAggregateScales, bestAggConn, soloConnKBps, soloRetainRatio, avgSegLoadMs,
-    hasSamples, requiredConn, aggregateFeeds, peakAggBps, saturationConn, maxFluentRate,
-    noteFluentRate, windowedFluentRate,
+    hasSamples, requiredConn, aggregateFeeds, peakAggBps, saturationConn, segBps,
+    noteFluentRate, windowedFluentRate, deliveredBps, lastPositiveDelivered,
     perConnKBps, segMbps, resetSamples,
   }
 }

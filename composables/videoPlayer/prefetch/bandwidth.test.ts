@@ -101,78 +101,23 @@ describe('saturationConn：饱和并发 = 峰值聚合 ÷ 单条基线', () => {
   })
 })
 
-describe('requiredConn / aggregateFeeds / maxFluentRate', () => {
-  it('requiredConn = ceil(码率×倍速×安全 ÷ 每连接)；solo 用单条基线', () => {
+describe('requiredConn / aggregateFeeds', () => {
+  // （原 maxFluentRate 用例随外推算法一起删除：它虚成过 11.75x / 75x，现在用实测交付吞吐，见下面两组）
+  it('requiredConn：混合均值分母；solo=true 用低并发档基线', () => {
     const bw = useBandwidthModel()
-    bw.sampleBitrate(1_000_000, 1)   // 码率 8e6 bps
-    feed(bw, 4e6, 2)                 // 单条基线 4e6；混合均值 4e6
-    feed(bw, 1e6, 6)                 // 混合均值 → 3.1e6
-    expect(bw.requiredConn(1, 1)).toBe(3)        // ceil(8e6/3.1e6)
-    expect(bw.requiredConn(1, 1, true)).toBe(2)  // ceil(8e6/4e6)
-  })
-
-  it('aggregateFeeds：峰值聚合 ≥ 码率×倍速×安全', () => {
-    const bw = useBandwidthModel()
-    bw.sampleBitrate(1_000_000, 1)   // 8e6
-    feed(bw, 8e6, 2)                 // aggByConn[2]=16e6
-    expect(bw.aggregateFeeds(1, 1)).toBe(true)   // 16e6 >= 8e6
-    expect(bw.aggregateFeeds(3, 1)).toBe(false)  // 16e6 < 24e6
-  })
-
-  it('maxFluentRate：不可并行源（每 IP 硬顶）按实测峰值聚合，不是 每连接×cap（那会高估成十来倍）', () => {
-    const bw = useBandwidthModel()
-    // 低并发档单条 8Mbps；高并发档每连接 3Mbps（< 8×0.55）→ 判「不可并行」
-    feed(bw, 8e6, 2)
-    feed(bw, 3e6, 6); feed(bw, 3e6, 6)
+    feed(bw, 8e6, 2)          // 低并发档 8Mbps
+    feed(bw, 2e6, 6)          // 混合均值被拉低
     bw.sampleBitrate(1_000_000, 1)   // 码率 8Mbps
-    expect(bw.getAggregateScales()).toBe(false)
-    // 峰值聚合 = aggByConn[6] = 18Mbps → 18/8 = 2.25x；
-    // 旧算法 perConnBps(=6.5Mbps)×cap(12) = 78Mbps → 9.75x，正是面板那个 11.75x 的来历
-    expect(bw.maxFluentRate(12, 1, 1)).toBe(2.25)
+    expect(bw.requiredConn(1, 1)).toBe(2)      // 混合均值 6.2Mbps → ceil(8/6.2)
+    expect(bw.requiredConn(1, 1, true)).toBe(1) // 单条基线 8Mbps → 1
   })
 
-  // 「不可并行且峰值=0」实际到不了：不可并行的判据本身要靠分档样本，而带并发标记的采样必然记账。
-  // `|| perConnBps` 那条退路只是防御（无任何带并发标记采样时判不出不可并行，走不到这）
-
-  it('maxFluentRate：无样本按当前倍速取 0.25 档；有样本按 满并发聚合 ÷ (码率×安全)', () => {
+  it('aggregateFeeds：峰值聚合 ≥ 码率×倍速×安全 → 够喂', () => {
     const bw = useBandwidthModel()
-    expect(bw.maxFluentRate(6, 1, 1.3)).toBe(1.25)   // round(1.3/0.25)=5 → 1.25
-
-    bw.sampleBitrate(1_000_000, 1)   // 8e6
-    feed(bw, 8e6, 2)                 // perConnBps=8e6
-    expect(bw.maxFluentRate(6, 1, 1)).toBe(6)   // floor(8e6*6/(8e6*1)/0.25)*0.25 = 6
-  })
-})
-
-describe('soloRetainRatio / hasSamples / resetSamples', () => {
-  it('保有率 = 当前每连接 ÷ 单条基线；没基线时 0', () => {
-    const bw = useBandwidthModel()
-    feed(bw, 8e6, 2)                 // 低并发档 8e6
-    feed(bw, 1e6, 6)                 // 混合均值 → 5.9e6
-    expect(bw.soloRetainRatio()).toBeCloseTo(0.7375, 6)
-
-    const bw2 = useBandwidthModel()
-    feed(bw2, 8e6, 6)                // 只在高并发档 → 没单条基线
-    expect(bw2.soloRetainRatio()).toBe(0)
-  })
-
-  it('hasSamples 要「每连接速度 + 码率」都有', () => {
-    const bw = useBandwidthModel()
-    feed(bw, 8e6, 2)
-    expect(bw.hasSamples()).toBe(false)
+    feed(bw, 8e6, 2); feed(bw, 3e6, 6)
     bw.sampleBitrate(1_000_000, 1)
-    expect(bw.hasSamples()).toBe(true)
-  })
-
-  it('resetSamples 清空全部', () => {
-    const bw = useBandwidthModel()
-    bw.sampleBitrate(1_000_000, 1)
-    feed(bw, 8e6, 2)
-    bw.resetSamples()
-    expect(bw.hasSamples()).toBe(false)
-    expect(bw.perConnKBps()).toBe(0)
-    expect(bw.soloConnKBps()).toBe(0)
-    expect(bw.peakAggBps()).toBe(0)
+    expect(bw.aggregateFeeds(1, 1.2)).toBe(true)    // 峰值 18Mbps ≥ 9.6
+    expect(bw.aggregateFeeds(10, 1.2)).toBe(false)
   })
 })
 
@@ -198,5 +143,39 @@ describe('noteFluentRate / windowedFluentRate：观察窗取最差值', () => {
     clock += 100_000
     bw.noteFluentRate(5, 30)                          // 窗口缩到 30s → 100s 前的 2 出窗
     expect(bw.windowedFluentRate()).toBe(5)
+  })
+})
+
+describe('deliveredBps / lastPositiveDelivered：实测交付吞吐（1 秒桶）', () => {
+  it('sampleSpeed 的字节按桶累计，读时结算为 bps', () => {
+    let clock = 1000
+    vi.spyOn(performance, 'now').mockImplementation(() => clock)
+    const bw = useBandwidthModel()
+    bw.sampleSpeed(1_000_000, 500, 1, 0)   // 1MB 过门槛（≥100KB、≥50ms）
+    expect(bw.deliveredBps()).toBe(0)       // 第一桶还没到期（bucket 从首片起算）
+    clock += 1000
+    expect(bw.deliveredBps()).toBe(8_000_000)   // 1MB/1s = 8Mbps
+  })
+
+  it('空桶（一片没下）→ 0；最近正读数由 lastPositiveDelivered 记住', () => {
+    let clock = 1000
+    vi.spyOn(performance, 'now').mockImplementation(() => clock)
+    const bw = useBandwidthModel()
+    bw.sampleSpeed(500_000, 500, 1, 0)
+    clock += 1000
+    expect(bw.deliveredBps()).toBe(4_000_000)
+    clock += 1000                            // 这一秒什么都没下
+    expect(bw.deliveredBps()).toBe(0)
+    expect(bw.lastPositiveDelivered()).toBe(4_000_000)
+  })
+
+  it('缓存命中类的假字节（<100KB / >500Mbps）不进交付', () => {
+    let clock = 1000
+    vi.spyOn(performance, 'now').mockImplementation(() => clock)
+    const bw = useBandwidthModel()
+    bw.sampleSpeed(500, 500, 1, 0)
+    bw.sampleSpeed(1e12, 100, 1, 0)
+    clock += 1000
+    expect(bw.deliveredBps()).toBe(0)
   })
 })
