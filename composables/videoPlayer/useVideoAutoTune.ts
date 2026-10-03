@@ -106,7 +106,7 @@ export function useVideoAutoTune(deps: VideoAutoTuneDeps) {
     const cur = playbackRate.value
     const s = strategy.value
     // 缓冲实况：有效可播（MSE + 预取缓存）已远超吃紧阈值且没在卡 → 供给明显充裕，
-    // 带宽模型（实测每连接速度 × 并发 ÷ 码率）在预取已经吃饱、采样变稀时会偏保守，这时以实况为准。
+    // 带宽模型（聚合带宽 ÷ 码率，硬顶源按实测峰值聚合）在预取已经吃饱、采样变稀时会偏保守，这时以实况为准。
     const bufferRich = s.playableSecs >= Math.max(tier.effectiveTierParams.value.lowSecs * 2, 60)
       && !stall.isStalling.value
     const modelCeil = s.maxFluentRate > 0 ? s.maxFluentRate : 1
