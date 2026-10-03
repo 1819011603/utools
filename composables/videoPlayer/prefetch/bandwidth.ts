@@ -10,6 +10,8 @@
  *
  * 内部实现模块，走显式相对 import，不进 `imports.dirs`。
  */
+import { FLUENT_RATE_WINDOW_MAX_SECS, FLUENT_RATE_WINDOW_MIN_SECS } from '../display'
+
 const ewma = (prev: number, cur: number) => (prev ? prev * 0.7 + cur * 0.3 : cur)
 
 export function useBandwidthModel() {
@@ -200,13 +202,39 @@ export function useBandwidthModel() {
   }
 
   /**
-   * 当前带宽最高能撑几倍速：满并发聚合带宽 ÷ (码率 × 安全系数)，向下对齐 0.25 档（保守，不过度承诺）。
+   * 当前带宽最高能撑几倍速：聚合带宽 ÷ (码率 × 安全系数)，向下对齐 0.25 档（保守，不过度承诺）。
    * 还没测出数时按「当前倍速」展示而不是 0——面板上摆个 0 会让人以为连 1x 都撑不住。
+   *
+   * **聚合基数不能一律「每连接 × cap」**（实测面板出现过 11.75x）：每 IP 限总量的源
+   * （`getAggregateScales() === false`）加线程不涨吞吐，6 条各自都慢，乘出来高估好几倍。
+   * 可并行才按满并发估；不可并行用**实测峰值聚合**（按并发档记的最好成绩，见 aggByConn），
+   * 分档样本还没攒到时退单条——宁可偏低，不给用户一个做不到的倍速。
    */
-  const maxFluentRate = (cap: number, safety: number, currentRate: number): number =>
-    !hasSamples()
-      ? Math.max(1, Math.round(currentRate / 0.25) * 0.25)
-      : Math.max(1, Math.floor((perConnBps * cap) / (segBitrate * safety) / 0.25) * 0.25)
+  const maxFluentRate = (cap: number, safety: number, currentRate: number): number => {
+    if (!hasSamples()) return Math.max(1, Math.round(currentRate / 0.25) * 0.25)
+    const agg = getAggregateScales() ? perConnBps * cap : (peakAggBps() || perConnBps)
+    return Math.max(1, Math.floor(agg / (segBitrate * safety) / 0.25) * 0.25)
+  }
+
+  /*
+   * 「最高流畅倍速」的**观察窗**：瞬时值每秒都在抖（EWMA 跟着采样走），用户没法照着一个
+   * 一直跳的数字决定开几倍速。每拍记一个样本，对外只给**窗口内最差**的那个——
+   * 「窗口内每一刻都撑得动 X 倍」才是能拿来做决策的承诺。这个 min 天然不对称：
+   * 变差立刻反映（新样本当场就是 min），变好要等旧的低样本滚出窗口（确认了才敢承诺）。
+   * **窗口长度 = 预加载时长**（调用方夹好传入）：存货能兜底多久，倍速就只需在那段时间内可持续
+   * ——带宽抖一下有存货扛着，只有「持续一个兜底周期都撑不住」才需要降速，所以决策窗口就该是它。
+   * 换流/换网（resetSamples）清空重攒——上一个网络的结论对新流没有意义。
+   */
+  const fluentHist: Array<{ t: number; r: number }> = []
+  const noteFluentRate = (r: number, windowSecs: number) => {
+    const t = performance.now()
+    fluentHist.push({ t, r })
+    const winMs = Math.min(FLUENT_RATE_WINDOW_MAX_SECS, Math.max(FLUENT_RATE_WINDOW_MIN_SECS, windowSecs)) * 1000
+    while (fluentHist.length && t - fluentHist[0]!.t > winMs) fluentHist.shift()
+  }
+  /** 窗口内最差值。0 = 还没记过（首拍，调用方退回瞬时值） */
+  const windowedFluentRate = (): number =>
+    fluentHist.length ? fluentHist.reduce((m, x) => Math.min(m, x.r), Infinity) : 0
 
   const perConnKBps = () => Math.round(perConnBps / 8 / 1024)
   const segMbps = () => Math.round((segBitrate / 1e6) * 10) / 10
@@ -220,12 +248,14 @@ export function useBandwidthModel() {
     aggByConn.length = 0
     segLoadMs = 0
     concChangedAt = 0
+    fluentHist.length = 0
   }
 
   return {
     sampleSpeed, sampleBitrate, markConcChange,
     getAggregateScales, bestAggConn, soloConnKBps, soloRetainRatio, avgSegLoadMs,
     hasSamples, requiredConn, aggregateFeeds, peakAggBps, saturationConn, maxFluentRate,
+    noteFluentRate, windowedFluentRate,
     perConnKBps, segMbps, resetSamples,
   }
 }

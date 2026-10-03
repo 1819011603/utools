@@ -12,6 +12,9 @@ import { useConcurrencyStrategy } from './strategy'
 import { COLD_START_CONN_CAP, FAST_SOLO_KBPS } from './tuning'
 
 interface BwKnobs {
+  maxRate?: number
+  /** windowedFluentRate() 的返回值（0 = 没窗口，策略退回瞬时值） */
+  windowed?: number
   hasSamples?: boolean
   soloKBps?: number
   retain?: number
@@ -37,9 +40,11 @@ function makeBw(k: BwKnobs): BandwidthModel {
     peakAggBps: () => k.peakAgg ?? 0,
     perConnKBps: () => 0,
     segMbps: () => 0,
-    maxFluentRate: () => 1,
+    maxFluentRate: () => k.maxRate ?? 1,
     getAggregateScales: () => true,
     markConcChange: () => {},
+    noteFluentRate: () => {},
+    windowedFluentRate: () => k.windowed ?? 0,   // 默认没窗口 → 退瞬时值，多数用例直接验 maxFluentRate 桩值
   }
   return stub as unknown as BandwidthModel
 }
@@ -278,4 +283,29 @@ describe('「缓冲卡住」兜底（消费 ≈ 填充 → 死卡 4 条的自锁
 
 describe('sanity：FAST_SOLO_KBPS 与用例口径一致', () => {
   it('FAST_SOLO_KBPS=500', () => { expect(FAST_SOLO_KBPS).toBe(500) })
+})
+
+describe('maxFluentRate 窗口（展示窗口内最差时刻，不是瞬时值）', () => {
+  it('窗口有数 → 用窗口最差值；窗口空 → 退瞬时值', () => {
+    const { ctl } = setup({ bw: { hasSamples: true, required: 10, maxRate: 4 } })
+    ctl.getAdaptivePrefetchCount(50)
+    expect(ctl.strategy.value.maxFluentRate).toBe(4)      // 桩窗口返回 0 → 退瞬时
+    const { ctl: ctl2 } = setup({ bw: { hasSamples: true, required: 10, maxRate: 4, windowed: 2 } })
+    ctl2.getAdaptivePrefetchCount(50)
+    expect(ctl2.strategy.value.maxFluentRate).toBe(2)     // 窗口最差值优先于瞬时值
+    expect(ctl2.strategy.value.fluentWindowSecs).toBeGreaterThan(0)
+  })
+})
+
+describe('maxFluentRate 封顶（面板显示与「可能卡顿」提示共用这个数）', () => {
+  it('带宽模型算出虚高（如 11.75x）→ 封在播放器最高档 5x', () => {
+    const { ctl } = setup({ bw: { hasSamples: true, required: 10, maxRate: 11.75 } })
+    ctl.getAdaptivePrefetchCount(50)
+    expect(ctl.strategy.value.maxFluentRate).toBe(5)
+  })
+  it('算出 3x → 原样展示，不受封顶影响', () => {
+    const { ctl } = setup({ bw: { hasSamples: true, required: 10, maxRate: 3 } })
+    ctl.getAdaptivePrefetchCount(50)
+    expect(ctl.strategy.value.maxFluentRate).toBe(3)
+  })
 })

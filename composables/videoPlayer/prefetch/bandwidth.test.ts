@@ -5,6 +5,7 @@
  * 全部喂确定的样本（`bps` 反推 bytes），断言可手算的读数。
  */
 import { describe, it, expect } from 'vitest'
+import { vi } from 'vitest'
 import { useBandwidthModel } from './bandwidth'
 
 /** 喂一次「每秒 bps 比特、耗时 ms」的下载样本（bytes 由 bps 反推，保证过 100KB 门槛）。 */
@@ -118,6 +119,21 @@ describe('requiredConn / aggregateFeeds / maxFluentRate', () => {
     expect(bw.aggregateFeeds(3, 1)).toBe(false)  // 16e6 < 24e6
   })
 
+  it('maxFluentRate：不可并行源（每 IP 硬顶）按实测峰值聚合，不是 每连接×cap（那会高估成十来倍）', () => {
+    const bw = useBandwidthModel()
+    // 低并发档单条 8Mbps；高并发档每连接 3Mbps（< 8×0.55）→ 判「不可并行」
+    feed(bw, 8e6, 2)
+    feed(bw, 3e6, 6); feed(bw, 3e6, 6)
+    bw.sampleBitrate(1_000_000, 1)   // 码率 8Mbps
+    expect(bw.getAggregateScales()).toBe(false)
+    // 峰值聚合 = aggByConn[6] = 18Mbps → 18/8 = 2.25x；
+    // 旧算法 perConnBps(=6.5Mbps)×cap(12) = 78Mbps → 9.75x，正是面板那个 11.75x 的来历
+    expect(bw.maxFluentRate(12, 1, 1)).toBe(2.25)
+  })
+
+  // 「不可并行且峰值=0」实际到不了：不可并行的判据本身要靠分档样本，而带并发标记的采样必然记账。
+  // `|| perConnBps` 那条退路只是防御（无任何带并发标记采样时判不出不可并行，走不到这）
+
   it('maxFluentRate：无样本按当前倍速取 0.25 档；有样本按 满并发聚合 ÷ (码率×安全)', () => {
     const bw = useBandwidthModel()
     expect(bw.maxFluentRate(6, 1, 1.3)).toBe(1.25)   // round(1.3/0.25)=5 → 1.25
@@ -157,5 +173,30 @@ describe('soloRetainRatio / hasSamples / resetSamples', () => {
     expect(bw.perConnKBps()).toBe(0)
     expect(bw.soloConnKBps()).toBe(0)
     expect(bw.peakAggBps()).toBe(0)
+  })
+})
+
+describe('noteFluentRate / windowedFluentRate：观察窗取最差值', () => {
+  it('窗口内取 min；低样本滚出窗口后读数回升；窗口长度由调用方给（=预加载时长）', () => {
+    let clock = 1000
+    vi.spyOn(performance, 'now').mockImplementation(() => clock)
+    const bw = useBandwidthModel()
+    bw.noteFluentRate(4, 60)
+    bw.noteFluentRate(3, 60)
+    bw.noteFluentRate(3.5, 60)
+    expect(bw.windowedFluentRate()).toBe(3)          // 3 还在窗内 → 承诺 3
+    clock += 61_000                                   // 3 滚出去（窗口 60s）
+    bw.noteFluentRate(3.5, 60)
+    expect(bw.windowedFluentRate()).toBe(3.5)
+  })
+
+  it('窗口变短时按新窗口裁旧样本', () => {
+    let clock = 1000
+    vi.spyOn(performance, 'now').mockImplementation(() => clock)
+    const bw = useBandwidthModel()
+    bw.noteFluentRate(2, 600)
+    clock += 100_000
+    bw.noteFluentRate(5, 30)                          // 窗口缩到 30s → 100s 前的 2 出窗
+    expect(bw.windowedFluentRate()).toBe(5)
   })
 })
