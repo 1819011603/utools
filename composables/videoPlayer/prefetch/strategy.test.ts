@@ -14,6 +14,8 @@ import { COLD_START_CONN_CAP, FAST_SOLO_KBPS } from './tuning'
 interface BwKnobs {
   /** deliveredBps()（实测交付吞吐，bps）；0 = 无交付 */
   delivered?: number
+  /** 逐拍可变的交付读数（优先于 delivered） */
+  deliveredFn?: () => number
   maxRate?: number
   /** windowedFluentRate() 的返回值（0 = 没窗口，策略退回瞬时值） */
   windowed?: number
@@ -42,8 +44,8 @@ function makeBw(k: BwKnobs): BandwidthModel {
     peakAggBps: () => k.peakAgg ?? 0,
     perConnKBps: () => 0,
     segMbps: () => 0,
-    deliveredBps: () => k.delivered ?? 0,
-    lastPositiveDelivered: () => k.delivered ?? 0,
+    deliveredBps: () => k.deliveredFn?.() ?? k.delivered ?? 0,
+    lastPositiveDelivered: () => k.deliveredFn?.() ?? k.delivered ?? 0,
     segBps: () => 8e6,
     getAggregateScales: () => true,
     markConcChange: () => {},
@@ -288,6 +290,17 @@ describe('「缓冲卡住」兜底（消费 ≈ 填充 → 死卡 4 条的自锁
 
 describe('sanity：FAST_SOLO_KBPS 与用例口径一致', () => {
   it('FAST_SOLO_KBPS=500', () => { expect(FAST_SOLO_KBPS).toBe(500) })
+})
+
+describe('maxFluentRate：停取期的「播放消耗」不算能力（实测踩过：稳态恒 1x）', () => {
+  it('首拍活跃交付 24Mbps → 3x；第二拍停取（流量只剩消耗 1.7Mbps）→ 仍是 3x，不跌回 1x', () => {
+    let liveBps = 24e6
+    const { ctl } = setup({ bw: { hasSamples: true, required: 10, deliveredFn: () => liveBps } })
+    ctl.getAdaptivePrefetchCount(10)    // 活跃拍：在补缓存，真实交付 24Mbps
+    liveBps = 1.7e6                     // 停取后流量只剩播放消耗
+    ctl.getAdaptivePrefetchCount(100)   // 停取拍：缓存到目标
+    expect(ctl.strategy.value.maxFluentRate).toBe(3)
+  })
 })
 
 describe('maxFluentRate：实测交付吞吐 ÷ 码率，窗口最差值，封 5x', () => {

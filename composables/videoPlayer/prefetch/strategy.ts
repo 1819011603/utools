@@ -114,6 +114,8 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
   let connUpAt = 0                        // 上次**上调**并发的时刻：爬升按 CONN_RAMP_MS_SLOW/FAST 一档一档来
   let headroomIdle = false                // 缺口已到目标、停取中：恢复要等缺口张开到 5%（迟滞）
   let lastHealthZone: HealthZone = 'healthy'  // 健康区（驱动 UI 与降速守卫）
+  /** 最近一次「预取活跃且真的在交付」的秒桶读数（停取期沿用，见 refreshStrategy） */
+  let lastActiveDelivered = 0
   let lastPlayable = 0                    // 上次量到的有效可播秒数（MSE + 预取缓存）
 
   // 刷新对外策略快照（供 UI 展示与倍速可行性判断）
@@ -121,15 +123,18 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
     /*
      * 「最高流畅倍速」用**实测交付吞吐**，不再用带宽模型外推——外推模型不了每 IP 限速/摊薄，
      * 虚成十来倍是实测过的（面板先后出现过 11.75x / 75x）。每片下载都是真实交付，限速、
-     * 摊薄、硬顶已经全在这个数里。三档：
-     *   · 这一拍有交付 → 用它；
-     *   · 没交付但健康区 healthy → 停取期（缓存满、主动不下载），沿用最近正读数；
-     *   · 没交付且不健康 → 真在卡，记 0（窗口 min 把承诺打下来）。
+     * 摊薄、硬顶已经全在这个数里。**但只有「系统真的在抢带宽」（目标并发 > 0）的秒才等于能力**——
+     * 停取期（缓存到目标、预取主动停工）那一秒的真实流量是「播放消耗」（≈码率本身），
+     * 拿它当能力会把展示钉死在 1x（实测踩过：稳态下恒 1x）。所以：
+     *   · 目标并发 > 0：用本拍交付，并记为「最近活跃读数」；本拍桶还空着 → 沿用它；
+     *   · 目标并发 = 0：一律沿用最近活跃读数（网络真变差由卡顿守卫/健康区兜，那里看的是地面真值）。
      * 首拍什么都没有 → 按当前倍速显示（摆 0 会让人以为连 1x 都撑不住）。
      * 封在播放器最高档：倍速菜单最高就 5 档，更高的数无法兑现，只会误导。
      */
     const live = bw.deliveredBps()
-    const delivered = live > 0 ? live : (lastHealthZone === 'healthy' ? bw.lastPositiveDelivered() : 0)
+    // 只在活跃拍记「最近活跃读数」——停取拍 live>0 也只是播放消耗，记了就把沿用值污染成 1x（回归钉抓过）
+    if (targetConn > 0 && live > 0) lastActiveDelivered = live
+    const delivered = targetConn > 0 ? (live || lastActiveDelivered) : lastActiveDelivered
     const segBps = bw.segBps()
     const sustainable = !bw.hasSamples() || delivered <= 0 || segBps <= 0
       ? Math.max(1, Math.round(getPlaybackRate() / 0.25) * 0.25)
@@ -356,6 +361,7 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
     headroomIdle = false
     lastHealthZone = 'healthy'
     lastPlayable = 0
+    lastActiveDelivered = 0
     strategy.value = {
       perConnKBps: 0, soloKBps: 0, soloRetain: 0, satConn: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0,
       aggregateScales: true, healthZone: 'healthy', playableSecs: 0, avgSegLoadMs: 0, aggKneeConn: 0, fluentWindowSecs: 0,
