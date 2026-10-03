@@ -34,6 +34,7 @@ export interface StrategySnapshot {
   playableSecs: number    // 有效可播秒数（MSE + 预取缓存），倍速决策的经验依据
   avgSegLoadMs: number    // 一片平均下载耗时（ms）：判「每连接够不够快」比看瞬时速度直观
   aggKneeConn: number     // 实测到的聚合拐点并发（0=还没见到拐点）
+  connTrace: string       // 上一拍九级并发的逐级输出与「咬人的那一级」（面板诊断用）
 }
 
 /** 策略与调度共享的少量可变状态（装配层创建，两边读写同一份）。 */
@@ -88,7 +89,7 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
   const strategy = ref<StrategySnapshot>({
     perConnKBps: 0, soloKBps: 0, soloRetain: 0, satConn: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0,
     aggregateScales: true, healthZone: 'healthy', playableSecs: 0,
-    avgSegLoadMs: 0, aggKneeConn: 0,
+    avgSegLoadMs: 0, aggKneeConn: 0, connTrace: '',
   })
 
   // 并发控制的持久状态。**没有「受控并发」这个积分器了**：目标值每拍由 desiredConn 的
@@ -114,6 +115,10 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
   let headroomIdle = false                // 缺口已到目标、停取中：恢复要等缺口张开到 5%（迟滞）
   let lastHealthZone: HealthZone = 'healthy'  // 健康区（驱动 UI 与降速守卫）
   let lastPlayable = 0                    // 上次量到的有效可播秒数（MSE + 预取缓存）
+  // 上一拍的九级诊断：desiredConn 写停取原因，getAdaptivePrefetchCount 逐级追加，refreshStrategy 落快照。
+  // 曾是控制台 [conn] 日志（排查时被删），现挂在面板「目标并发」上——盲猜九级里谁咬人太贵了
+  let connTrace = ''
+  let stopReason = ''
 
   // 刷新对外策略快照（供 UI 展示与倍速可行性判断）
   const refreshStrategy = (targetConn: number) => {
@@ -153,6 +158,7 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
       playableSecs: Math.round(lastPlayable),
       avgSegLoadMs: bw.avgSegLoadMs(),
       aggKneeConn: bw.bestAggConn(),
+      connTrace,
     }
   }
 
@@ -216,8 +222,15 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
     const stop = headroomIdle
       ? gap < Math.max(2 * seg, target * HEADROOM_RESUME_FRAC)   // 已停取：等缺口张开够大才复工
       : gap <= seg                                              // 在取：缺口不足一片就收工
-    if (stop) { headroomIdle = true; return 0 }                  // 已到目标（上层还会再判一次停取）
+    if (stop) {
+      stopReason = headroomIdle
+        ? `停取:缺口${gap.toFixed(1)}v,复工需${Math.max(2 * seg, target * HEADROOM_RESUME_FRAC).toFixed(1)}v`
+        : `停取:缺口${gap.toFixed(1)}v≤一片`
+      headroomIdle = true
+      return 0                                                   // 已到目标（上层还会再判一次停取）
+    }
     headroomIdle = false
+    stopReason = '取中'
     // 还没测出速度：**冷启动帽 与「缺口装得下几片」取小**（旧行为 = base(冷启动估算) 与 ⑦(ceil(gap/seg))
     // 取 min）。只用冷启动帽会在小缺口时多开（评审核到 3 vs 2）。
     if (!bw.hasSamples()) {
@@ -280,7 +293,10 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
      */
     const now = performance.now()
     let target = cachedAhead === undefined ? runtime.hostConcurrencyCap : desiredConn(cachedAhead)
-    if (!bw.hasSamples()) target = Math.min(target, COLD_START_CONN_CAP)     // ①
+    connTrace = `入=${cachedAhead === undefined ? '不限' : `${cachedAhead.toFixed(1)}v`}/${stopReason} 基=${target}`
+    let biter = ''
+    const clamp = (name: string, v: number) => { connTrace += ` ${name}=${v}`; if (v < target) { target = v; biter = name } }
+    if (!bw.hasSamples()) clamp('①冷启动', COLD_START_CONN_CAP)               // ①
     if (cachedAhead !== undefined) {
       const wall = cachedAhead / Math.max(1, getPlaybackRate())
       const targetSecs = effectivePrefetchTarget()
@@ -293,15 +309,17 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
       }
       const notAtTarget = Number.isFinite(targetSecs)
         && targetSecs - cachedAhead > (runtime.segDurSecs || FALLBACK_SEG_SECS)
-      target = Math.min(target, wallConnCap(wall, getSafeWallSecs(), bufferStuck && notAtTarget))   // ②
+      clamp('②阶梯', wallConnCap(wall, getSafeWallSecs(), bufferStuck && notAtTarget))   // ②
       const guard = stallGuard()                                            // ③
-      target = Math.min(target, guard.cap)
-      target = Math.min(target, dilutionCap())                              // ④
-      target = Math.min(target, soloFastCap(wall))                          // ⑤
-      target = Math.min(target, aggregateKneeCap())                         // ⑥
+      clamp('③卡顿', guard.cap)
+      clamp('④摊薄', dilutionCap())                                        // ④
+      clamp('⑤单条快', soloFastCap(wall))                                  // ⑤
+      clamp('⑥拐点', aggregateKneeCap())                                   // ⑥
       // ⑧ 地板只在「真慢型卡顿」时抬——它要压过上面所有的收紧，否则慢源永远补不回来。
       //    冷启动帽不受它影响：那时没样本，stallGuard 直接返回不咬人的值
-      target = Math.max(target, Math.min(runtime.hostConcurrencyCap, guard.floor))
+      const floor = Math.min(runtime.hostConcurrencyCap, guard.floor)
+      connTrace += ` ⑧地板=${floor}`
+      if (floor > target) { target = floor; biter = '⑧地板' }
     }
     /*
      * ⑨ 沉降期：刚减过线程就**只许再降不许升**。
@@ -322,10 +340,11 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
       // 场合，回快档——那里慢爬会把恢复拖很久。
       const urgent = lastHealthZone !== 'healthy' || catchUpFloor() > 0
       const rampMs = urgent ? CONN_RAMP_MS_FAST : CONN_RAMP_MS_SLOW
-      if (now - connDownAt < settleMs) target = lastTargetConn              // 刚减过：等在途排空，读数还不可信
-      else if (now - connUpAt < rampMs) target = lastTargetConn             // 上一档还没站稳，这一拍不动
-      else target = Math.min(target, lastTargetConn + 1)                    // 一档一档来（地板顶格也走这条路）
+      if (now - connDownAt < settleMs) { target = lastTargetConn; biter = '⑨沉降' }   // 刚减过：等在途排空
+      else if (now - connUpAt < rampMs) { target = lastTargetConn; biter = '⑨爬坡' }  // 上一档还没站稳
+      else if (lastTargetConn + 1 < target) { target = lastTargetConn + 1; biter = '⑨+1' } // 一档一档来
     }
+    if (biter) connTrace += ` ⚡${biter}`
     if (target !== lastTargetConn) {
       if (lastTargetConn > 0 && target < lastTargetConn) connDownAt = now
       if (target > lastTargetConn) connUpAt = now
@@ -336,6 +355,9 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
     refreshStrategy(target)
     return target
   }
+
+  /** 面板诊断：上一拍九级的逐级输出（见 connTrace） */
+  const getConnTrace = (): string => connTrace
 
   /** 换视频/CDN 时重置本模块的状态（带宽样本与 lane 由装配层一并重置）。 */
   const reset = () => {
@@ -352,7 +374,7 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
     lastPlayable = 0
     strategy.value = {
       perConnKBps: 0, soloKBps: 0, soloRetain: 0, satConn: 0, segMbps: 0, targetConn: 4, maxFluentRate: 0,
-      aggregateScales: true, healthZone: 'healthy', playableSecs: 0, avgSegLoadMs: 0, aggKneeConn: 0,
+      aggregateScales: true, healthZone: 'healthy', playableSecs: 0, avgSegLoadMs: 0, aggKneeConn: 0, connTrace: '',
     }
   }
 
@@ -368,7 +390,7 @@ export function useConcurrencyStrategy(deps: ConcurrencyStrategyDeps) {
 
   return {
     strategy,
-    effectivePrefetchTarget,
+    effectivePrefetchTarget, getConnTrace,
     updateHealthZone,
     getAdaptivePrefetchCount,
     reset,

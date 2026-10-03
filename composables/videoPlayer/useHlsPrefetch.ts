@@ -134,7 +134,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
     getColdStartConn: () => opts.getColdStartConn?.() ?? 0,
     getLastStallAt: () => opts.getLastStallAt?.() ?? 0,
   })
-  const { strategy, getAdaptivePrefetchCount, resetConcurrencyRamp } = strategyCtl
+  const { strategy, getAdaptivePrefetchCount, resetConcurrencyRamp, getConnTrace } = strategyCtl
 
   // ── 预取调度：取哪一片、怎么取（实现见 ./prefetch/scheduler.ts）──
   const scheduler = usePrefetchScheduler({
@@ -176,7 +176,7 @@ export function useHlsPrefetch(opts: HlsPrefetchOptions) {
   }
 
   return {
-    getAheadBuffered, getCachedAhead, getAdaptivePrefetchCount, createHlsFragLoader,
+    getAheadBuffered, getCachedAhead, getAdaptivePrefetchCount, createHlsFragLoader, getConnTrace,
     triggerAdaptivePrefetch, startOnePrefetch, strategy, resetStrategy, resetConcurrencyRamp,
     tick, primePrefetch, getStuckSegment, laneDead, reviveLanes, purgePlayedSegments, getLoaderActivity,
     isSegCached: (url: string) => cache.getPrefetchedBuf(url) !== null,

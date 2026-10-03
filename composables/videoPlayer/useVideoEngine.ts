@@ -99,7 +99,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
   })
   const {
     getAheadBuffered, getCachedAhead, createHlsFragLoader, triggerAdaptivePrefetch,
-    startOnePrefetch, strategy, resetStrategy, resetConcurrencyRamp, tick: prefetchTick, primePrefetch, getStuckSegment, laneDead,
+    startOnePrefetch, strategy, resetStrategy, resetConcurrencyRamp, tick: prefetchTick, primePrefetch, getStuckSegment, laneDead, getConnTrace,
     reviveLanes, purgePlayedSegments, getLoaderActivity, isSegCached, getSegBuf,
   } = prefetch
 
@@ -411,7 +411,7 @@ export function useVideoEngine(deps: VideoEngineDeps) {
     forceRecomposite, videoTransform,
     // 统计。getHls 只给「读一眼当前档位的编码/帧率/声明码率」这类展示用（见 useVideoContextMenu）——
     // 别拿它去外部驱动 hls.js 的生命周期，那一律走上面几个方法
-    updateHlsStats, getHls: () => hls,
+    updateHlsStats, getHls: () => hls, getConnTrace,
     // 本机播放记录（面板导出用）
     getPlayRecords: playMetrics.loadRecords, clearPlayRecords: playMetrics.clearRecords,
   }
