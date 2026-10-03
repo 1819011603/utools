@@ -21,7 +21,8 @@ logs
 .env
 .env.*
 !.env.example
-package-lock.json
+# 锁文件必须入库：CF Pages 构建机没有它就裸解析依赖树，npm 10.9 的 arborist
+# 会崩（edgesOut null），2026-09-29 起部署全挂。见 docs/pitfalls.md
 # Wrangler
 .wrangler
 

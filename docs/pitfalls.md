@@ -39,3 +39,15 @@
 - **CF Workers 会静默吞掉非标端口**：`wrangler.json` 的 `compatibility_date` 必须 ≥ `2024-09-02`（本地 Node 一切正常），
   但**千万别加 `compatibility_flags: ["allow_custom_ports"]`**——已是默认值，显式声明会让 Pages 部署在**最后一步**失败。
   `nuxt.config.ts` 那个 compatibilityDate 是 Nitro 特性门控，**跟运行时行为无关**
+
+## package-lock.json 必须入库（2026-09-29 起部署全挂的根因）
+
+CF Pages 是 Git 集成、push 即构建。`.gitignore` 曾把 `package-lock.json` 挡在仓库外 → 构建机每次
+**裸解析整棵依赖树**。npm 10.9（node 20 自带）的 arborist 在解析 `@nuxt/cli` 的 peerOptional
+（`@nuxt/schema ^4` vs nuxt 3 的 3.x）时撞上崩溃 bug：`Cannot read properties of null (reading 'edgesOut')`
+——npm error 直接退出，每次必挂。日志里那几条 `npm warn Conflicting peer dependency` 只是提示，
+**不是失败原因**，别被它带偏去查 warn。
+
+修复：lock 入库（`npm install` 按 lock 装，构建机不再现场解析）。判据：CF 构建日志里
+`Installing project dependencies` 之后第一条就是 npm error → 是装依赖挂，不是代码编译挂；
+本地 `npm run build` 通过而 CF 挂 → 先怀疑构建机环境（lock / node 版本 / registry 状态）。
